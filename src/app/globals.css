@@ -1,0 +1,328 @@
+@import "tailwindcss";
+
+/*
+ * ===========================================================================
+ * DESIGN SYSTEM
+ * ===========================================================================
+ * A restrained, data-first system in the register of Linear / Vercel / Stripe:
+ * near-black ground, one accent, semantic colour reserved for meaning rather
+ * than decoration.
+ *
+ * Rules this file encodes:
+ *   • Colour carries information. Emerald means "hit", amber means "near
+ *     miss", muted means "no data". Nothing is coloured to be pretty.
+ *   • Surfaces separate by one step of lightness plus a hairline border, not
+ *     by shadow stacks or heavy radii.
+ *   • Numbers are tabular everywhere, so a column of view counts scans as a
+ *     column instead of a ragged edge.
+ *   • Motion is short (120–200ms) and only ever confirms an interaction.
+ * ===========================================================================
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* --- Surfaces (light) --- */
+  --background: #fbfbfc;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f4f4f6;
+  --surface-hover: #f6f6f8;
+
+  /* --- Text --- */
+  --foreground: #14161a;
+  --muted-foreground: #6a707a;
+  --subtle-foreground: #939aa4;
+
+  /* --- Lines --- */
+  --border: #e6e7ea;
+  --border-strong: #d3d5da;
+
+  /* --- Accent --- */
+  --accent: #5b5bd6;
+  --accent-hover: #4f4fc9;
+  --accent-foreground: #ffffff;
+  --accent-subtle: rgb(91 91 214 / 0.09);
+  --accent-ring: rgb(91 91 214 / 0.35);
+
+  /* --- Semantics --- */
+  --success: #12875a;
+  --success-subtle: rgb(18 135 90 / 0.1);
+  --warning: #9a6400;
+  --warning-subtle: rgb(154 100 0 / 0.1);
+  --danger: #c33a3a;
+  --danger-subtle: rgb(195 58 58 / 0.1);
+
+  /* --- Charts --- */
+  --chart-1: #5b5bd6;
+  --chart-2: #12875a;
+  --chart-3: #9a6400;
+  --chart-4: #b4489a;
+  --chart-5: #2a7fb8;
+  --chart-6: #c33a3a;
+  --chart-grid: #e6e7ea;
+
+  --radius: 0.5rem;
+}
+
+.dark {
+  /* --- Surfaces (dark, the default) --- */
+  --background: #08090a;
+  --surface: #0c0d0f;
+  --surface-raised: #121316;
+  --surface-sunken: #0a0b0c;
+  --surface-hover: #17181c;
+
+  --foreground: #eceef1;
+  --muted-foreground: #8b919b;
+  --subtle-foreground: #5c626b;
+
+  --border: #1c1e22;
+  --border-strong: #2a2d33;
+
+  --accent: #7b7bf0;
+  --accent-hover: #8d8df5;
+  --accent-foreground: #0a0a0f;
+  --accent-subtle: rgb(123 123 240 / 0.14);
+  --accent-ring: rgb(123 123 240 / 0.4);
+
+  --success: #3fcf8e;
+  --success-subtle: rgb(63 207 142 / 0.13);
+  --warning: #e0a02a;
+  --warning-subtle: rgb(224 160 42 / 0.13);
+  --danger: #f2666b;
+  --danger-subtle: rgb(242 102 107 / 0.13);
+
+  --chart-1: #7b7bf0;
+  --chart-2: #3fcf8e;
+  --chart-3: #e0a02a;
+  --chart-4: #e07ac8;
+  --chart-5: #4aa8e8;
+  --chart-6: #f2666b;
+  --chart-grid: #1c1e22;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-hover: var(--surface-hover);
+
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle-foreground: var(--subtle-foreground);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-subtle: var(--accent-subtle);
+
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-grid: var(--chart-grid);
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /*
+   * Every number in this product sits in a column that gets compared to the
+   * column above it. Proportional digits make that comparison harder, so
+   * tabular figures are the default and opting out is the exception.
+   */
+  table,
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  ::selection {
+    background: var(--accent-subtle);
+  }
+
+  /* Focus is always visible, but only for keyboard users. */
+  :focus-visible {
+    outline: 2px solid var(--accent-ring);
+    outline-offset: 2px;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: 9999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--subtle-foreground);
+    background-clip: content-box;
+  }
+}
+
+@layer utilities {
+  /* Hairline that reads as 1px at any DPR without doubling on retina. */
+  .border-hairline {
+    border-width: 1px;
+    border-color: var(--border);
+  }
+
+  .surface-panel {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+  }
+
+  /* Fades the last row of a scroll container so truncation is legible. */
+  .mask-fade-b {
+    mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
+  }
+
+  .animate-in-fade {
+    animation: fade-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .animate-in-rise {
+    animation: rise-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .animate-shimmer {
+    animation: shimmer 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes shimmer {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes content-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Respect the user's motion preference — animations here are confirmations,
+   never content, so removing them costs nothing. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Recharts renders inline SVG we do not control; these keep it on-system. */
+.recharts-cartesian-axis-tick text {
+  fill: var(--subtle-foreground);
+  font-size: 11px;
+}
+.recharts-cartesian-grid line {
+  stroke: var(--chart-grid);
+}
+.recharts-surface:focus,
+.recharts-wrapper:focus {
+  outline: none;
+}

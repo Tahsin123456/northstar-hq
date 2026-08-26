@@ -1,0 +1,477 @@
+/**
+ * Channel synchronisation — the pipeline that turns a YouTube channel into
+ * rows this app can analyse.
+ *
+ *   uploads playlist walk  ->  video statistics  ->  Shorts classification
+ *                          ->  upsert  ->  snapshot  ->  audit run
+ *
+ * QUOTA DISCIPLINE
+ * `search.list` (100 units) is never used here. Walking the uploads playlist
+ * costs 1 unit per 50 videos and `videos.list` another 1 unit per 50, so a
+ * channel with 300 uploads inside the lookback window costs about 13 units out
+ * of a 10,000/day allowance. Paging stops as soon as the playlist — which is
+ * ordered newest-first — passes the lookback cutoff.
+ *
+ * CLASSIFICATION CACHING
+ * Whether a video is a Short is immutable in practice, so a confident verdict
+ * is computed once and never recomputed. Only new videos and previously
+ * *unresolved* ones are re-examined. This is what keeps the redirect probe to
+ * a handful of requests per refresh rather than one per video per refresh.
+ */
+
+import type { Channel, Prisma } from "@prisma/client";
+import { prisma } from "@/server/db";
+import { env } from "@/server/env";
+import { AppError, toAppError, type AppErrorCode } from "@/server/errors";
+import {
+  classifyVideos,
+  MIN_SHORT_CONFIDENCE,
+  QuotaLedger,
+  youtubeClient,
+} from "./youtube";
+import type { VideoClassification, YouTubeChannel, YouTubeVideo } from "./youtube";
+
+const MS_PER_DAY = 86_400_000;
+const MS_PER_HOUR = 3_600_000;
+/** Chunk size for batched writes — keeps SQLite transactions comfortably sized. */
+const WRITE_CHUNK = 50;
+
+export interface SyncOptions {
+  readonly lookbackDays?: number;
+  readonly maxPages?: number;
+  readonly snapshotIntervalMinutes?: number;
+  readonly trigger?: "manual" | "auto" | "initial";
+  /** Re-run classification even for already-confident videos. */
+  readonly forceReclassify?: boolean;
+  /**
+   * Whether the Shorts URL probe may run. Supplied by the caller from the
+   * user's settings; falls back to the environment default when omitted.
+   */
+  readonly probeEnabled?: boolean;
+}
+
+export interface SyncResult {
+  readonly channelId: string;
+  readonly status: "success" | "partial" | "error";
+  readonly videosDiscovered: number;
+  readonly videosUpdated: number;
+  readonly shortsClassified: number;
+  readonly snapshotsWritten: number;
+  readonly quotaUnitsUsed: number;
+  readonly markedUnavailable: number;
+  readonly reachedPlaylistEnd: boolean;
+  readonly error: string | null;
+  /**
+   * The machine code behind `error`, or null on success.
+   *
+   * `error` is a sentence written for a person. A caller that has to *decide*
+   * something from a failure — the scheduled sweep working out whether the
+   * daily quota is gone and it should stop rather than fail twenty-four more
+   * channels the same way — needs the code. Without it the only available
+   * signal is the prose, and a guard that depends on matching prose is one
+   * copy-edit away from silently switching itself off.
+   */
+  readonly errorCode: AppErrorCode | null;
+  readonly durationMs: number;
+}
+
+function toBigInt(value: number | null | undefined): bigint | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return BigInt(Math.max(0, Math.trunc(value)));
+}
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/** Upsert the channel record itself from a freshly fetched YouTube payload. */
+export async function upsertChannel(source: YouTubeChannel): Promise<Channel> {
+  const data = {
+    handle: source.handle,
+    title: source.title,
+    customUrl: source.customUrl,
+    description: source.description,
+    avatarUrl: source.avatarUrl,
+    bannerUrl: source.bannerUrl,
+    country: source.country,
+    subscriberCount: toBigInt(source.subscriberCount),
+    hiddenSubscriberCount: source.hiddenSubscriberCount,
+    viewCount: toBigInt(source.viewCount),
+    videoCount: toBigInt(source.videoCount),
+    uploadsPlaylistId: source.uploadsPlaylistId,
+    channelPublishedAt: source.publishedAt,
+  } satisfies Prisma.ChannelUpdateInput;
+
+  return prisma.channel.upsert({
+    where: { youtubeChannelId: source.channelId },
+    create: { youtubeChannelId: source.channelId, ...data },
+    update: data,
+  });
+}
+
+/**
+ * Fetch, classify and persist a channel's recent uploads.
+ *
+ * Never throws for upstream failures: the outcome is recorded on the channel
+ * row and in a ChannelRefreshRun, and returned as a `SyncResult` with
+ * `status: "error"`. The caller decides how loudly to complain — a background
+ * sweep should not blow up because one channel was deleted.
+ */
+export async function syncChannel(
+  channelRowId: string,
+  options: SyncOptions = {},
+): Promise<SyncResult> {
+  const startedAt = Date.now();
+  const ledger = new QuotaLedger();
+
+  const channel = await prisma.channel.findUnique({ where: { id: channelRowId } });
+  if (!channel) {
+    throw new AppError("NOT_FOUND", "That channel is not in the database.");
+  }
+
+  const run = await prisma.channelRefreshRun.create({
+    data: {
+      channelId: channel.id,
+      status: "running",
+      trigger: options.trigger ?? "manual",
+    },
+  });
+
+  const counters = {
+    videosDiscovered: 0,
+    videosUpdated: 0,
+    shortsClassified: 0,
+    snapshotsWritten: 0,
+    markedUnavailable: 0,
+  };
+  let reachedPlaylistEnd = false;
+
+  try {
+    // ---- 1. Refresh channel-level metadata (subscribers move constantly) ---
+    const [fresh] = await youtubeClient.getChannelsByIds([channel.youtubeChannelId], ledger);
+    if (!fresh) {
+      throw new AppError(
+        "CHANNEL_NOT_FOUND",
+        "YouTube no longer returns this channel. It may have been deleted, renamed or made private.",
+      );
+    }
+    const updatedChannel = await upsertChannel(fresh);
+
+    const uploadsPlaylistId = updatedChannel.uploadsPlaylistId ?? fresh.uploadsPlaylistId;
+    if (!uploadsPlaylistId) {
+      throw new AppError(
+        "UPSTREAM_ERROR",
+        "This channel does not expose a public uploads playlist, so its videos cannot be read.",
+      );
+    }
+
+    // ---- 2. Walk the uploads playlist back to the lookback cutoff ----------
+    const lookbackDays = options.lookbackDays ?? env.lookbackDays;
+    const cutoff = new Date(Date.now() - lookbackDays * MS_PER_DAY);
+
+    const { entries, reachedEnd } = await youtubeClient.listUploads(uploadsPlaylistId, {
+      stopBefore: cutoff,
+      maxPages: options.maxPages ?? env.maxUploadPages,
+      ledger,
+    });
+    reachedPlaylistEnd = reachedEnd;
+    counters.videosDiscovered = entries.length;
+
+    const discoveredIds = [...new Set(entries.map((e) => e.videoId))];
+
+    // ---- 3. Statistics for everything in the window -----------------------
+    const videos = discoveredIds.length > 0
+      ? await youtubeClient.getVideos(discoveredIds, ledger)
+      : [];
+
+    // ---- 4. Classify only what actually needs it --------------------------
+    const existing = await prisma.video.findMany({
+      where: { youtubeVideoId: { in: discoveredIds } },
+      select: {
+        youtubeVideoId: true,
+        classification: true,
+        classificationConfidence: true,
+        isShort: true,
+        classificationMethod: true,
+        classificationReason: true,
+        aspectRatio: true,
+      },
+    });
+    const existingByVideoId = new Map(existing.map((v) => [v.youtubeVideoId, v]));
+
+    const needsClassification = videos.filter((video) => {
+      if (options.forceReclassify) return true;
+      const prior = existingByVideoId.get(video.videoId);
+      if (!prior) return true;
+      // Retry anything we previously failed to resolve — the probe may have
+      // been throttled or offline last time.
+      if (prior.classification === "uncertain") return true;
+      return prior.classificationConfidence < MIN_SHORT_CONFIDENCE;
+    });
+
+    const classifications = await classifyVideos(needsClassification, {
+      probeEnabled: options.probeEnabled,
+    });
+    counters.shortsClassified = classifications.size;
+
+    // ---- 5. Persist videos + snapshots ------------------------------------
+    const snapshotInterval = (options.snapshotIntervalMinutes ?? 360) * 60_000;
+
+    const latestSnapshots = await prisma.video.findMany({
+      where: { youtubeVideoId: { in: discoveredIds } },
+      select: {
+        id: true,
+        youtubeVideoId: true,
+        viewCount: true,
+        snapshots: {
+          orderBy: { capturedAt: "desc" },
+          take: 1,
+          select: { capturedAt: true, viewCount: true },
+        },
+      },
+    });
+    const snapshotStateByVideoId = new Map(
+      latestSnapshots.map((v) => [v.youtubeVideoId, v]),
+    );
+
+    const now = new Date();
+
+    for (const batch of chunk(videos, WRITE_CHUNK)) {
+      const operations: Prisma.PrismaPromise<unknown>[] = [];
+
+      for (const video of batch) {
+        const classification =
+          classifications.get(video.videoId) ??
+          reuseExistingClassification(existingByVideoId.get(video.videoId));
+
+        const videoData = buildVideoData(
+          video,
+          updatedChannel.id,
+          classification,
+          now,
+        );
+
+        operations.push(
+          prisma.video.upsert({
+            where: { youtubeVideoId: video.videoId },
+            create: videoData.create,
+            update: videoData.update,
+          }),
+        );
+        counters.videosUpdated += 1;
+      }
+
+      await prisma.$transaction(operations);
+    }
+
+    // Snapshots run after the upsert so brand-new videos already have a row.
+    const persisted = await prisma.video.findMany({
+      where: { youtubeVideoId: { in: discoveredIds } },
+      select: { id: true, youtubeVideoId: true, publishedAt: true },
+    });
+    const rowIdByVideoId = new Map(persisted.map((v) => [v.youtubeVideoId, v]));
+
+    const snapshotRows: Prisma.VideoSnapshotCreateManyInput[] = [];
+    for (const video of videos) {
+      const row = rowIdByVideoId.get(video.videoId);
+      if (!row) continue;
+
+      const previous = snapshotStateByVideoId.get(video.videoId);
+      const lastCaptured = previous?.snapshots[0]?.capturedAt ?? null;
+      const lastViews = previous?.snapshots[0]?.viewCount ?? null;
+
+      const dueByTime =
+        lastCaptured === null || now.getTime() - lastCaptured.getTime() >= snapshotInterval;
+      const changed = lastViews === null || lastViews !== BigInt(Math.trunc(video.viewCount));
+
+      // Write only when the interval has elapsed *and* something moved. A
+      // stalled video does not need an identical row every six hours.
+      if (!dueByTime || !changed) continue;
+
+      snapshotRows.push({
+        videoId: row.id,
+        viewCount: BigInt(Math.trunc(video.viewCount)),
+        likeCount: toBigInt(video.likeCount),
+        commentCount: toBigInt(video.commentCount),
+        videoAgeHours: Math.max(
+          0,
+          Math.floor((now.getTime() - video.publishedAt.getTime()) / MS_PER_HOUR),
+        ),
+        capturedAt: now,
+      });
+    }
+
+    for (const batch of chunk(snapshotRows, WRITE_CHUNK)) {
+      await prisma.videoSnapshot.createMany({ data: batch });
+      counters.snapshotsWritten += batch.length;
+    }
+
+    // ---- 6. Flag videos YouTube stopped returning -------------------------
+    // Present in the uploads playlist but absent from videos.list means
+    // private, deleted or region-blocked. Keep the row (its history is real
+    // data) but stop counting it.
+    const returnedIds = new Set(videos.map((v) => v.videoId));
+    const vanished = discoveredIds.filter((id) => !returnedIds.has(id));
+    if (vanished.length > 0) {
+      const result = await prisma.video.updateMany({
+        where: { youtubeVideoId: { in: vanished }, isAvailable: true },
+        data: { isAvailable: false, statsFetchedAt: now },
+      });
+      counters.markedUnavailable = result.count;
+    }
+
+    // ---- 7. Close out -----------------------------------------------------
+    await prisma.channel.update({
+      where: { id: channel.id },
+      data: { lastFetchedAt: now, lastFetchStatus: "success", lastFetchError: null },
+    });
+
+    await prisma.channelRefreshRun.update({
+      where: { id: run.id },
+      data: {
+        status: "success",
+        finishedAt: new Date(),
+        videosDiscovered: counters.videosDiscovered,
+        videosUpdated: counters.videosUpdated,
+        shortsClassified: counters.shortsClassified,
+        snapshotsWritten: counters.snapshotsWritten,
+        quotaUnitsUsed: ledger.total,
+      },
+    });
+
+    return {
+      channelId: channel.id,
+      status: "success",
+      ...counters,
+      quotaUnitsUsed: ledger.total,
+      reachedPlaylistEnd,
+      error: null,
+      errorCode: null,
+      durationMs: Date.now() - startedAt,
+    };
+  } catch (caught) {
+    const appError = toAppError(caught);
+    console.error(
+      `[channel-sync] ${channel.youtubeChannelId} failed: ${appError.code} — ${appError.message}`,
+    );
+
+    await prisma.channel
+      .update({
+        where: { id: channel.id },
+        data: { lastFetchStatus: "error", lastFetchError: appError.userMessage },
+      })
+      .catch(() => undefined);
+
+    await prisma.channelRefreshRun
+      .update({
+        where: { id: run.id },
+        data: {
+          status: "error",
+          finishedAt: new Date(),
+          error: appError.userMessage,
+          videosDiscovered: counters.videosDiscovered,
+          videosUpdated: counters.videosUpdated,
+          shortsClassified: counters.shortsClassified,
+          snapshotsWritten: counters.snapshotsWritten,
+          quotaUnitsUsed: ledger.total,
+        },
+      })
+      .catch(() => undefined);
+
+    return {
+      channelId: channel.id,
+      status: "error",
+      ...counters,
+      quotaUnitsUsed: ledger.total,
+      reachedPlaylistEnd,
+      error: appError.userMessage,
+      errorCode: appError.code,
+      durationMs: Date.now() - startedAt,
+    };
+  }
+}
+
+type ExistingClassification = {
+  classification: string;
+  classificationConfidence: number;
+  isShort: boolean;
+  classificationMethod: string;
+  classificationReason: string;
+  aspectRatio: number | null;
+};
+
+/** Carries a cached verdict forward untouched when re-classification is skipped. */
+function reuseExistingClassification(
+  prior: ExistingClassification | undefined,
+): VideoClassification | null {
+  if (!prior) return null;
+  return {
+    videoId: "",
+    classification: prior.classification as VideoClassification["classification"],
+    isShort: prior.isShort,
+    confidence: prior.classificationConfidence,
+    method: prior.classificationMethod as VideoClassification["method"],
+    reason: prior.classificationReason,
+    aspectRatio: prior.aspectRatio,
+  };
+}
+
+function buildVideoData(
+  video: YouTubeVideo,
+  channelRowId: string,
+  classification: VideoClassification | null,
+  now: Date,
+): { create: Prisma.VideoUncheckedCreateInput; update: Prisma.VideoUncheckedUpdateInput } {
+  const shared = {
+    title: video.title,
+    description: video.description.slice(0, 5000),
+    publishedAt: video.publishedAt,
+    durationIso: video.durationIso,
+    durationSeconds: video.durationSeconds ?? 0,
+    thumbnailUrl: video.thumbnailUrl,
+    videoUrl: `https://www.youtube.com/watch?v=${video.videoId}`,
+    viewCount: BigInt(Math.max(0, Math.trunc(video.viewCount))),
+    likeCount: toBigInt(video.likeCount),
+    commentCount: toBigInt(video.commentCount),
+    playerWidth: video.playerWidth,
+    playerHeight: video.playerHeight,
+    isAvailable: true,
+    statsFetchedAt: now,
+  };
+
+  // Only overwrite classification columns when we actually classified. A
+  // skipped (cached) verdict must not be clobbered with defaults.
+  const classificationFields = classification
+    ? {
+        isShort: classification.isShort,
+        classification: classification.classification,
+        classificationConfidence: classification.confidence,
+        classificationMethod: classification.method,
+        classificationReason: classification.reason,
+        classifiedAt: now,
+        aspectRatio: classification.aspectRatio,
+      }
+    : {};
+
+  return {
+    create: {
+      youtubeVideoId: video.videoId,
+      channelId: channelRowId,
+      ...shared,
+      isShort: classification?.isShort ?? false,
+      classification: classification?.classification ?? "uncertain",
+      classificationConfidence: classification?.confidence ?? 0,
+      classificationMethod: classification?.method ?? "none",
+      classificationReason: classification?.reason ?? "Not yet classified.",
+      classifiedAt: classification ? now : null,
+      aspectRatio: classification?.aspectRatio ?? null,
+    },
+    update: {
+      channelId: channelRowId,
+      ...shared,
+      ...classificationFields,
+    },
+  };
+}

@@ -1,0 +1,1030 @@
+// ---------------------------------------------------------------------------
+// Shorts Hit Rate — data model
+//
+// PORTABILITY CONTRACT
+// This schema is deliberately written against the *intersection* of the
+// PostgreSQL and SQLite Prisma connectors so that the exact same model can run
+// on either. Concretely that means:
+//
+//   * no `enum` blocks          -> status/classification fields are `String`,
+//                                  narrowed to union types in TypeScript and
+//                                  validated with Zod at every boundary.
+//   * no scalar list fields     -> SQLite has no array type.
+//   * no `@db.*` native types   -> the two connectors spell them differently.
+//
+// The only provider-specific line in this file is `datasource.provider`, which
+// `scripts/prisma-run.mjs` rewrites on the fly when DATABASE_URL points at a
+// SQLite file. See docs in that script.
+//
+// TENANCY
+// There are two kinds of ownership here, and conflating them is the mistake
+// this schema exists to prevent:
+//
+//   * `Organization` owns everything the TEAM shares — tracked channels,
+//     niches, notes, saved Shorts, hit thresholds, finance. Two people in the
+//     same organization must see identical numbers, so these rows carry
+//     `organizationId` and every query filters on it.
+//   * `AppUser` owns identity, credentials, authorship and purely personal
+//     display preferences. A shared row records its author via `createdById`
+//     for the byline and the audit trail, but the author has no special claim
+//     on it — research must outlive whoever happened to add it.
+//
+// Authorization is never expressed in this file. It lives in one place:
+// src/lib/auth/permissions.ts for the rules, src/server/auth/dal.ts for the
+// enforcement.
+//
+// HISTORICAL SNAPSHOTS
+// `Video` stores the *latest* observed counters so the dashboard stays fast,
+// while `VideoSnapshot` accumulates an append-only time series of the same
+// counters. That split is what makes "views after 24h", "growth velocity" and
+// "hit rate as of date X" possible later without a migration.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// A person with an account.
+///
+/// Identity, credentials and authorship only. Everything a *team* shares —
+/// channels, niches, notes, saved Shorts, thresholds — hangs off
+/// `Organization`, not off this table. That split is the whole point: the Head
+/// of Shorts and a Channel Director must see the same hit rate, and they
+/// cannot if the data belongs to whoever happened to add it.
+model AppUser {
+  id    String  @id @default(cuid())
+  /// Required and unique in practice — it is the login identifier. Kept
+  /// nullable in the column only so the pre-auth row survives the migration;
+  /// the invite/registration path always sets it.
+  email String? @unique
+  name  String?
+
+  /// scrypt hash, encoded as `scrypt$N$r$p$salt$hash`. Null for an invited
+  /// user who has not yet chosen a password — that account cannot log in.
+  /// Never selected into any DTO. See src/server/auth/password.ts.
+  passwordHash String?
+
+  /// "active" | "invited" | "deactivated".
+  ///
+  /// A String rather than an enum, per the portability contract at the top of
+  /// this file; narrowed to a union and validated with Zod at every boundary.
+  status String @default("invited")
+
+  /// Set when an admin deactivates the account. The session DAL checks this on
+  /// *every* request, so revocation takes effect on the next click rather than
+  /// whenever a token happens to expire.
+  deactivatedAt DateTime?
+
+  /// Populated on successful login. Surfaced in the admin user list.
+  lastLoginAt DateTime?
+
+  /// Consecutive failed logins, and the lockout they triggered. Reset to zero
+  /// on any success. This is per-account brute-force protection; per-IP
+  /// throttling lives in RateLimitBucket.
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  settings    UserSettings?
+  memberships OrganizationMember[]
+  sessions    Session[]
+
+  /// Authorship back-relations. Optional on the far side so removing a person
+  /// nulls their byline instead of deleting the team's research.
+  createdNiches          Niche[]
+  createdTrackedChannels TrackedChannel[]
+  createdNotes           Note[]
+  createdCollections     Collection[]
+  createdSavedShorts     SavedShort[]
+  createdFinanceEntries  FinanceEntry[]
+  connectedYouTube       YouTubeConnection[]
+  auditEvents            AuditEvent[]
+  invitationsSent        Invitation[]         @relation("InvitationCreatedBy")
+  passwordResets         PasswordResetToken[]
+
+  @@index([status])
+  @@map("app_users")
+}
+
+// ---------------------------------------------------------------------------
+// ORGANIZATION / TENANCY
+//
+// Northstar HQ is a single-tenant deployment today, but modelling the tenant
+// explicitly is what makes "the team sees the same numbers" true by
+// construction rather than by convention. Every shared resource carries an
+// `organizationId`; every query filters on it; the DAL is the only thing that
+// decides which one is in scope.
+// ---------------------------------------------------------------------------
+
+/// A team workspace.
+model Organization {
+  id   String @id @default(cuid())
+  name String
+
+  /// Lowercased, trimmed `name` — the same portable case-insensitive
+  /// uniqueness trick Niche.slug and Collection.slug already use.
+  slug String @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  settings           OrganizationSettings?
+  members            OrganizationMember[]
+  niches             Niche[]
+  trackedChannels    TrackedChannel[]
+  notes              Note[]
+  collections        Collection[]
+  savedShorts        SavedShort[]
+  invitations        Invitation[]
+  auditEvents        AuditEvent[]
+  youtubeConnections YouTubeConnection[]
+  financeCategories  FinanceCategory[]
+  financeEntries     FinanceEntry[]
+  exchangeRates      ExchangeRate[]
+
+  @@map("organizations")
+}
+
+/// Membership and role.
+///
+/// A join model rather than a `role` column on AppUser so that one person can
+/// belong to several workspaces later without restructuring, and because the
+/// portability contract forbids scalar lists.
+model OrganizationMember {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// One of the role ids in src/lib/auth/roles.ts — "admin",
+  /// "head_of_shorts", "channel_director", "creative_director", "viewer".
+  ///
+  /// Deliberately a String so a new role is a data change plus one entry in the
+  /// role catalogue, never a migration.
+  role String @default("channel_director")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  grants MemberPermissionGrant[]
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+/// An individual permission granted to one member on top of their role.
+///
+/// This is what makes "Directors have no finance access *unless explicitly
+/// granted*" expressible without inventing a bespoke role per person. Grants
+/// are additive only: a grant can widen a role, never narrow it, so the role
+/// remains a floor and there is exactly one way to lose access (change role or
+/// revoke the grant).
+model MemberPermissionGrant {
+  id String @id @default(cuid())
+
+  memberId String
+  member   OrganizationMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  /// A permission key from src/lib/auth/permissions.ts.
+  permission String
+
+  /// Attribution for the audit trail: who widened this person's access.
+  grantedById String?
+  grantedAt   DateTime @default(now())
+
+  @@unique([memberId, permission])
+  @@map("member_permission_grants")
+}
+
+/// Team-wide settings.
+///
+/// A field belongs here if changing it changes a number somebody else sees,
+/// writes to the shared canonical Video rows, or spends the shared YouTube
+/// quota. That is the entire reason this table is separate from UserSettings:
+/// a hit rate must mean the same thing to everyone in the room.
+model OrganizationSettings {
+  id             String       @id @default(cuid())
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Default "is this Short a hit?" view threshold, in views.
+  defaultThreshold Int @default(1000000)
+
+  /// Default trailing window in days (7 / 30 / 90 / 180).
+  defaultPeriodDays Int @default(30)
+
+  /// Shared-quota and shared-canonical-data knobs. Per-user values here would
+  /// let four directors quadruple the API spend and write one append-only
+  /// snapshot series at four different cadences.
+  lookbackDays            Int     @default(400)
+  refreshIntervalMinutes  Int     @default(360)
+  snapshotIntervalMinutes Int     @default(360)
+  shortsProbeEnabled      Boolean @default(true)
+  autoRefreshEnabled      Boolean @default(false)
+
+  /// ISO 4217 code that consolidated financial totals are reported in.
+  /// Individual entries always keep their own currency; see FinanceEntry.
+  baseCurrency String @default("USD")
+
+  /// Display name used on PDF reports and in the app shell.
+  companyName String @default("Northstar Studios")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("organization_settings")
+}
+
+/// A user-defined category for organising tracked channels ("GTA", "Finance").
+///
+/// Deliberately owned by a user rather than global: a niche is one person's
+/// way of carving up their research, and two users tracking the same channel
+/// will categorise it differently. Nothing here is hardcoded — the seeded set
+/// is created on first use and is fully editable.
+model Niche {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Who added this. `@map("userId")` keeps the original physical column, so
+  /// this is a Prisma-level rename and no attribution is rewritten. Nullable
+  /// with SetNull because a shared niche must outlive the person who created it —
+  /// the previous Cascade would have deleted the team's research along with a
+  /// departing account.
+  createdById String?  @map("userId")
+  createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  name String
+
+  /// Lowercased, trimmed `name`. Exists so "GTA" and "gta" cannot both be
+  /// created — case-insensitive uniqueness that works identically on SQLite
+  /// and PostgreSQL, neither of which agrees with the other about how to do
+  /// case-insensitive collation.
+  slug String
+
+  /// Optional accent token (a `--chart-N` index) used for the niche chip.
+  colorIndex Int @default(0)
+
+  /// What counts as a hit in this niche, in views.
+  ///
+  /// Nullable on purpose: null means "inherit the account default" rather than
+  /// silently baking the current default into every niche at creation time. A niche
+  /// that has never been configured should follow the global setting if the
+  /// user later changes it.
+  hitThreshold Int?
+
+  /// Manual ordering in the filter menu; ties break alphabetically.
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  channels TrackedChannelNiche[]
+  notes    Note[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, sortOrder])
+  @@index([createdById])
+  @@map("niches")
+}
+
+/// Join between a user's tracked channel and a niche.
+///
+/// A real relation rather than a delimited string, so a channel can carry
+/// several niches ("Gaming" + "GTA") and filtering is an indexed join instead
+/// of a LIKE scan.
+model TrackedChannelNiche {
+  id String @id @default(cuid())
+
+  trackedChannelId String
+  trackedChannel   TrackedChannel @relation(fields: [trackedChannelId], references: [id], onDelete: Cascade)
+
+  nicheId String
+  niche   Niche  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([trackedChannelId, nicheId])
+  @@index([nicheId])
+  @@map("tracked_channel_niches")
+}
+
+/// Personal display preferences.
+///
+/// A field belongs in this table if and only if changing it cannot change what
+/// anybody else sees. Sort order qualifies. The hit threshold and the trailing
+/// period do not — those are the numbers the team argues about, so they live on
+/// OrganizationSettings and there is exactly one of them.
+model UserSettings {
+  id     String  @id @default(cuid())
+  userId String  @unique
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Default dashboard sort. Column key + direction.
+  defaultSortKey       String @default("hitRate")
+  defaultSortDirection String @default("desc")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_settings")
+}
+
+/// A YouTube channel as a *global* entity, deduplicated by its canonical
+/// channel id. Multiple users can track the same channel without refetching.
+model Channel {
+  id               String  @id @default(cuid())
+  youtubeChannelId String  @unique
+  handle           String?
+  title            String
+  customUrl        String?
+  description      String  @default("")
+  avatarUrl        String?
+  bannerUrl        String?
+  country          String?
+
+  /// Counters are BigInt: channel lifetime views routinely exceed 2^31.
+  subscriberCount       BigInt?
+  hiddenSubscriberCount Boolean @default(false)
+  viewCount             BigInt?
+  videoCount            BigInt?
+
+  /// The "uploads" playlist id; walking it is far cheaper than search.list.
+  uploadsPlaylistId String?
+
+  channelPublishedAt DateTime?
+
+  lastFetchedAt   DateTime?
+  lastFetchStatus String    @default("never")
+  lastFetchError  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  videos         Video[]
+  trackedBy      TrackedChannel[]
+  refreshRuns    ChannelRefreshRun[]
+  notes          Note[]
+  financeEntries FinanceEntry[]
+
+  @@index([lastFetchedAt])
+  @@map("channels")
+}
+
+/// Join between a user and a channel they track. Removing a channel from the
+/// tracker flips `isActive` (soft delete) so the historical Video and
+/// VideoSnapshot rows survive and the channel can be restored intact.
+model TrackedChannel {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Who added this. `@map("userId")` keeps the original physical column, so
+  /// this is a Prisma-level rename and no attribution is rewritten. Nullable
+  /// with SetNull because a tracked channel must outlive the person who created it —
+  /// the previous Cascade would have deleted the team's research along with a
+  /// departing account.
+  createdById String?  @map("userId")
+  createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  /// Optional user-supplied label that overrides the YouTube title in the UI.
+  label String?
+
+  /// "own" | "competitor" — whether Northstar operates this channel.
+  ///
+  /// Lives here rather than on Channel because it describes the *relationship*,
+  /// not the channel: the same YouTube channel is "own" to its operator and
+  /// "competitor" to everyone else. Defaults to "competitor" because almost
+  /// every channel added to a research tracker is one.
+  ownershipType String @default("competitor")
+
+  isActive  Boolean   @default(true)
+  removedAt DateTime?
+
+  addedAt   DateTime @default(now())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  niches TrackedChannelNiche[]
+
+  @@unique([organizationId, channelId])
+  @@index([organizationId, isActive])
+  @@index([organizationId, ownershipType])
+  @@index([createdById])
+  @@map("tracked_channels")
+}
+
+/// One YouTube video. Both Shorts and long-form are stored; `isShort` plus
+/// `classification` decide what the analytics engine is allowed to consume.
+/// Long-form rows are kept so the classifier can be re-run and audited later.
+model Video {
+  id             String  @id @default(cuid())
+  youtubeVideoId String  @unique
+  channelId      String
+  channel        Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  title           String
+  description     String   @default("")
+  publishedAt     DateTime
+  durationIso     String
+  durationSeconds Int
+  thumbnailUrl    String?
+  videoUrl        String
+
+  viewCount    BigInt  @default(0)
+  likeCount    BigInt?
+  commentCount BigInt?
+
+  /// --- Shorts classification (see server/services/youtube/shorts-detector) ---
+  /// `isShort` is the boolean the analytics engine filters on. It is only ever
+  /// true when classification === "short"; "uncertain" videos are excluded
+  /// conservatively so they can never inflate a hit rate.
+  isShort                  Boolean   @default(false)
+  /// "short" | "not_short" | "uncertain"
+  classification           String    @default("uncertain")
+  classificationConfidence Float     @default(0)
+  classificationMethod     String    @default("none")
+  classificationReason     String    @default("")
+  classifiedAt             DateTime?
+
+  /// Aspect-ratio evidence harvested from the oEmbed player, when available.
+  playerWidth  Int?
+  playerHeight Int?
+  aspectRatio  Float?
+
+  /// False once YouTube stops returning the video (deleted / private).
+  isAvailable    Boolean  @default(true)
+  statsFetchedAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  snapshots   VideoSnapshot[]
+  notes       Note[]
+  savedShorts SavedShort[]
+
+  @@index([channelId, publishedAt])
+  @@index([channelId, isShort, publishedAt])
+  @@index([channelId, isShort, viewCount])
+  @@index([publishedAt])
+  @@map("videos")
+}
+
+/// Append-only history of a video's public counters. Written at most once per
+/// `snapshotIntervalMinutes` per video, and only when something changed.
+model VideoSnapshot {
+  id      String @id @default(cuid())
+  videoId String
+  video   Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  viewCount    BigInt
+  likeCount    BigInt?
+  commentCount BigInt?
+
+  /// Age of the video at capture time, in hours. Precomputed so "views after
+  /// 24h / 48h / 7d" is a range scan rather than a join against Video.
+  videoAgeHours Int
+
+  capturedAt DateTime @default(now())
+
+  @@index([videoId, capturedAt])
+  @@index([capturedAt])
+  @@map("video_snapshots")
+}
+
+/// Audit trail for refreshes: what a run cost, what it found, why it failed.
+/// Also the source of truth for "do not hammer the API" back-off decisions.
+model ChannelRefreshRun {
+  id        String  @id @default(cuid())
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  /// "running" | "success" | "partial" | "error"
+  status  String @default("running")
+  trigger String @default("manual")
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  videosDiscovered Int @default(0)
+  videosUpdated    Int @default(0)
+  shortsClassified Int @default(0)
+  snapshotsWritten Int @default(0)
+  quotaUnitsUsed   Int @default(0)
+
+  error String?
+
+  @@index([channelId, startedAt])
+  @@map("channel_refresh_runs")
+}
+
+// ---------------------------------------------------------------------------
+// RESEARCH LAYER
+//
+// Notes, saved Shorts and collections turn the tool from a dashboard into a
+// workflow: discover -> analyse -> save -> note -> revisit. All of it is
+// user-scoped and hangs off the same canonical Channel / Video rows the
+// analytics read, so there is exactly one source of truth for view counts,
+// upload dates and Shorts classification.
+// ---------------------------------------------------------------------------
+
+/// A free-text note attached to a channel, a niche, or a single Short.
+///
+/// Three nullable foreign keys rather than a polymorphic (targetType, targetId)
+/// pair: this keeps real referential integrity and cascade deletes, so a note
+/// can never outlive the thing it annotates or point at a row that no longer
+/// exists. `targetType` is stored alongside purely to make queries and the UI
+/// unambiguous without inspecting which column is null.
+model Note {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Who added this. `@map("userId")` keeps the original physical column, so
+  /// this is a Prisma-level rename and no attribution is rewritten. Nullable
+  /// with SetNull because a team note must outlive the person who created it —
+  /// the previous Cascade would have deleted the team's research along with a
+  /// departing account.
+  createdById String?  @map("userId")
+  createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  /// "channel" | "niche" | "video"
+  targetType String
+
+  channelId String?
+  channel   Channel? @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  nicheId String?
+  niche   Niche?  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  videoId String?
+  video   Video?  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  body String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, targetType])
+  @@index([createdById])
+  @@index([channelId])
+  @@index([nicheId])
+  @@index([videoId])
+  @@map("notes")
+}
+
+/// A user-defined folder for saved Shorts ("GTA Hooks", "Ideas to Recreate").
+model Collection {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Who added this. `@map("userId")` keeps the original physical column, so
+  /// this is a Prisma-level rename and no attribution is rewritten. Nullable
+  /// with SetNull because a collection must outlive the person who created it —
+  /// the previous Cascade would have deleted the team's research along with a
+  /// departing account.
+  createdById String?  @map("userId")
+  createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  name String
+  /// Lowercased name; enforces case-insensitive uniqueness portably.
+  slug String
+
+  colorIndex Int @default(0)
+  sortOrder  Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items SavedShortCollection[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, sortOrder])
+  @@index([createdById])
+  @@map("collections")
+}
+
+/// A bookmarked Short.
+///
+/// The `*AtSave` columns are a deliberate point-in-time capture, not a cache.
+/// They are what lets the UI show "1.2M -> 4.8M": the whole value of saving a
+/// Short early is being able to see, later, how far it ran after you spotted
+/// it. Recomputing those numbers from today's data would destroy exactly the
+/// information the feature exists to preserve.
+model SavedShort {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Who added this. `@map("userId")` keeps the original physical column, so
+  /// this is a Prisma-level rename and no attribution is rewritten. Nullable
+  /// with SetNull because a saved Short must outlive the person who created it —
+  /// the previous Cascade would have deleted the team's research along with a
+  /// departing account.
+  createdById String?  @map("userId")
+  createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  videoId String
+  video   Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  viewsAtSave           BigInt
+  channelMedianAtSave   BigInt?
+  outlierMultipleAtSave Float?
+
+  savedAt DateTime @default(now())
+
+  collections SavedShortCollection[]
+
+  @@unique([organizationId, videoId])
+  @@index([organizationId, savedAt])
+  @@index([createdById])
+  @@map("saved_shorts")
+}
+
+/// Join: a saved Short can sit in several collections, or none at all.
+model SavedShortCollection {
+  id String @id @default(cuid())
+
+  savedShortId String
+  savedShort   SavedShort @relation(fields: [savedShortId], references: [id], onDelete: Cascade)
+
+  collectionId String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([savedShortId, collectionId])
+  @@index([collectionId])
+  @@map("saved_short_collections")
+}
+
+// ---------------------------------------------------------------------------
+// AUTHENTICATION
+//
+// Sessions are database rows, not stateless tokens. That is a deliberate
+// trade: a JWT would avoid a query per request but stays valid until it
+// expires, so a deactivated employee would keep access for hours. Here the row
+// *is* the truth, and revoking it — or deactivating the user — takes effect on
+// the very next request.
+//
+// TOKEN STORAGE
+// The cookie carries a high-entropy random token; this table stores only its
+// SHA-256 hash. A database leak therefore yields no usable session, in exactly
+// the way password hashing protects passwords. The same pattern is used for
+// invitations and password resets.
+// ---------------------------------------------------------------------------
+
+/// One signed-in browser.
+model Session {
+  id String @id @default(cuid())
+
+  userId String
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the random token held in the cookie. Unique so lookup is a
+  /// single indexed read; the raw token is never stored anywhere.
+  tokenHash String @unique
+
+  expiresAt DateTime
+  /// Set on logout, on "sign out everywhere", and when an admin deactivates
+  /// the account. A non-null value fails the session check immediately.
+  revokedAt DateTime?
+
+  /// Rolling activity, used for the idle timeout and the admin's device list.
+  lastSeenAt DateTime @default(now())
+
+  /// Coarse device information for the audit trail. Deliberately just the
+  /// user-agent string and IP — enough to recognise "this was not me", not a
+  /// behavioural log.
+  userAgent String?
+  ipAddress String?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// A pending invitation to join the organization.
+///
+/// The invite flow exists so an admin never handles an employee's password:
+/// they create the account shell and the employee sets their own secret. The
+/// token is single-use and time-boxed.
+model Invitation {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  email String
+  name  String?
+  role  String  @default("channel_director")
+
+  /// SHA-256 of the token embedded in the invitation link.
+  tokenHash String @unique
+
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+
+  createdById String?
+  createdBy   AppUser? @relation("InvitationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, email])
+  @@index([expiresAt])
+  @@map("invitations")
+}
+
+/// A single-use password reset token.
+model PasswordResetToken {
+  id String @id @default(cuid())
+
+  userId String
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String @unique
+
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// Fixed-window counter backing the auth rate limiter.
+///
+/// Stored in the database rather than in process memory on purpose: an
+/// in-memory counter resets on every deploy and is per-instance, so two
+/// containers would each grant the full allowance. This is the one place where
+/// a write per request is worth it.
+model RateLimitBucket {
+  /// "<scope>:<subject>", e.g. "login:ip:203.0.113.7" or
+  /// "login:email:someone@example.com".
+  key String @id
+
+  count           Int      @default(0)
+  windowStartedAt DateTime @default(now())
+  expiresAt       DateTime
+
+  @@index([expiresAt])
+  @@map("rate_limit_buckets")
+}
+
+// ---------------------------------------------------------------------------
+// AUDIT
+//
+// Accountability, not surveillance. The log records administrative and
+// financial actions — who changed a role, who added a channel, who edited an
+// earnings row — and deliberately does NOT record page views, searches, or
+// which dashboards someone looked at.
+// ---------------------------------------------------------------------------
+
+/// One recorded action.
+model AuditEvent {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Null when the actor's account was later deleted, or for system actions
+  /// such as a scheduled sync.
+  actorUserId String?
+  actor       AppUser? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  /// Denormalised so the log stays readable after an account is removed.
+  actorLabel String?
+
+  /// A key from src/lib/audit/actions.ts, e.g. "user.deactivated".
+  action String
+
+  /// What was acted on: "user" | "channel" | "niche" | "finance_entry" | ...
+  targetType  String?
+  targetId    String?
+  targetLabel String?
+
+  /// Human-readable one-line description, written at record time so the log
+  /// does not depend on the target row still existing.
+  summary String
+
+  /// Additional structured context as a JSON string. A String rather than
+  /// Json because the portability contract keeps the schema on the
+  /// SQLite/PostgreSQL intersection.
+  metadata String?
+
+  /// Recorded only for security-relevant events (sign-in, role change,
+  /// deactivation, finance edits) so an anomaly can be investigated. Not
+  /// collected for ordinary reads.
+  ipAddress String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+  @@index([actorUserId])
+  @@map("audit_events")
+}
+
+// ---------------------------------------------------------------------------
+// YOUTUBE ACCOUNT CONNECTIONS
+//
+// OAuth, never passwords. Northstar connects its own Google account, grants
+// read-only YouTube scopes, and Northstar HQ stores the resulting tokens
+// encrypted at rest (AES-256-GCM, key from APP_ENCRYPTION_KEY). Tokens are
+// never sent to the browser and never appear in any DTO.
+// ---------------------------------------------------------------------------
+
+/// A connected Google account authorising access to one or more own channels.
+model YouTubeConnection {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// The Google account that granted access. Shown in the admin UI so it is
+  /// obvious whose authorisation a sync depends on.
+  googleAccountEmail String?
+  googleUserId       String?
+
+  /// The YouTube channel this connection owns, once resolved.
+  youtubeChannelId String?
+  channelTitle     String?
+
+  /// AES-256-GCM ciphertext. Never selected into a DTO, never logged.
+  accessTokenEnc  String?
+  refreshTokenEnc String?
+
+  /// When the current access token stops working; the refresh token is used to
+  /// mint a new one.
+  accessTokenExpiresAt DateTime?
+
+  /// Space-separated scopes actually granted, so the app can detect a
+  /// downgrade rather than failing opaquely at call time.
+  scope String @default("")
+
+  /// "connected" | "needs_reauth" | "revoked"
+  status     String    @default("connected")
+  lastError  String?
+  lastSyncAt DateTime?
+
+  connectedById String?
+  connectedBy   AppUser? @relation(fields: [connectedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, youtubeChannelId])
+  @@index([organizationId, status])
+  @@map("youtube_connections")
+}
+
+// ---------------------------------------------------------------------------
+// FINANCE
+//
+// Revenue and expenses share one table because every question the product asks
+// — net profit, margin, profit by channel, revenue vs expenses over time — is
+// a difference between two sums over the same dimensions. Two tables would
+// mean two period filters, two currency conversions and two chances to drift.
+//
+// MONEY REPRESENTATION
+// Amounts are integer minor units (cents/kuruş), never floats: 0.1 + 0.2 is
+// not 0.3 in binary floating point, and a financial total that is off by a
+// cent is a bug report. The original currency is always preserved alongside
+// the converted base figure, so no conversion ever destroys the source record.
+// ---------------------------------------------------------------------------
+
+/// A configurable revenue or expense category.
+model FinanceCategory {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// "revenue" | "expense" — which side of the ledger this category belongs
+  /// to. Kept on the category so the entry form can only offer sensible
+  /// options.
+  kind String
+
+  name String
+  /// Lowercased name; portable case-insensitive uniqueness within a kind.
+  slug String
+
+  sortOrder  Int     @default(0)
+  /// Archived rather than deleted, so historical entries keep their label.
+  isArchived Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries FinanceEntry[]
+
+  @@unique([organizationId, kind, slug])
+  @@index([organizationId, kind, sortOrder])
+  @@map("finance_categories")
+}
+
+/// One financial transaction.
+model FinanceEntry {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// "revenue" | "expense". Mirrors the category's kind; stored on the entry
+  /// so aggregate queries never need the join.
+  kind String
+
+  /// The day the money moved, normalised to UTC midnight so period bucketing
+  /// is not sensitive to the reporter's timezone.
+  occurredOn DateTime
+
+  /// Original amount in minor units, and the currency it was actually
+  /// transacted in. These two columns are the source of truth and are never
+  /// rewritten by a later rate change.
+  amountMinor Int
+  currency    String
+
+  /// The same amount converted into the organization's base currency at the
+  /// time of entry, plus the rate used. Stored rather than computed so a
+  /// historical report does not silently change when a rate is updated.
+  baseAmountMinor Int
+  baseCurrency    String
+  exchangeRate    Float  @default(1)
+
+  categoryId String?
+  category   FinanceCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  /// Null means company-wide rather than attributable to one channel.
+  channelId String?
+  channel   Channel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  /// Revenue only: "youtube_ads", "sponsorship", "affiliate", ... Free text so
+  /// platforms are not a migration.
+  platform String?
+
+  /// Expense only: who was paid.
+  vendor String?
+
+  notes String?
+
+  createdById String?
+  createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, kind, occurredOn])
+  @@index([organizationId, channelId, occurredOn])
+  @@index([categoryId])
+  @@map("finance_entries")
+}
+
+/// An admin-maintained conversion rate.
+///
+/// Deliberately manual by default: silently inventing a rate from an unnamed
+/// source would put unverifiable numbers in a financial report. If a rate
+/// provider is configured it fills this table, and every entry still records
+/// the rate it actually used.
+model ExchangeRate {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// ISO 4217 codes. `rate` converts 1 unit of `fromCurrency` into
+  /// `toCurrency`.
+  fromCurrency String
+  toCurrency   String
+  rate         Float
+
+  /// Where the number came from: "manual" | "<provider name>".
+  source String @default("manual")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, fromCurrency, toCurrency])
+  @@map("exchange_rates")
+}

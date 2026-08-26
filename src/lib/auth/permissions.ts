@@ -1,0 +1,237 @@
+/**
+ * =========================================================================
+ * AUTHORIZATION — THE SINGLE SOURCE OF TRUTH
+ * =========================================================================
+ *
+ * Every "is this person allowed to…" question in Northstar HQ is answered
+ * here. Nothing else in the codebase should compare a role string.
+ *
+ * WHY ONE FILE
+ * Permission checks scattered across components rot in a specific way: the
+ * sidebar hides Finance, someone later adds a link elsewhere, and the API is
+ * still open. Centralising the *rules* means the server enforcement and the UI
+ * affordances are derived from the same table, so they cannot disagree — and
+ * adding a role is a data change in this file rather than a hunt through
+ * screens.
+ *
+ * WHERE IT IS ENFORCED
+ * This module is isomorphic and deliberately contains no I/O, so the client can
+ * use it to decide what to render. That is a convenience, never a boundary:
+ * hiding a button stops nobody. The real check runs server-side in
+ * `src/server/auth/dal.ts` (`requirePermission`), which every route handler
+ * calls before touching data. If a permission is not enforced there, it is not
+ * enforced.
+ *
+ * ROLES ARE A FLOOR, GRANTS WIDEN
+ * A member's effective permissions are their role's set plus any individual
+ * grants. Grants are additive only — there is no "deny" — so access can always
+ * be reasoned about as a union, and revoking means removing a grant or changing
+ * the role. This is what lets a Channel Director be given Finance access
+ * without inventing a bespoke role for them.
+ */
+
+/** Every capability the product recognises. */
+export const PERMISSIONS = [
+  // --- Analytics & research -------------------------------------------------
+  /** See the dashboard, channels, charts, Winners, Outliers, Our vs Market. */
+  "analytics.view",
+  /** Write notes, save Shorts, manage collections. */
+  "research.write",
+  /** Generate a branded PDF report. */
+  "reports.generate",
+
+  // --- Operational ----------------------------------------------------------
+  /** Add, rename, re-scope and remove tracked channels. */
+  "channels.manage",
+  /** Create and edit niches, including their hit thresholds. */
+  "niches.manage",
+  /** Trigger a refresh / sync run by hand. */
+  "sync.trigger",
+
+  // --- Finance --------------------------------------------------------------
+  /** Read revenue, expenses, profit and margins. */
+  "finance.view",
+  /** Create, edit and delete financial entries and categories. */
+  "finance.manage",
+
+  // --- Administration -------------------------------------------------------
+  /** Invite, deactivate and reactivate people; change their roles. */
+  "users.manage",
+  /** Read the audit log. */
+  "audit.view",
+  /** Connect and disconnect YouTube/Google accounts. */
+  "youtube.manage",
+  /** Change organization-wide settings, including sync cadence and currency. */
+  "settings.manage",
+] as const;
+
+export type Permission = (typeof PERMISSIONS)[number];
+
+/** Roles ship as data so a new one never requires a migration. */
+export const ROLES = [
+  "admin",
+  "head_of_shorts",
+  "channel_director",
+  "creative_director",
+] as const;
+
+export type Role = (typeof ROLES)[number];
+
+export interface RoleDefinition {
+  readonly id: Role;
+  readonly label: string;
+  readonly description: string;
+  readonly permissions: readonly Permission[];
+}
+
+/** Everything an admin can do — kept as a derived list so it cannot drift. */
+const ALL_PERMISSIONS: readonly Permission[] = PERMISSIONS;
+
+/**
+ * What analytics work looks like for everyone who is not an administrator:
+ * read the numbers, annotate them, export them.
+ */
+const RESEARCH_BASELINE: readonly Permission[] = [
+  "analytics.view",
+  "research.write",
+  "reports.generate",
+];
+
+export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
+  admin: {
+    id: "admin",
+    label: "Admin",
+    description:
+      "Full access, including finance, user administration, YouTube connections and system settings.",
+    permissions: ALL_PERMISSIONS,
+  },
+  head_of_shorts: {
+    id: "head_of_shorts",
+    label: "Head of Shorts",
+    description:
+      "Runs the Shorts operation: full analytics and research, plus the channel, niche and sync controls the job needs. No finance, user administration or system settings.",
+    permissions: [
+      ...RESEARCH_BASELINE,
+      // Operational capabilities. Deliberately included: someone accountable
+      // for Shorts performance who cannot add a competitor channel to track,
+      // or set the hit threshold for their own niche, cannot actually do the
+      // job. None of these appear in the role's excluded list, and every one
+      // of them is reversible and audited.
+      "channels.manage",
+      "niches.manage",
+      "sync.trigger",
+    ],
+  },
+  channel_director: {
+    id: "channel_director",
+    label: "Channel Director",
+    description:
+      "Analytics and competitor research for the channels they work on, with notes, saved Shorts and reports.",
+    permissions: RESEARCH_BASELINE,
+  },
+  creative_director: {
+    id: "creative_director",
+    label: "Creative Director",
+    description:
+      "Analytics and creative research, with notes, saved Shorts and reports. No administrative or financial access.",
+    permissions: RESEARCH_BASELINE,
+  },
+};
+
+/** Ordered for display: most privileged first. */
+export const ROLE_ORDER: readonly Role[] = [
+  "admin",
+  "head_of_shorts",
+  "channel_director",
+  "creative_director",
+];
+
+export function isRole(value: string): value is Role {
+  return (ROLES as readonly string[]).includes(value);
+}
+
+export function isPermission(value: string): value is Permission {
+  return (PERMISSIONS as readonly string[]).includes(value);
+}
+
+/**
+ * Falls back to the least-privileged role rather than throwing.
+ *
+ * An unrecognised role string in the database — a downgrade, a typo, a
+ * hand-edited row — must not grant more access than intended. Failing closed
+ * here means the worst case is somebody sees too little and says so.
+ */
+export function roleDefinition(role: string): RoleDefinition {
+  return isRole(role) ? ROLE_DEFINITIONS[role] : ROLE_DEFINITIONS.creative_director;
+}
+
+/** The permissions a member actually has: their role's set, widened by grants. */
+export function effectivePermissions(
+  role: string,
+  grants: readonly string[] = [],
+): ReadonlySet<Permission> {
+  const result = new Set<Permission>(roleDefinition(role).permissions);
+  for (const grant of grants) {
+    if (isPermission(grant)) result.add(grant);
+  }
+  return result;
+}
+
+/**
+ * The one predicate the whole app asks.
+ *
+ * Pure and synchronous so a component can call it during render and a route
+ * handler can call it before a query, with no chance of the two disagreeing.
+ */
+export function can(
+  actor: { readonly role: string; readonly grants?: readonly string[] },
+  permission: Permission,
+): boolean {
+  return effectivePermissions(actor.role, actor.grants ?? []).has(permission);
+}
+
+/** True when the actor holds every listed permission. */
+export function canAll(
+  actor: { readonly role: string; readonly grants?: readonly string[] },
+  permissions: readonly Permission[],
+): boolean {
+  const held = effectivePermissions(actor.role, actor.grants ?? []);
+  return permissions.every((permission) => held.has(permission));
+}
+
+/** True when the actor holds at least one of the listed permissions. */
+export function canAny(
+  actor: { readonly role: string; readonly grants?: readonly string[] },
+  permissions: readonly Permission[],
+): boolean {
+  const held = effectivePermissions(actor.role, actor.grants ?? []);
+  return permissions.some((permission) => held.has(permission));
+}
+
+/**
+ * Permissions that can be handed to an individual on top of their role.
+ *
+ * `users.manage` is excluded on purpose: the ability to create administrators
+ * is the one capability that lets a person escalate themselves without limit,
+ * so it may only arrive with the Admin role — a deliberate, visible decision —
+ * never as a quiet checkbox on somebody's profile.
+ */
+export const GRANTABLE_PERMISSIONS: readonly Permission[] = PERMISSIONS.filter(
+  (permission) => permission !== "users.manage",
+);
+
+/** Human-readable labels for the admin UI and the audit log. */
+export const PERMISSION_LABELS: Readonly<Record<Permission, string>> = {
+  "analytics.view": "View analytics",
+  "research.write": "Write notes & save Shorts",
+  "reports.generate": "Generate PDF reports",
+  "channels.manage": "Manage tracked channels",
+  "niches.manage": "Manage niches & thresholds",
+  "sync.trigger": "Trigger data syncs",
+  "finance.view": "View finance",
+  "finance.manage": "Manage finance",
+  "users.manage": "Manage users & roles",
+  "audit.view": "View audit log",
+  "youtube.manage": "Manage YouTube connections",
+  "settings.manage": "Manage system settings",
+};
