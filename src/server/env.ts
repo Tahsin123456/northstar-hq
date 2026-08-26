@@ -104,7 +104,33 @@ function normalizeDatabaseUrl(rawUrl: string): string {
   return `file:${absolute}`;
 }
 
-const parsed = envSchema.safeParse(process.env);
+/**
+ * An empty environment variable means "not set".
+ *
+ * Hosting platforms create variables in bulk — Vercel's import screen reads
+ * `.env.example` and pre-creates every key it finds there, so a real
+ * deployment arrives with a dozen keys present and blank. Handing those to Zod
+ * as empty strings produces two bad outcomes: a numeric setting coerces "" to
+ * 0 and fails its own minimum, refusing to boot over a variable nobody chose;
+ * and a boolean-ish setting reads "" as false, switching a feature off with
+ * nothing to announce it.
+ *
+ * Stripping blanks before parsing makes absence and emptiness the same thing,
+ * which is what an operator means by leaving a box empty. Genuinely required
+ * values still fail — they simply fail as "required" rather than as "invalid",
+ * which is the more useful message.
+ */
+function withoutBlanks(source: NodeJS.ProcessEnv): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value !== "string") continue;
+    if (value.trim() === "") continue;
+    result[key] = value;
+  }
+  return result;
+}
+
+const parsed = envSchema.safeParse(withoutBlanks(process.env));
 
 if (!parsed.success) {
   const issues = parsed.error.issues
@@ -112,7 +138,8 @@ if (!parsed.success) {
     .join("\n");
   throw new Error(
     `Invalid environment configuration:\n${issues}\n\n` +
-      "Copy .env.example to .env.local and fill in the values.",
+      "Locally: copy .env.example to .env.local and fill in the values.\n" +
+      "On a hosted deployment: check the environment variables in your project settings.",
   );
 }
 
