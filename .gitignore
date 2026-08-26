@@ -57,3 +57,6 @@ next-env.d.ts
 *.sqlite
 *.sqlite3
 /prisma/.generated/
+
+# Generated production secrets, for pasting into the host. Never committed.
+VERCEL-SETTINGS.local.txt
