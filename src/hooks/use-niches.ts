@@ -1,6 +1,7 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
+import * as React from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { OwnershipType } from "@/lib/dto";
 import { useInvalidateDataset } from "./use-dataset";
@@ -14,8 +15,45 @@ import { useInvalidateDataset } from "./use-dataset";
  * per-screen cache to keep in step.
  */
 
+/**
+ * The niche catalogue on its own, for screens that need the list without the
+ * tracker.
+ *
+ * Everywhere else reads niches out of `useDataset`, which is right when the page
+ * is already showing channels and videos. Admin › Employees is not: it wants the
+ * names and colours of ~10 niches to draw an assignment checklist, and pulling
+ * every channel's full view history to get them would be a heavy fetch for a
+ * screen that renders none of it. `/api/niches` sits behind `analytics.view`,
+ * which the Admin role carries along with everything else.
+ */
+export const NICHES_KEY = ["niches"] as const;
+
+export function useNicheList() {
+  return useQuery({
+    queryKey: NICHES_KEY,
+    queryFn: api.listNiches,
+  });
+}
+
+/**
+ * Invalidates both readers of the catalogue.
+ *
+ * Anything that adds, renames, retires or re-thresholds a niche changes the
+ * dataset AND the standalone list above. Refreshing only the first would leave
+ * the assignment checklist offering a niche that no longer exists, or a name
+ * nobody uses any more, for as long as its cache stayed fresh.
+ */
+function useInvalidateNicheCatalogue() {
+  const invalidateDataset = useInvalidateDataset();
+  const queryClient = useQueryClient();
+  return React.useCallback(() => {
+    void invalidateDataset();
+    void queryClient.invalidateQueries({ queryKey: NICHES_KEY });
+  }, [invalidateDataset, queryClient]);
+}
+
 export function useCreateNiche() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
     mutationFn: (name: string) => api.createNiche(name),
     onSuccess: () => invalidate(),
@@ -23,7 +61,7 @@ export function useCreateNiche() {
 }
 
 export function useRenameNiche() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => api.renameNiche(id, name),
     onSuccess: () => invalidate(),
@@ -31,7 +69,7 @@ export function useRenameNiche() {
 }
 
 export function useUpdateNicheThreshold() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
     mutationFn: ({ id, hitThreshold }: { id: string; hitThreshold: number | null }) =>
       api.setNicheThreshold(id, hitThreshold),
@@ -40,7 +78,7 @@ export function useUpdateNicheThreshold() {
 }
 
 export function useDeleteNiche() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
     mutationFn: (id: string) => api.deleteNiche(id),
     onSuccess: () => invalidate(),

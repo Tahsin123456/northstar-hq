@@ -8,6 +8,7 @@ import {
   recordAudit,
   type AuditEntryDTO,
 } from "@/server/audit/audit-service";
+import { actorCan } from "@/server/auth/dal";
 import { revokeAllSessionsForUser } from "@/server/auth/session";
 import {
   GRANTABLE_PERMISSIONS,
@@ -15,8 +16,10 @@ import {
   isRole,
   roleDefinition,
 } from "@/lib/auth/permissions";
+import { periodContaining } from "@/lib/payroll/payroll-engine";
 import { createInvitation } from "./auth-service";
 import { isEmailConfigured, sendInvitationEmail } from "./email-service";
+import { getPeriodForOrganization, type PayrollPeriodStatus } from "./payroll-service";
 import { getCurrentOrgId, getScope } from "./user-service";
 
 /**
@@ -97,13 +100,54 @@ export interface InviteResult {
   readonly emailConfigured: boolean;
 }
 
+/**
+ * The payroll headline for the admin dashboard, and nothing more.
+ *
+ * ABSENT — not null, not zeroed — for a caller without `payroll.view`. The same
+ * discipline `EmployeeProfile` exists to enforce: a figure that is not on the
+ * object cannot be logged, cached or rendered by mistake, whereas a `null` that
+ * means "not allowed" is one careless `?? 0` away from being printed as a
+ * salary bill of nothing.
+ *
+ * Deliberately three numbers and a label. This is a summary that says "the
+ * month is running at about this much, paid on this date"; the per-employee
+ * breakdown, the adjustments and the payment states all live on the Payroll
+ * page, which is a click away.
+ */
+export interface AdminPayrollSummary {
+  readonly year: number;
+  /** 1-12. */
+  readonly month: number;
+  /** "August 2025". */
+  readonly label: string;
+  readonly status: PayrollPeriodStatus;
+  /** True while the figures are still moving — an open month is recalculated. */
+  readonly isDraft: boolean;
+  readonly totalMinor: number;
+  readonly currency: string;
+  /** True when the run mixes currencies and the total is therefore not one. */
+  readonly currencyMixed: boolean;
+}
+
 export interface AdminOverview {
   readonly users: {
     readonly total: number;
     readonly active: number;
     readonly invited: number;
+    /** Accepted an invitation, chose a password, waiting to be let in. */
+    readonly pendingApproval: number;
     readonly deactivated: number;
   };
+  /**
+   * Invitations still outstanding — the rows the Users tab lists.
+   *
+   * NOT the same fact as `users.invited`, which counts account shells: an
+   * invitation that carries niche assignments creates one so the MemberNiche
+   * rows have something to hang off, and an invitation without niches creates
+   * nothing at all. Anything that means to say "N people have been invited"
+   * wants this number, because it is the one the invitations table shows.
+   */
+  readonly invitations: { readonly outstanding: number };
   readonly sessions: { readonly active: number };
   readonly channels: {
     readonly own: number;
@@ -122,6 +166,12 @@ export interface AdminOverview {
     readonly failuresLast24h: number;
   };
   readonly recentActivity: readonly AuditEntryDTO[];
+  /**
+   * ABSENT for a caller without `payroll.view` — see `AdminPayrollSummary`.
+   * `recentActivity` empties for a caller without `audit.view` in the same
+   * spirit, one field per capability rather than one 403 for the page.
+   */
+  readonly payroll?: AdminPayrollSummary;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,16 +182,30 @@ export const inviteMemberSchema = z.object({
   email: z.string().trim().min(1, "Enter an email address.").max(320),
   name: z.string().trim().max(120).optional(),
   role: z.string().trim().min(1, "Choose a role."),
+  /**
+   * The niches a niche-scoped invitee will be able to see.
+   *
+   * Optional because most invitations do not need it — a Head or an admin sees
+   * everything, and an editor can be assigned later. Capped at the same 20 the
+   * channel assignment uses; a bigger list is a mistake, not a use case.
+   */
+  nicheIds: z.array(z.string().trim().min(1)).max(20).optional(),
 });
 
 export const updateMemberSchema = z
   .object({
     role: z.string().trim().min(1).optional(),
     /**
-     * Only the two states an admin can put someone in. "invited" is not
-     * settable: it describes an account that has never chosen a password, and
-     * an admin flipping somebody back to it would produce an account nobody
-     * can sign into and no link to fix it with.
+     * Only the two states an admin can put someone in. "invited" and
+     * "pending_approval" are not settable: they describe an account that has
+     * never chosen a password, and one that has but has not been let in yet.
+     * Flipping somebody back into either would produce an account nobody can
+     * sign into and no link to fix it with.
+     *
+     * "active" here means REACTIVATION — restoring access to an account that
+     * had it and lost it. It is not approval. Letting somebody through the
+     * pending gate is `approveEmployee`, and the guard in `updateMember` sends
+     * this call there rather than doing it twice; see the note beside it.
      */
     status: z.enum(["active", "deactivated"]).optional(),
   })
@@ -354,7 +418,14 @@ export async function inviteMember(
   // that could name its own `organizationId` would be a cross-tenant invite
   // API, and one that could name its own inviter would forge the audit trail.
   const created = await createInvitation(
-    { email: input.email, name: input.name ?? null, role: input.role },
+    {
+      email: input.email,
+      name: input.name ?? null,
+      role: input.role,
+      // Passed straight through: the service validates every id against this
+      // organization before writing anything, so the route never has to.
+      nicheIds: input.nicheIds,
+    },
     {
       organizationId,
       actorUserId: actor.userId,
@@ -519,6 +590,27 @@ export async function updateMember(
     // Scoped lookup, so a valid id belonging to another organization is a 404
     // here rather than an edit.
     if (!member) throw errors.notFound("user");
+
+    // THE APPROVAL GATE IS NOT THIS ENDPOINT'S — one path lets somebody in.
+    //
+    // `status: "active"` on a `pending_approval` account would land in the
+    // reactivation branch below and quietly do the work of `approveEmployee`:
+    // same end state, different audit key, and no reject counterpart. Two paths
+    // for one decision means "who let this person in?" has to be asked twice —
+    // once of `employee.approved` and once of `user.reactivated` — and the
+    // second answer looks like somebody restoring an old account rather than
+    // admitting a new person.
+    //
+    // Refused rather than delegated, because the two calls are not
+    // interchangeable: approval is a POST with no body precisely so it cannot
+    // carry a role, and this endpoint can. Refusing before any write also means
+    // a request combining a role change with an approval fails whole rather
+    // than applying half of itself.
+    if (input.status === "active" && member.user.status === "pending_approval") {
+      throw errors.invalidInput(
+        "That account is waiting for approval, not deactivated. Approve or reject it from the Employees screen — that is the path that records who let them in.",
+      );
+    }
 
     const previousRole = member.role;
     const wasActive = member.user.status === "active" && !member.user.deactivatedAt;
@@ -776,7 +868,60 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** How many recent audit entries the dashboard shows before "see all". */
 const RECENT_ACTIVITY_LIMIT = 10;
 
-export async function getAdminOverview(): Promise<AdminOverview> {
+/**
+ * This month's payroll headline, for an admin who is entitled to it.
+ *
+ * ONE CALCULATION, NOT A SECOND ONE. The figure comes from
+ * `getPeriodForOrganization` — the same function the Payroll page reads and the
+ * same one the Telegram message is built from. A summary tile that ran its own
+ * cheaper sum would eventually disagree with the page it links to, and the
+ * disagreement would be about salaries.
+ *
+ * That makes this the expensive part of the overview: an open month is
+ * recalculated from every Short published in it. It is only ever run for a
+ * caller who has cleared `payroll.view`, and it is the same cost the Payroll
+ * page itself pays, so the trade is a slower dashboard for an admin rather than
+ * a number nobody can reconcile.
+ *
+ * THE SECOND LOCK. The route decides entitlement and passes it in; this
+ * re-asks. `getActor` is memoised per request, so the check is free, and the
+ * one thing that must never happen — a salary reaching a caller who may not
+ * read one — should not rest on a single boolean being threaded correctly
+ * through a call site. Fails closed: no permission, no figures, no error.
+ */
+async function loadPayrollSummary(organizationId: string): Promise<AdminPayrollSummary | null> {
+  if (!(await actorCan("payroll.view"))) return null;
+
+  const period = await getPeriodForOrganization(organizationId, periodContaining(Date.now()));
+
+  return {
+    year: period.year,
+    month: period.month,
+    label: period.label,
+    status: period.status,
+    isDraft: period.isDraft,
+    totalMinor: period.totals.totalMinor,
+    currency: period.totals.currency,
+    currencyMixed: period.totals.currencyMixed,
+  };
+}
+
+/**
+ * @param options.includePayroll Whether the caller holds `payroll.view`. Comes
+ * from the route, which is where the permission decision is legible — never
+ * from a request body, and never assumed from `users.manage`: the two are
+ * separate capabilities and only an admin holds the payroll one.
+ * @param options.includeSensitiveAuditMetadata The same permission asked about
+ * different data: whether the amounts a pay entry carries in its audit metadata
+ * survive into `recentActivity`. Separate from `includePayroll` because they
+ * gate separate reads — one decides whether payroll is computed, this one
+ * decides what an audit row is allowed to say — and a caller that dropped the
+ * payroll tile for any other reason must not thereby publish salaries.
+ */
+export async function getAdminOverview(options: {
+  includePayroll: boolean;
+  includeSensitiveAuditMetadata: boolean;
+}): Promise<AdminOverview> {
   const organizationId = await getCurrentOrgId();
   const now = new Date();
   const dayAgo = new Date(now.getTime() - DAY_MS);
@@ -788,6 +933,7 @@ export async function getAdminOverview(): Promise<AdminOverview> {
 
   const [
     memberStatuses,
+    outstandingInvitations,
     activeSessions,
     channelCounts,
     niches,
@@ -796,10 +942,17 @@ export async function getAdminOverview(): Promise<AdminOverview> {
     runsLast24h,
     failuresLast24h,
     recent,
+    payroll,
   ] = await Promise.all([
     prisma.organizationMember.findMany({
       where: { organizationId },
       select: { user: { select: { status: true, deactivatedAt: true } } },
+    }),
+    // The same filter `listAdminDirectory` lists by, expired ones included, so
+    // the tile and the table it links to cannot report different numbers of
+    // outstanding invitations.
+    prisma.invitation.count({
+      where: { organizationId, acceptedAt: null, revokedAt: null },
     }),
     prisma.session.count({
       where: {
@@ -835,18 +988,35 @@ export async function getAdminOverview(): Promise<AdminOverview> {
       // make a working sync look broken.
       where: { ...orgRuns, startedAt: { gte: dayAgo }, status: "error" },
     }),
-    listAuditEvents({ organizationId, limit: RECENT_ACTIVITY_LIMIT }),
+    listAuditEvents({
+      organizationId,
+      limit: RECENT_ACTIVITY_LIMIT,
+      includeSensitiveMetadata: options.includeSensitiveAuditMetadata,
+    }),
+    // Started alongside the counts rather than after them: it is by far the
+    // slowest read here, and running it in series would add its latency to
+    // every admin's dashboard.
+    options.includePayroll ? loadPayrollSummary(organizationId) : null,
   ]);
 
-  // Buckets are mutually exclusive, so the three always sum to `total`. A
+  // Buckets are mutually exclusive, so the four always sum to `total`. A
   // deactivated account keeps whatever `status` string it had, so the
   // deactivation test comes first.
+  //
+  // `pending_approval` is counted apart from `active`, not folded into it.
+  // Somebody who has accepted an invitation but not been approved cannot sign
+  // in — `authenticate` refuses them after verifying the password — so counting
+  // them as active would put people on the headcount who have never seen the
+  // product, and would leave the admin who has to approve them with no number
+  // telling them anybody is waiting.
   let active = 0;
   let invited = 0;
+  let pendingApproval = 0;
   let deactivated = 0;
   for (const member of memberStatuses) {
     if (member.user.deactivatedAt || member.user.status === "deactivated") deactivated += 1;
     else if (member.user.status === "invited") invited += 1;
+    else if (member.user.status === "pending_approval") pendingApproval += 1;
     else active += 1;
   }
 
@@ -863,7 +1033,8 @@ export async function getAdminOverview(): Promise<AdminOverview> {
     connectionCounts.find((row) => row.status === "needs_reauth")?._count._all ?? 0;
 
   return {
-    users: { total: memberStatuses.length, active, invited, deactivated },
+    users: { total: memberStatuses.length, active, invited, pendingApproval, deactivated },
+    invitations: { outstanding: outstandingInvitations },
     sessions: { active: activeSessions },
     channels: {
       own,
@@ -883,5 +1054,8 @@ export async function getAdminOverview(): Promise<AdminOverview> {
       failuresLast24h,
     },
     recentActivity: recent.entries,
+    // Spread in rather than assigned, so `payroll` is genuinely absent from the
+    // JSON for a caller without the permission instead of present as `null`.
+    ...(payroll ? { payroll } : {}),
   };
 }

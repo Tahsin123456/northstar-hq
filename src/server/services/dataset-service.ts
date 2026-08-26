@@ -24,6 +24,7 @@ import { hasYouTubeApiKey } from "@/server/env";
 import { errors } from "@/server/errors";
 import { toChannelDTO, toExcludedVideoDTO, toVideoDTO } from "@/server/mappers";
 import type { DatasetChannelDTO, DatasetDTO, ExcludedVideoDTO } from "@/lib/dto";
+import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { getCurrentOrgId, getCurrentOrgSettings } from "./user-service";
 import { listNiches } from "./niche-service";
 import { getNoteCounts, listCollections, listSavedShorts } from "./research-service";
@@ -67,9 +68,14 @@ export async function buildDataset(
   // How far back we keep videos decides how much shared quota a refresh spends
   // and how much history the canonical Video rows carry, so it is a team
   // setting: one person widening it would silently change everyone's dataset.
-  const [organizationId, orgSettings] = await Promise.all([
+  const [organizationId, orgSettings, visibleNiches] = await Promise.all([
     getCurrentOrgId(),
     getCurrentOrgSettings(),
+    // Resolved here rather than trusted from the client. Every metric on the
+    // dashboard is derived in the browser from this one payload, so whatever a
+    // niche-scoped member is not entitled to must be absent from it — hiding it
+    // afterwards would still have shipped the rows.
+    getVisibleNicheIds(),
   ]);
   const lookbackDays = options.lookbackDays ?? orgSettings.lookbackDays;
   const since = new Date(Date.now() - lookbackDays * MS_PER_DAY);
@@ -79,7 +85,11 @@ export async function buildDataset(
     // The team's tracker, not the caller's: two people in one organization must
     // open the dashboard on the same channels and the same numbers.
     prisma.trackedChannel.findMany({
-      where: { organizationId, isActive: true },
+      // Two independent narrowings, both in the query: the organization decides
+      // whose tracker this is, the niche filter decides which of it this member
+      // is entitled to. A niche-scoped member with no assignments matches no
+      // rows at all — see `trackedChannelNicheFilter`.
+      where: { organizationId, isActive: true, ...trackedChannelNicheFilter(visibleNiches) },
       include: {
         niches: { include: { niche: true } },
         channel: {
@@ -145,13 +155,22 @@ export async function getExcludedVideos(
   channelId: string,
   options: { startMs?: number; endMs?: number; limit?: number } = {},
 ): Promise<ExcludedVideoDTO[]> {
-  const organizationId = await getCurrentOrgId();
+  const [organizationId, visibleNiches] = await Promise.all([
+    getCurrentOrgId(),
+    getVisibleNicheIds(),
+  ]);
 
   // Channel and Video rows are global and deduplicated, so this tracking row is
   // the entire access check: without it the caller's organization has no claim
   // on the channel, whoever on the team originally added it.
+  //
+  // The niche filter belongs in the same lookup rather than in a second check
+  // afterwards. A channel id is right there in the URL of the dashboard, so
+  // this endpoint is precisely where a niche-scoped member would otherwise read
+  // a channel the list never showed them — and folding the two conditions into
+  // one query means "not ours" and "not yours" produce the identical 404.
   const tracking = await prisma.trackedChannel.findFirst({
-    where: { organizationId, channelId },
+    where: { organizationId, channelId, ...trackedChannelNicheFilter(visibleNiches) },
     select: { id: true },
   });
   if (!tracking) throw errors.notFound("channel");
@@ -204,7 +223,10 @@ export interface SnapshotPointDTO {
 export async function getVideoSnapshots(
   youtubeVideoId: string,
 ): Promise<SnapshotPointDTO[]> {
-  const organizationId = await getCurrentOrgId();
+  const [organizationId, visibleNiches] = await Promise.all([
+    getCurrentOrgId(),
+    getVisibleNicheIds(),
+  ]);
 
   // Looked up by tracking reachability rather than by id alone. A YouTube video
   // id is public and guessable, so an unscoped lookup here would hand anyone
@@ -212,11 +234,19 @@ export async function getVideoSnapshots(
   // findFirst rather than findUnique because a unique lookup cannot carry a
   // relation filter — and folding the ownership test into the same query is
   // what makes "not tracked by us" indistinguishable from "does not exist",
-  // so a 404 never confirms that some other team is watching this video.
+  // so a 404 never confirms that some other team is watching this video. The
+  // niche condition rides *inside* the `some`, on the tracking row that carries
+  // the assignments, for the same reason it is in the lookup above: a video id
+  // is guessable, so a niche-scoped member must not be able to reach the
+  // history of a channel outside their niches by asking for it directly.
   const video = await prisma.video.findFirst({
     where: {
       youtubeVideoId,
-      channel: { trackedBy: { some: { organizationId, isActive: true } } },
+      channel: {
+        trackedBy: {
+          some: { organizationId, isActive: true, ...trackedChannelNicheFilter(visibleNiches) },
+        },
+      },
     },
     select: {
       snapshots: {

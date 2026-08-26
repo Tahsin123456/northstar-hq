@@ -41,6 +41,11 @@ import {
 import { auditActionLabel } from "@/lib/audit/actions";
 import { PERMISSION_LABELS, ROLE_ORDER } from "@/lib/auth/permissions";
 import { formatMoney } from "@/lib/finance/money";
+import { periodForMonth } from "@/lib/payroll/payroll-engine";
+// The same two formatters the payday Telegram message is built from. Reused
+// rather than re-derived so the amount and the date on this tile are, to the
+// character, what the message that announces them will say.
+import { formatPayAmount, formatPayDate } from "@/lib/payroll/payroll-message";
 import {
   EM_DASH,
   formatCompactNumber,
@@ -48,9 +53,14 @@ import {
   formatPercent,
   formatRelativeTime,
   formatThreshold,
+  pluralize,
 } from "@/lib/format";
 import { BRAND } from "@/lib/brand";
-import type { AdminUserDTO } from "@/server/services/admin-service";
+import type {
+  AdminOverview,
+  AdminPayrollSummary,
+  AdminUserDTO,
+} from "@/server/services/admin-service";
 import type { AuditEntryDTO } from "@/server/audit/audit-service";
 import { cn } from "@/lib/utils";
 
@@ -77,6 +87,13 @@ import { cn } from "@/lib/utils";
  * the query for a group the viewer cannot read is never issued and never 403s.
  * Both gated blocks are separate components for exactly that reason: a hook
  * cannot be called conditionally, but a component can go unrendered.
+ *
+ * `payroll.view` works the same way one level down. The two payroll tiles ride
+ * on the admin overview request — the viewer is already making it for the rest
+ * of the Team group — so the gate lives in the route: without the permission
+ * the engine is never run and the response has no `payroll` key at all, and
+ * `IfPermitted` here is what stops the tiles from rendering an em dash beside a
+ * heading nobody in that seat should see.
  */
 export default function AdminOverviewPage() {
   const { data, isLoading, error, refetch } = useDataset();
@@ -415,7 +432,7 @@ function TeamAndSystem({ oldestFetchedAt }: { oldestFetchedAt: number | null }) 
   if (isLoading || !data) {
     return (
       <>
-        <GroupSkeleton label="Team" icon={Users} tiles={2} />
+        <GroupSkeleton label="Team" icon={Users} tiles={4} />
         <GroupSkeleton label="System" icon={ServerCog} tiles={4} />
         <GroupShell label="Recent activity" icon={History}>
           <Card className="flex flex-col gap-3 p-4">
@@ -439,36 +456,11 @@ function TeamAndSystem({ oldestFetchedAt }: { oldestFetchedAt: number | null }) 
    * "tile quietly disagreeing with the table underneath it" failure the admin
    * hooks invalidate a whole namespace to avoid. One source per fact.
    */
-  const { users, youtube, sync } = data;
-
-  const teamCaption = [
-    users.invited > 0 ? `${formatNumber(users.invited)} invited` : null,
-    users.deactivated > 0 ? `${formatNumber(users.deactivated)} deactivated` : null,
-  ]
-    .filter((part): part is string => part !== null)
-    .join(" · ");
+  const { users, invitations, youtube, sync } = data;
 
   return (
     <>
-      <TileGroup
-        label="Team"
-        icon={Users}
-        columns="grid-cols-1 sm:grid-cols-2"
-        action={<GroupLink href="/admin/users">Users</GroupLink>}
-      >
-        <Tile>
-          <Stat
-            label="Active users"
-            emphasis="strong"
-            value={formatNumber(users.active)}
-            caption={teamCaption || "Everyone in the workspace is active"}
-          />
-        </Tile>
-
-        <Tile>
-          <RoleBreakdown />
-        </Tile>
-      </TileGroup>
+      <TeamGroup users={users} invitations={invitations} payroll={data.payroll} />
 
       <TileGroup label="System" icon={ServerCog} columns="grid-cols-2 lg:grid-cols-4">
         <Tile>
@@ -540,6 +532,174 @@ function TeamAndSystem({ oldestFetchedAt }: { oldestFetchedAt: number | null }) 
   );
 }
 
+// ---------------------------------------------------------------------------
+// TEAM
+// ---------------------------------------------------------------------------
+
+/**
+ * Who is employed, who is waiting on an admin, and what the month costs.
+ *
+ * FOUR FIGURES AND A ROLE BREAKDOWN, NOT AN EMPLOYEES PAGE. Headcount, the
+ * queue, the running total and the date it leaves the account — the four
+ * questions somebody opens this screen to answer before deciding whether to
+ * open the Payroll page at all. Every per-person figure, every adjustment and
+ * every payment state is one click away and stays there.
+ *
+ * WHY "EMPLOYEES" REPLACED "ACTIVE USERS"
+ * They were always the same set — every member of this workspace is somebody
+ * the business employs — and this group now links to the Employees roster,
+ * where that number is the row count. Printing it twice under two labels is
+ * exactly the "one source per fact" failure the note in `TeamAndSystem` warns
+ * about; the tile it left behind is the Pending queue, which is genuinely a
+ * different question.
+ *
+ * THE PAYROLL TILES ARE GATED TWICE, AND NEITHER GATE IS COSMETIC
+ * `IfPermitted` decides whether they render; the *route* decided whether the
+ * figures were ever calculated, so a viewer without `payroll.view` is not
+ * holding a salary bill in a hidden div — `data.payroll` is not in their
+ * response at all. That is the same arrangement `BusinessGroup` has with
+ * `finance.view`, which gates a component precisely so its fetch is never made.
+ * `session.can` is read once more here for the column count, because a
+ * four-column grid with two tiles in it would leave two empty cells showing the
+ * divider colour — the layout is a consequence of the same permission, read
+ * from the same session, not a second opinion about it.
+ */
+function TeamGroup({
+  users,
+  invitations,
+  payroll,
+}: {
+  users: AdminOverview["users"];
+  invitations: AdminOverview["invitations"];
+  payroll: AdminPayrollSummary | undefined;
+}) {
+  const session = useSession();
+  const mayViewPayroll = session.can("payroll.view");
+
+  // Two different waits, one queue: an invitation nobody has accepted, and an
+  // account that has been accepted and needs letting in. Both are work for an
+  // admin, and an admin who sees only one of them leaves the other sitting.
+  const waiting = invitations.outstanding + users.pendingApproval;
+  const waitingCaption = [
+    invitations.outstanding > 0
+      ? `${formatNumber(invitations.outstanding)} ${pluralize(invitations.outstanding, "invitation")}`
+      : null,
+    users.pendingApproval > 0
+      ? `${formatNumber(users.pendingApproval)} awaiting approval`
+      : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+
+  return (
+    <TileGroup
+      label="Team"
+      icon={Users}
+      columns={mayViewPayroll ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-1 sm:grid-cols-2"}
+      action={
+        <div className="flex items-center gap-3">
+          <GroupLink href="/admin/employees">Employees</GroupLink>
+          <IfPermitted to="payroll.view">
+            <GroupLink href="/admin/payroll">Payroll</GroupLink>
+          </IfPermitted>
+        </div>
+      }
+    >
+      <Tile>
+        <Stat
+          label="Employees"
+          emphasis="strong"
+          value={formatNumber(users.active)}
+          caption={
+            users.deactivated > 0
+              ? `Active · ${formatNumber(users.deactivated)} deactivated`
+              : "Active in the workspace"
+          }
+        />
+      </Tile>
+
+      <Tile>
+        <Stat
+          label="Pending"
+          value={
+            // Coloured only for somebody awaiting approval. An invitation
+            // nobody has opened yet is the normal state of an invitation; a
+            // person who has accepted one and cannot sign in is being kept
+            // waiting by an admin, and that is worth a colour.
+            <span className={cn(users.pendingApproval > 0 && "text-warning")}>
+              {formatNumber(waiting)}
+            </span>
+          }
+          caption={waitingCaption || "Nobody is waiting to join"}
+        />
+      </Tile>
+
+      <IfPermitted to="payroll.view">
+        <Tile>
+          <Stat
+            label="Monthly payroll"
+            value={
+              payroll ? formatPayAmount(payroll.totalMinor, payroll.currency) : EM_DASH
+            }
+            hint={
+              <InfoTip>
+                Salaries plus hit bonuses for everybody employed in this period.
+                While the month is open the figure is recalculated from current
+                view counts, so it can still rise; finalizing the period on the
+                Payroll page is what fixes it.
+              </InfoTip>
+            }
+            caption={payrollCaption(payroll)}
+          />
+        </Tile>
+
+        <Tile>
+          <Stat
+            label="Next payment"
+            value={
+              // Derived from the period rather than formatted from a timestamp,
+              // because the pay date is a UTC calendar day: rendered in a local
+              // zone it would read "August 31" in São Paulo and "September 1" in
+              // Berlin about the very same payment.
+              payroll ? formatPayDate(periodForMonth(payroll.year, payroll.month)) : EM_DASH
+            }
+            caption={
+              payroll
+                ? payroll.status === "paid"
+                  ? `${payroll.label} has been paid`
+                  : `Covers ${payroll.label}`
+                : "Payroll figures are not in this response"
+            }
+          />
+        </Tile>
+      </IfPermitted>
+
+      {/* Spans whatever the row above is, so the group never leaves an empty
+          cell showing the divider colour at any breakpoint. */}
+      <Tile className={mayViewPayroll ? "col-span-2 lg:col-span-4" : "sm:col-span-2"}>
+        <RoleBreakdown />
+      </Tile>
+    </TileGroup>
+  );
+}
+
+/**
+ * What the payroll total is, in one line.
+ *
+ * A mixed-currency run is named rather than dressed up. The server sums the
+ * minor units and flags them because there is no rate table to convert with,
+ * and a figure stamped with one currency's symbol when it is the sum of two
+ * would be a fabricated number on the screen where that matters most.
+ */
+function payrollCaption(payroll: AdminPayrollSummary | undefined): string {
+  if (!payroll) return "Payroll figures are not in this response";
+  if (payroll.currencyMixed) {
+    return `${payroll.label} · mixed currencies, open Payroll for the split`;
+  }
+  if (payroll.isDraft) return `${payroll.label} so far · still moving`;
+  return payroll.status === "paid" ? `${payroll.label} · paid` : `${payroll.label} · finalized`;
+}
+
 /**
  * How the active team splits across roles.
  *
@@ -547,9 +707,13 @@ function TeamAndSystem({ oldestFetchedAt }: { oldestFetchedAt: number | null }) 
  * directory — the same cache entry the Users tab renders from, which makes it a
  * request the section was going to make anyway rather than one spent here.
  *
- * It fails softly and on its own: the tile beside it is already on screen with
- * a number in it, and blanking the whole Team group because a secondary read
- * did not arrive would be a worse trade than one honest line.
+ * It fails softly and on its own: the Employees tile above it is already on
+ * screen with a number in it, and blanking the whole Team group because a
+ * secondary read did not arrive would be a worse trade than one honest line.
+ *
+ * It sits across the full width of the group now that four figures share the
+ * row above, so the entries flow into columns rather than stretching one
+ * label-and-number pair across the card.
  */
 function RoleBreakdown() {
   const { data, isLoading, error } = useAdminUsers();
@@ -578,14 +742,14 @@ function RoleBreakdown() {
       </span>
 
       {isLoading ? (
-        <div className="flex flex-col gap-1.5 pt-0.5">
+        <div className="grid grid-cols-1 gap-1.5 pt-0.5 sm:grid-cols-2 lg:grid-cols-4">
           {Array.from({ length: 3 }, (_, i) => (
             <Skeleton key={i} className="h-3 w-full" />
           ))}
         </div>
       ) : error ? (
         <p className="text-[12px] leading-relaxed text-muted-foreground">
-          The role breakdown could not be loaded. The count beside it is
+          The role breakdown could not be loaded. The headcount above it is
           unaffected.
         </p>
       ) : counts.length === 0 ? (
@@ -593,7 +757,7 @@ function RoleBreakdown() {
           No active members to break down.
         </p>
       ) : (
-        <dl className="flex flex-col gap-1">
+        <dl className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2 lg:grid-cols-4">
           {counts.map((entry) => (
             <div key={entry.role} className="flex items-baseline justify-between gap-3">
               <dt className="truncate text-[12px] text-muted-foreground">{entry.label}</dt>
@@ -613,12 +777,16 @@ function RoleBreakdown() {
  *
  * A deactivated account keeps whatever `status` string it had, so the
  * deactivation test has to come first — and it has to be the *same* test, or
- * the role rows would sum to a different number than the "Active users" tile
- * eighteen pixels to their left.
+ * the role rows would sum to a different number than the "Employees" tile
+ * directly above them.
+ *
+ * `pending_approval` is excluded for the same reason the server excludes it:
+ * that account cannot sign in yet, it is counted in the Pending tile, and
+ * counting it here as well would put one person in two places on one card.
  */
 function isActiveMember(user: AdminUserDTO): boolean {
   if (user.deactivatedAt !== null || user.status === "deactivated") return false;
-  return user.status !== "invited";
+  return user.status !== "invited" && user.status !== "pending_approval";
 }
 
 /** Most privileged first; a role no longer in the table sorts last, not first. */

@@ -20,6 +20,12 @@ type RouteContext = { params: Promise<{ id: string }> };
  * request: an admin may not edit their own access, and the last active admin
  * may not be demoted or deactivated. See the comments there for why the second
  * one is counted inside the transaction.
+ *
+ * `status: "active"` here REACTIVATES an account that lost its access. It does
+ * not approve one waiting at the gate — that is POST
+ * /api/admin/employees/:id/approve, and the service refuses the transition here
+ * so there is one path, one audit key and one reject counterpart for the
+ * decision to let somebody in.
  */
 export function PATCH(request: Request, context: RouteContext) {
   return handleMutation(request, async () => {

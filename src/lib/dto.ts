@@ -355,3 +355,107 @@ export interface GoogleOAuthStatusDTO {
    */
   readonly redirectUri: string | null;
 }
+
+/**
+ * Whether this deployment can send a Telegram notification, and what is
+ * missing if it cannot.
+ *
+ * The two halves are reported separately because they are fixed in different
+ * places by different people: the token is a deployment environment variable
+ * an operator sets, the chat id is organization data an admin types into the
+ * Settings form. Collapsing them into one boolean would send an admin hunting
+ * through hosting configuration for something they could have fixed in the UI.
+ *
+ * NOTE WHAT IS NOT HERE. There is no `token` field and there never will be —
+ * the bot token is reported as a boolean and nothing else. See
+ * `src/server/services/telegram-env.ts`.
+ */
+export interface TelegramStatusDTO {
+  /** TELEGRAM_BOT_TOKEN is set. The value itself is never disclosed. */
+  readonly tokenConfigured: boolean;
+  /** A destination chat has been configured for this organization. */
+  readonly chatConfigured: boolean;
+  /** Both halves are in place, so a message could actually be sent. */
+  readonly configured: boolean;
+  /** What is still to be set, in the order to set it. */
+  readonly missing: readonly string[];
+}
+
+/**
+ * Where this organization's notifications go.
+ *
+ * Mirrors the `NotificationSettings` row minus its bookkeeping columns. The
+ * chat id is included because an admin has to be able to see and correct what
+ * they typed; it is not a secret on its own — a bot can only post to a chat it
+ * has been added to, and the thing that makes posting possible is the token,
+ * which is not in this type.
+ */
+export interface NotificationSettingsDTO {
+  readonly telegramChatId: string | null;
+  readonly telegramEnabled: boolean;
+  /** Lets an admin mute the monthly summary without disconnecting Telegram. */
+  readonly payrollNotificationsEnabled: boolean;
+}
+
+/**
+ * The outcome of one notification attempt, as the admin UI shows it.
+ *
+ * `skipped` is a first-class result rather than a failure: a run with
+ * notifications switched off, or with no chat configured, did exactly what it
+ * was asked to. Reporting that as an error would train an admin to ignore the
+ * field that also reports real failures.
+ */
+export interface NotificationAttemptDTO {
+  readonly status: "sent" | "failed" | "skipped" | "already_sent";
+  /** Why it was skipped, or how it failed. Never contains a credential. */
+  readonly detail: string | null;
+  readonly attempts: number;
+  readonly sentAt: number | null;
+  /** How many Telegram messages the summary was split into. */
+  readonly parts: number;
+}
+
+/**
+ * The last payroll summary this organization tried to deliver.
+ *
+ * A separate type from `NotificationAttemptDTO` because the two answer
+ * different questions. An *attempt* is what just happened in response to a
+ * button the admin pressed a second ago; this is the standing state of the
+ * delivery row — including one that failed unattended at midnight on the 1st,
+ * with nobody watching. The brief is explicit that a failed delivery must be
+ * visible after the fact, and a value that only exists in a mutation response
+ * is not visible after the fact.
+ *
+ * WHAT IS NOT HERE: any payroll figure. Which month was announced, whether it
+ * arrived and what went wrong are delivery facts; what it said is payroll, and
+ * payroll lives behind `payroll.view` on the screens that hold it. `lastError`
+ * is Telegram's own description with the bot token already scrubbed out by
+ * `telegram-service.ts` — see `scrubToken` there.
+ */
+export interface PayrollNotificationStatusDTO {
+  /** "telegram" today; the column exists so a second channel needs no migration. */
+  readonly channel: string;
+  /**
+   * `skipped` is its own outcome, not a quiet success.
+   *
+   * A run with notifications muted, or with no chat id, cannot send — and until
+   * it was recorded, the card went on showing the PREVIOUS month's delivery,
+   * which reads as "this month went out fine". A skipped month is a month
+   * nobody was told about, and the admin has to be able to see that.
+   */
+  readonly status: "pending" | "sent" | "failed" | "skipped";
+  readonly attempts: number;
+  /**
+   * Why the last attempt failed, or — on a `skipped` row — what stopped it from
+   * being attempted at all. Never contains a credential.
+   */
+  readonly lastError: string | null;
+  readonly sentAt: number | null;
+  /** When the row last moved — the only timestamp a failure has. */
+  readonly updatedAt: number;
+  readonly year: number;
+  /** 1-12. */
+  readonly month: number;
+  /** "August 2026" — the period the message was about. */
+  readonly periodLabel: string;
+}

@@ -49,7 +49,16 @@ export default async function AdminLayout({
    * permission the product offers but cannot be used is worse than one it does
    * not offer at all.
    */
-  const ADMIN_SECTION_PERMISSIONS = ["users.manage", "audit.view", "youtube.manage"] as const;
+  const ADMIN_SECTION_PERMISSIONS = [
+    "users.manage",
+    "audit.view",
+    "youtube.manage",
+    // `payroll.view` unlocks the Payroll tab. In practice only the Admin role
+    // holds it, and an admin already clears the list above — but the rule this
+    // block states is "any capability this section exposes", and leaving a tab
+    // out of it is exactly how `youtube.manage` became a grant that led nowhere.
+    "payroll.view",
+  ] as const;
 
   const mayAdminister = ADMIN_SECTION_PERMISSIONS.some((permission) =>
     actor.permissions.has(permission),

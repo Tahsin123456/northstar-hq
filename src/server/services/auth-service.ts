@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
 import {
@@ -45,6 +46,18 @@ const LOCKOUT_MINUTES = 15;
 const INVITATION_TTL_HOURS = 72;
 const RESET_TTL_MINUTES = 60;
 
+/**
+ * The account has a password but no permission to use it yet.
+ *
+ * Accepting an invitation lands here rather than in "active": choosing a
+ * password proves the person read their email, which is not the same thing as
+ * an administrator deciding they belong in the workspace. The session layer
+ * already refuses everything that is not "active" (see `getActor`), so this
+ * state needs no new enforcement — only the two things below: acceptance must
+ * not mint a session, and sign-in must explain itself.
+ */
+const PENDING_APPROVAL = "pending_approval";
+
 export interface AuthContext {
   readonly request: Request;
 }
@@ -88,10 +101,17 @@ export async function authenticate(
     },
   });
 
+  // An account waiting for approval is the one non-active status that gets to
+  // have its password checked. Everything else — no account, invited but never
+  // accepted, deactivated, anything unrecognised — is refused here, before a
+  // single byte about it is disclosed.
+  const isPendingApproval = user?.status === PENDING_APPROVAL;
+  const mayAttempt = user?.status === "active" || isPendingApproval;
+
   // No account, or an account that cannot sign in (invited-but-not-accepted,
   // deactivated). Still spend the scrypt cost so the response time is
   // indistinguishable from a wrong password on a real account.
-  if (!user || !user.passwordHash || user.status !== "active" || user.deactivatedAt) {
+  if (!user || !user.passwordHash || !mayAttempt || user.deactivatedAt) {
     await fakeVerifyPassword(input.password);
     if (user) {
       await recordFailure(user.id, user.email, user.memberships[0]?.organizationId, context);
@@ -110,6 +130,32 @@ export async function authenticate(
   if (!valid) {
     await recordFailure(user.id, user.email, user.memberships[0]?.organizationId, context);
     throw invalidCredentials();
+  }
+
+  /**
+   * The credential is right, but the account has not been let in yet.
+   *
+   * WHY THIS MESSAGE IS SPECIFIC WHEN EVERY OTHER ONE IS NOT
+   * The generic "that combination is not recognised" exists so the login form
+   * cannot be used to enumerate who works here. That reasoning applies to
+   * anyone who has *not* proved the credential. This person has: they typed the
+   * password that matches the stored hash, so they already know the account
+   * exists and is theirs. Telling them why they cannot get in leaks nothing
+   * they did not just demonstrate.
+   *
+   * The order is the whole point. Saying "waiting for approval" before the
+   * password is verified would answer "does this address have an account here?"
+   * for anybody who asks — the enumeration oracle the rest of this file is
+   * written to avoid. So the check sits *after* `verifyPassword`, never before,
+   * and a wrong password on a pending account is indistinguishable from a wrong
+   * password on any other.
+   *
+   * No session is created, nothing is written: this is not a sign-in.
+   */
+  if (isPendingApproval) {
+    throw errors.invalidInput(
+      "Your account is waiting for an administrator to approve it. You will be able to sign in as soon as somebody does.",
+    );
   }
 
   // Success. Clear the failure state and, if the stored hash predates a cost
@@ -346,7 +392,18 @@ export interface CreatedInvitation {
 }
 
 export async function createInvitation(
-  input: { email: string; name?: string | null; role: string },
+  input: {
+    email: string;
+    name?: string | null;
+    role: string;
+    /**
+     * Which niches this person will be able to see, for the roles where that
+     * question has an answer. Chosen by the admin at invite time and applied
+     * here — never supplied by the invitee, who would then be choosing their
+     * own access on the way in.
+     */
+    nicheIds?: readonly string[];
+  },
   scope: { organizationId: string; actorUserId: string; actorLabel: string | null },
   context: AuthContext,
 ): Promise<CreatedInvitation> {
@@ -362,6 +419,8 @@ export async function createInvitation(
     throw errors.invalidInput("Someone with that email already has an active account.");
   }
 
+  const nicheIds = await verifyNichesBelongToOrg(scope.organizationId, input.nicheIds ?? []);
+
   const { token, tokenHash } = generateSingleUseToken();
   const expiresAt = new Date(Date.now() + INVITATION_TTL_HOURS * 60 * 60 * 1000);
 
@@ -373,7 +432,7 @@ export async function createInvitation(
       data: { revokedAt: new Date() },
     });
 
-    return tx.invitation.create({
+    const created = await tx.invitation.create({
       data: {
         organizationId: scope.organizationId,
         email,
@@ -385,6 +444,22 @@ export async function createInvitation(
       },
       select: { id: true },
     });
+
+    // The niche assignment is filed now, in the same transaction as the
+    // invitation, rather than carried inside the link. See
+    // `assignInvitedMemberNiches` for why.
+    if (nicheIds.length > 0) {
+      await assignInvitedMemberNiches(tx, {
+        organizationId: scope.organizationId,
+        email,
+        name: input.name?.trim() || null,
+        role: input.role,
+        nicheIds,
+        assignedById: scope.actorUserId,
+      });
+    }
+
+    return created;
   });
 
   const baseUrl = resolveAppUrl(originOf(context.request));
@@ -399,15 +474,132 @@ export async function createInvitation(
     },
     {
       action: "user.invited",
-      summary: `Invited ${email} as ${input.role}`,
+      summary:
+        nicheIds.length > 0
+          ? `Invited ${email} as ${input.role}, scoped to ${nicheIds.length} niche${nicheIds.length === 1 ? "" : "s"}`
+          : `Invited ${email} as ${input.role}`,
       targetType: "invitation",
       targetId: invitation.id,
       targetLabel: email,
-      metadata: { role: input.role },
+      // Niche ids are organizational facts, not personal ones — recording which
+      // scope somebody was granted on the way in is exactly what this log is
+      // for. Nothing about pay or employment goes near it.
+      metadata: { role: input.role, nicheIds },
     },
   );
 
   return { id: invitation.id, email, role: input.role, expiresAt, inviteUrl };
+}
+
+/**
+ * Narrows a set of niche ids to the ones this organization actually owns.
+ *
+ * Both an integrity check and a tenancy one: an id from another workspace must
+ * not be assignable, and an id for a niche somebody deleted five minutes ago
+ * must not be written. Rejects rather than silently dropping, so an admin who
+ * picked four niches never ends up having granted three without being told —
+ * the same contract `setChannelNiches` uses.
+ */
+async function verifyNichesBelongToOrg(
+  organizationId: string,
+  nicheIds: readonly string[],
+): Promise<string[]> {
+  const unique = [...new Set(nicheIds)];
+  if (unique.length === 0) return [];
+
+  const owned = await prisma.niche.findMany({
+    where: { id: { in: unique }, organizationId },
+    select: { id: true },
+  });
+  if (owned.length !== unique.length) {
+    throw errors.invalidInput("One or more of those niches no longer exists.");
+  }
+
+  return unique;
+}
+
+/**
+ * Files the invitee's niche assignment at invite time.
+ *
+ * WHY THE ASSIGNMENT CANNOT WAIT FOR ACCEPTANCE
+ * A niche assignment is a `MemberNiche` row, and `MemberNiche` hangs off
+ * `OrganizationMember` — so it needs a membership to exist. The `Invitation`
+ * table has no niche column and the schema is not ours to change, and the two
+ * places the ids could otherwise have been smuggled are both worse than they
+ * look: the invitation link is documented as an opaque lookup key carrying no
+ * payload to trust (`src/server/auth/tokens.ts`), and the audit log is an
+ * account of what happened, not a queue the application reads back. Writing the
+ * real row, in the real table, is the only version of this that does not lie
+ * about where access comes from.
+ *
+ * So inviting somebody *with* niches now also creates the account shell it
+ * needs: no password, status "invited" — the state `AppUser.status` already
+ * defaults to and which `authenticate` already refuses. It cannot sign in, it
+ * holds no session, and it grants nothing until an admin approves the account
+ * after acceptance. Invitations with no niches are untouched by any of this and
+ * behave exactly as they did.
+ *
+ * A revoked invitation leaves the shell behind, deliberately. Deleting accounts
+ * as a side effect of revoking a link is how bylines disappear; an admin who
+ * wants it gone deactivates it like any other account.
+ */
+async function assignInvitedMemberNiches(
+  tx: Prisma.TransactionClient,
+  params: {
+    organizationId: string;
+    email: string;
+    name: string | null;
+    role: string;
+    nicheIds: readonly string[];
+    assignedById: string;
+  },
+): Promise<void> {
+  const existing = await tx.appUser.findUnique({
+    where: { email: params.email },
+    select: { id: true },
+  });
+
+  // Only ever *created*, never updated: an account that already exists keeps
+  // its name, its status and its password. Acceptance is what changes those,
+  // and an invitation must not be able to edit somebody's account from outside.
+  const user =
+    existing ??
+    (await tx.appUser.create({
+      data: {
+        email: params.email,
+        name: params.name,
+        status: "invited",
+        settings: { create: {} },
+      },
+      select: { id: true },
+    }));
+
+  // `update: {}` on purpose. If the person is already a member — a returning
+  // colleague being re-invited — their current role stands until they accept,
+  // because acceptance is the moment the invitation's role is applied and
+  // audited. Inviting somebody must not quietly re-role a live account.
+  const member = await tx.organizationMember.upsert({
+    where: {
+      organizationId_userId: { organizationId: params.organizationId, userId: user.id },
+    },
+    update: {},
+    create: { organizationId: params.organizationId, userId: user.id, role: params.role },
+    select: { id: true },
+  });
+
+  // Replace rather than merge: the admin is looking at a form that shows the
+  // whole set, so "these are the niches" is what they mean by submitting it.
+  await tx.memberNiche.deleteMany({ where: { memberId: member.id } });
+  await tx.memberNiche.createMany({
+    data: params.nicheIds.map((nicheId) => ({
+      memberId: member.id,
+      nicheId,
+      // Attribution: who put this person on this niche. The audit log records
+      // the same fact for the invitation; this is the one the assignment
+      // screens read.
+      assignedById: params.assignedById,
+    })),
+  });
 }
 
 export interface InvitationPreview {
@@ -449,10 +641,27 @@ export async function previewInvitation(token: string): Promise<InvitationPrevie
   };
 }
 
+/**
+ * What acceptance produces now: an account, and a wait.
+ *
+ * Returned instead of a session so the page has something concrete to render —
+ * the invitee needs to be told, on the screen they are already looking at, that
+ * their password was accepted and that somebody has to let them in. Dropping
+ * them at a login form that will refuse them looks like a broken invitation.
+ */
+export interface AcceptedInvitation {
+  readonly userId: string;
+  /** Always `pending_approval` today; named so the page branches on a value, not a guess. */
+  readonly status: typeof PENDING_APPROVAL;
+  readonly email: string;
+  readonly name: string | null;
+  readonly organizationName: string;
+}
+
 export async function acceptInvitation(
   input: { token: string; name: string; password: string },
   context: AuthContext,
-): Promise<{ userId: string }> {
+): Promise<AcceptedInvitation> {
   await enforceRateLimit(RATE_LIMITS.tokenExchangeByIp, clientIpFrom(context.request));
 
   const policyIssue = validatePasswordStrength(input.password);
@@ -472,6 +681,10 @@ export async function acceptInvitation(
         expiresAt: true,
         acceptedAt: true,
         revokedAt: true,
+        // Read here so the "waiting for approval" screen can name the workspace
+        // the person just joined. One query rather than a second lookup for a
+        // string the transaction already has in hand.
+        organization: { select: { name: true } },
       },
     });
 
@@ -489,13 +702,19 @@ export async function acceptInvitation(
       select: { id: true },
     });
 
+    // Both branches land on `pending_approval`, never "active". Accepting an
+    // invitation now means "I have set my password", which is a statement about
+    // the person; being allowed in is a decision an administrator makes. A
+    // returning colleague whose account was deactivated goes through the same
+    // gate — a link that could silently reinstate a departed employee is
+    // precisely what this flow exists to prevent.
     const user = existing
       ? await tx.appUser.update({
           where: { id: existing.id },
           data: {
             name: input.name.trim(),
             passwordHash,
-            status: "active",
+            status: PENDING_APPROVAL,
             deactivatedAt: null,
             failedLoginCount: 0,
             lockedUntil: null,
@@ -507,7 +726,7 @@ export async function acceptInvitation(
             name: input.name.trim(),
             email: invitation.email,
             passwordHash,
-            status: "active",
+            status: PENDING_APPROVAL,
             settings: { create: {} },
           },
           select: { id: true, name: true },
@@ -532,13 +751,23 @@ export async function acceptInvitation(
       data: { acceptedAt: new Date() },
     });
 
-    return { userId: user.id, name: user.name, organizationId: invitation.organizationId };
+    return {
+      userId: user.id,
+      name: user.name,
+      email: invitation.email,
+      organizationId: invitation.organizationId,
+      organizationName: invitation.organization.name,
+    };
   });
 
-  await createSession(result.userId, {
-    ipAddress: clientIpFrom(context.request),
-    userAgent: userAgentFrom(context.request),
-  });
+  // NO SESSION IS CREATED HERE.
+  //
+  // This is the whole gate. `getActor` refuses anything that is not "active",
+  // so a session minted now would be dead on arrival — but issuing one anyway
+  // would put a cookie in the browser that authenticates nobody, and the
+  // resulting "signed in, but every page redirects to /login" is the worst
+  // possible way to tell somebody they are waiting for approval. They get a
+  // screen that says so instead.
 
   await recordAudit(
     {
@@ -549,13 +778,22 @@ export async function acceptInvitation(
     },
     {
       action: "user.invitation_accepted",
-      summary: `${result.name ?? "A new user"} accepted their invitation`,
+      // Worded so the admin reading the log knows there is something for them
+      // to do: this event is now the start of an approval, not the end of an
+      // onboarding.
+      summary: `${result.name ?? "A new user"} accepted their invitation and is waiting for approval`,
       targetType: "user",
       targetId: result.userId,
     },
   );
 
-  return { userId: result.userId };
+  return {
+    userId: result.userId,
+    status: PENDING_APPROVAL,
+    email: result.email,
+    name: result.name,
+    organizationName: result.organizationName,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -677,7 +915,18 @@ export async function resetPassword(
       where: { id: record.userId },
       data: {
         passwordHash,
-        status: "active",
+        // `status` is deliberately NOT set here, and used to be set to "active".
+        //
+        // Once acceptance leaves an account in `pending_approval`, a reset that
+        // promoted it would be a way around the entire approval gate: accept
+        // the invitation, click "forgot password", set the password again, and
+        // let yourself in. A reset proves control of the mailbox, which is what
+        // it is for; it has never been evidence that an administrator wants
+        // this person in the workspace.
+        //
+        // Nothing is lost by dropping it. A deactivated account is already
+        // refused above, an active one is unchanged, and an account still
+        // waiting for approval carries on waiting with a new password.
         failedLoginCount: 0,
         lockedUntil: null,
       },

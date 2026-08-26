@@ -57,20 +57,64 @@ DATABASE_URL="postgresql://user:pass@host:5432/northstar_hq?schema=public&sslmod
 npm run db:push
 ```
 
-### Migrations
+### Migrations — read this before you wire up a release pipeline
 
-This project currently uses `db push` rather than a migration history, which
-suits a single-deployment internal tool. **If more than one person will deploy
-this, switch to migrations before the first production write:**
+**The schema is currently managed with `db push`. There is no `prisma/migrations`
+directory, and `npm run db:migrate` therefore does nothing.**
+
+That script runs `prisma migrate deploy`, which with no migration history finds
+nothing to apply, prints "No migration found", and **exits successfully**. In
+CI that is the worst possible shape of failure: a green deploy step that never
+touched the database, followed by an application talking to a schema that is one
+release behind. Until you create a history, `npm run db:push` is the command
+that actually applies schema changes.
+
+`db push` suits a single-deployment internal tool — but it has no
+down-migration and keeps no record of what changed. That is acceptable while
+the database is disposable and stops being acceptable the day it holds real
+financial data.
+
+#### Creating the migration history
+
+Do this against **PostgreSQL**, not your local SQLite file: migrations are
+generated as raw SQL for one engine, and `prisma-run.mjs` only uses the
+canonical Postgres schema when `DATABASE_URL` is not a `file:` URL.
 
 ```bash
-npx prisma migrate dev --name init      # once, to capture the current schema
-npx prisma migrate deploy               # in CI/CD on every release
+export DATABASE_URL="postgresql://user:pass@host:5432/northstar_hq?schema=public"
 ```
 
-`db push` has no down-migration and no record of what changed. That is
-acceptable while the database is disposable and stops being acceptable the day
-it holds real financial data.
+If the database is **empty** — one command captures the current schema and
+applies it:
+
+```bash
+node scripts/prisma-run.mjs migrate dev --name init
+```
+
+If the database **already exists** because you ran `db push` — do not run
+`migrate dev`, it will offer to reset the database and take the finance records
+with it. Write the same SQL out by hand and mark it as already applied
+(Prisma calls this baselining):
+
+```bash
+mkdir -p prisma/migrations/0_init
+
+# `migrate diff` takes the schema path itself, so it is invoked directly rather
+# than through prisma-run.mjs, which appends its own --schema flag.
+npx prisma migrate diff \
+  --from-empty \
+  --to-schema-datamodel prisma/schema.prisma \
+  --script > prisma/migrations/0_init/migration.sql
+
+node scripts/prisma-run.mjs migrate resolve --applied 0_init
+```
+
+Either way, **commit `prisma/migrations/`** — it is the history, and a deploy
+that cannot see it is back to applying nothing. From that point on
+`npm run db:migrate` is the release command and `npm run db:push` should not be
+run against production again; every schema change gets a
+`node scripts/prisma-run.mjs migrate dev --name <what-changed>` and arrives in
+the same commit as the code that needs it.
 
 ### Moving your local data to production
 

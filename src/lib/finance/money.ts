@@ -335,6 +335,30 @@ function formatWithIntl(
 }
 
 /**
+ * The same, with the decimals shown only when there are any: "$4,000", "$4,000.50".
+ *
+ * For figures a person reads as a headline rather than reconciles line by line —
+ * a salary, a monthly total, a payroll message. On a round number the ".00" is
+ * pure noise repeated down a column.
+ *
+ * Hiding the fraction UNCONDITIONALLY would be a lie, which is why this is a
+ * separate function rather than a default: $4,000.50 rendered as "$4,000" (or
+ * worse, rounded to "$4,001") is a number somebody reconciles against a bank
+ * statement and finds wrong. The fraction is dropped only when it is genuinely
+ * zero, so an amount shown without decimals is a promise that there were none. A
+ * currency with no minor units at all (JPY) takes the same path for free.
+ */
+export function formatMoneyTrimmed(
+  minor: number,
+  currency: string,
+  options: FormatMoneyOptions = {},
+): string {
+  const scale = 10 ** minorUnitsFor(currency);
+  const isRound = scale === 1 || (Number.isFinite(minor) && minor % scale === 0);
+  return formatMoney(minor, currency, { ...options, hideMinorUnits: isRound });
+}
+
+/**
  * A chart-label-sized amount: "$120K", "-€1.2M".
  *
  * Axis ticks and bar labels are read as a scale rather than as exact figures,

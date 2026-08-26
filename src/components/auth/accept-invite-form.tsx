@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import { AuthCard, AuthError, AuthNotice } from "@/components/auth/auth-form";
@@ -14,6 +14,14 @@ import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
  * from the admin who issued it, and letting the invitee edit either would mean
  * a link intended for one person could mint an account for another — or a
  * Channel Director could award themselves Admin on the way in.
+ *
+ * ACCEPTING IS NOT SIGNING IN
+ * Setting a password creates the account and stops there: it sits waiting for
+ * an administrator to approve it, and no session cookie comes back. So this
+ * form does not navigate anywhere on success. It swaps itself for the screen
+ * below, which says what happened and what has to happen next — the previous
+ * behaviour, redirecting to the dashboard, would now land the person on a login
+ * page that refuses them for reasons it cannot explain.
  */
 export function AcceptInviteForm({
   token,
@@ -28,12 +36,12 @@ export function AcceptInviteForm({
   roleLabel: string;
   organizationName: string;
 }) {
-  const router = useRouter();
   const [name, setName] = React.useState(suggestedName ?? "");
   const [password, setPassword] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
   const [pending, setPending] = React.useState(false);
+  const [accepted, setAccepted] = React.useState(false);
 
   const mismatch = confirm.length > 0 && confirm !== password;
 
@@ -57,16 +65,19 @@ export function AcceptInviteForm({
         setPending(false);
         return;
       }
-      // replace + refresh rather than a hard reload: refresh discards the
-      // cached RSC payload so the (app) server layout re-runs and picks up the
-      // session cookie this response just set, and replace keeps the sign-in
-      // screen out of the back-button history.
-      router.replace("/");
-      router.refresh();
+      // The account exists and the token is spent. `pending` stays true so the
+      // button cannot be pressed again in the frame before the screen swaps —
+      // a second submit would only be told the link is no longer valid, which
+      // reads as a failure right after a success.
+      setAccepted(true);
     } catch {
       setError("Could not reach the server. Check your connection and try again.");
       setPending(false);
     }
+  }
+
+  if (accepted) {
+    return <AwaitingApproval email={email} organizationName={organizationName} />;
   }
 
   return (
@@ -131,6 +142,46 @@ export function AcceptInviteForm({
           Create account
         </Button>
       </form>
+    </AuthCard>
+  );
+}
+
+/**
+ * The end of the invitation flow.
+ *
+ * Deliberately not an error state — nothing went wrong, and styling it in red
+ * would tell somebody their brand-new account is broken. It says three things,
+ * in this order: your account exists, somebody has to approve it, and there is
+ * nothing further for you to do. The last one matters most: without it the
+ * natural next move is to try signing in repeatedly, which does nothing except
+ * walk the account towards a lockout.
+ */
+function AwaitingApproval({
+  email,
+  organizationName,
+}: {
+  email: string;
+  organizationName: string;
+}) {
+  return (
+    <AuthCard
+      title="Your account is waiting for approval"
+      description={`Your password is set and your account has been created. An administrator at ${organizationName} has to approve it before you can sign in — you do not need to do anything else.`}
+    >
+      <div className="flex flex-col gap-4">
+        <AuthNotice>
+          <span className="text-foreground">{email}</span> · Pending approval
+        </AuthNotice>
+
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
+          Signing in before then will tell you the account is still pending. If it has been a
+          while, the person who invited you is the one who can approve it.
+        </p>
+
+        <Button asChild variant="ghost" className="w-full">
+          <Link href="/login">Back to sign in</Link>
+        </Button>
+      </div>
     </AuthCard>
   );
 }

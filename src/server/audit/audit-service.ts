@@ -1,7 +1,11 @@
 import "server-only";
 
 import { prisma } from "@/server/db";
-import { shouldRecordNetworkContext, type AuditAction } from "@/lib/audit/actions";
+import {
+  carriesMoneyMetadata,
+  shouldRecordNetworkContext,
+  type AuditAction,
+} from "@/lib/audit/actions";
 import { clientIpFrom, userAgentFrom } from "@/server/auth/rate-limit";
 
 /**
@@ -18,6 +22,9 @@ import { clientIpFrom, userAgentFrom } from "@/server/auth/rate-limit";
  *  • Network context is captured only for the security-relevant actions listed
  *    in src/lib/audit/actions.ts — see the note there about why this is not an
  *    employee-monitoring tool.
+ *  • Reading is not one permission. `audit.view` gets the entry; the amounts a
+ *    pay entry carries in `metadata` need `payroll.view` on top, and
+ *    `listAuditEvents` strips them without it. See the redaction note below.
  */
 
 export interface AuditContext {
@@ -105,8 +112,32 @@ export async function recordAudit(
   } catch (error) {
     // Never rethrow: the audited action already happened, and failing the
     // request now would leave the caller believing it did not.
-    console.error("[audit] failed to record event", payload.action, error);
+    //
+    // The failure is DESCRIBED, never handed over whole. A
+    // PrismaClientValidationError renders the rejected call into its own text —
+    // `data` included, which for a pay entry is the salary this module works to
+    // keep behind `payroll.view`. Logging the error object would print that
+    // into a server log, where it outlives the request and answers to nobody's
+    // permissions. Action, error name and the first line: enough to find the
+    // broken write, none of its arguments.
+    console.error("[audit] failed to record event", payload.action, describeWriteFailure(error));
   }
+}
+
+/**
+ * A one-line, argument-free description of a failed write.
+ *
+ * The first line only, because that line names the call that failed and
+ * everything Prisma renders BELOW it — the `data` block, any offending value —
+ * is the part that would carry a salary. The name is kept because
+ * "PrismaClientValidationError" versus a connection error is most of what an
+ * operator needs to know, and the cap is there because a long first line is
+ * still a first line.
+ */
+function describeWriteFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "Unknown error";
+  const firstLine = error.message.trim().split("\n")[0] ?? "";
+  return `${error.name}: ${firstLine.slice(0, 200)}`;
 }
 
 export interface AuditEntryDTO {
@@ -129,6 +160,37 @@ export interface AuditPage {
   readonly hasMore: boolean;
 }
 
+/**
+ * Metadata keys that hold an amount.
+ *
+ * Money is stored and named in minor units throughout this codebase —
+ * `salaryMinor`, `hitPaymentMinorFrom`, `totalMinor` — so the convention is a
+ * reliable marker. `salary` and `amount` are matched too, for the spelling a
+ * future writer reaches for when they are not thinking about this function.
+ */
+const MONEY_KEY_PATTERN = /minor|salary|amount/i;
+
+/**
+ * Strips the figures from a money-carrying entry, leaving the rest.
+ *
+ * The keys are DELETED, not nulled. `salaryMinorFrom: null` next to
+ * `salaryMinorTo: null` does not read as "you may not see this", it reads as
+ * "pay was set from nothing to nothing" — a different and false statement, and
+ * a log that lies is worse than one that omits.
+ *
+ * Everything non-financial stays: which fields changed, whether notes were
+ * touched, counts, the period. The entry still answers who did what to whom and
+ * when, which is the accountability record `audit.view` is granted for. Only
+ * the numbers that belong to `payroll.view` are gone.
+ */
+function stripMoneyKeys(metadata: Record<string, unknown>): Record<string, unknown> {
+  const safe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(metadata)) {
+    if (!MONEY_KEY_PATTERN.test(key)) safe[key] = value;
+  }
+  return safe;
+}
+
 export async function listAuditEvents(options: {
   organizationId: string;
   limit?: number;
@@ -136,9 +198,21 @@ export async function listAuditEvents(options: {
   action?: string | null;
   actionPrefix?: string | null;
   actorUserId?: string | null;
+  /**
+   * Whether this caller may see the amounts a pay entry carries — that is,
+   * whether they hold `payroll.view` on top of the `audit.view` that got them
+   * the entry at all.
+   *
+   * Resolved by the ROUTE from the session, never from a query string: a flag
+   * the reader can set is a flag the reader can grant themselves. Defaults to
+   * false so a call site that has not thought about it redacts rather than
+   * leaks.
+   */
+  includeSensitiveMetadata?: boolean;
 }): Promise<AuditPage> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
   const offset = Math.max(options.offset ?? 0, 0);
+  const includeSensitiveMetadata = options.includeSensitiveMetadata ?? false;
 
   const where = {
     organizationId: options.organizationId,
@@ -182,7 +256,7 @@ export async function listAuditEvents(options: {
       actorId: row.actorUserId,
       targetType: row.targetType,
       targetLabel: row.targetLabel,
-      metadata: parseMetadata(row.metadata),
+      metadata: readMetadata(row.action, row.metadata, includeSensitiveMetadata),
       ipAddress: row.ipAddress,
       userAgent: row.userAgent,
       createdAt: row.createdAt.getTime(),
@@ -190,6 +264,24 @@ export async function listAuditEvents(options: {
     total,
     hasMore: offset + rows.length < total,
   };
+}
+
+/**
+ * Metadata as this reader is entitled to see it.
+ *
+ * The redaction is keyed on the ACTION rather than on the shape of the value,
+ * so an amount cannot slip through by being spelled differently in a row
+ * written months ago — the action set in src/lib/audit/actions.ts is the
+ * decision, and this is only how it is applied.
+ */
+function readMetadata(
+  action: string,
+  raw: string | null,
+  includeSensitiveMetadata: boolean,
+): Record<string, unknown> | null {
+  const parsed = parseMetadata(raw);
+  if (!parsed || includeSensitiveMetadata || !carriesMoneyMetadata(action)) return parsed;
+  return stripMoneyKeys(parsed);
 }
 
 function parseMetadata(raw: string | null): Record<string, unknown> | null {

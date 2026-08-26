@@ -19,6 +19,9 @@ import {
 import { toast } from "sonner";
 import { PageContainer, PageHeader } from "@/components/layout/app-shell";
 import { ErrorState } from "@/components/common/error-state";
+// Shared with Admin › Employees, which lists the same accounts: one vocabulary
+// for what a status means, in one file.
+import { StatusPill } from "@/components/admin/status-pill";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -450,50 +453,6 @@ function GuardedMenuItem({
         <span className="block">{item}</span>
       </TooltipTrigger>
       <TooltipContent side="left">{reason}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-function StatusPill({
-  status,
-  deactivatedAt,
-  now,
-}: {
-  status: string;
-  deactivatedAt: number | null;
-  now: number;
-}) {
-  const deactivated = status === "deactivated" || deactivatedAt !== null;
-
-  const tone = deactivated
-    ? { dot: "bg-border-strong", text: "text-subtle-foreground", label: "Deactivated" }
-    : status === "active"
-      ? { dot: "bg-success", text: "text-muted-foreground", label: "Active" }
-      : status === "invited"
-        ? { dot: "bg-warning", text: "text-muted-foreground", label: "Invited" }
-        : // An unrecognised status is shown verbatim rather than mapped to a
-          // friendlier word: guessing what it meant would be inventing a fact.
-          { dot: "bg-border-strong", text: "text-muted-foreground", label: status };
-
-  const pill = (
-    <span className={cn("inline-flex items-center gap-1.5", tone.text)}>
-      <span aria-hidden className={cn("size-1.5 shrink-0 rounded-full", tone.dot)} />
-      {tone.label}
-    </span>
-  );
-
-  if (!deactivated || deactivatedAt === null) return pill;
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="cursor-default">{pill}</span>
-      </TooltipTrigger>
-      <TooltipContent>
-        Deactivated {now === 0 ? formatDate(deactivatedAt) : formatRelativeTime(deactivatedAt, now)}
-        {" — "}
-        {formatDateTime(deactivatedAt)}.
-      </TooltipContent>
     </Tooltip>
   );
 }
@@ -1259,60 +1218,82 @@ function ExtraPermissionsForm({
           const id = `grant-${user.id}-${permission}`;
 
           return (
-            <div
-              key={permission}
-              className={cn(
-                "flex items-center gap-2.5 rounded-md px-2 py-2 transition-colors",
-                roleCovers ? "opacity-70" : "hover:bg-surface-hover",
-              )}
-            >
-              <Checkbox
-                id={id}
-                checked={checked}
-                disabled={roleCovers}
-                onCheckedChange={(state) => toggle(permission, state === true)}
-              />
-              <Label htmlFor={id} className="flex-1 cursor-pointer">
-                {PERMISSION_LABELS[permission]}
-              </Label>
+            <React.Fragment key={permission}>
+              <div
+                className={cn(
+                  "flex items-center gap-2.5 rounded-md px-2 py-2 transition-colors",
+                  roleCovers ? "opacity-70" : "hover:bg-surface-hover",
+                )}
+              >
+                <Checkbox
+                  id={id}
+                  checked={checked}
+                  disabled={roleCovers}
+                  onCheckedChange={(state) => toggle(permission, state === true)}
+                />
+                <Label htmlFor={id} className="flex-1 cursor-pointer">
+                  {PERMISSION_LABELS[permission]}
+                </Label>
 
-              {roleCovers ? (
-                alsoGranted ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Badge
-                        variant="neutral"
-                        size="sm"
-                        className="cursor-default normal-case tracking-normal"
-                      >
-                        From role + grant
-                      </Badge>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      The {definition.label} role already includes this, and{" "}
-                      {label} also holds it as an individual grant. Saving keeps
-                      that grant, so it would still apply if their role changed.
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
+                {roleCovers ? (
+                  alsoGranted ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="neutral"
+                          size="sm"
+                          className="cursor-default normal-case tracking-normal"
+                        >
+                          From role + grant
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        The {definition.label} role already includes this, and{" "}
+                        {label} also holds it as an individual grant. Saving
+                        keeps that grant, so it would still apply if their role
+                        changed.
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Badge
+                      variant="outline"
+                      size="sm"
+                      className="normal-case tracking-normal"
+                    >
+                      From role
+                    </Badge>
+                  )
+                ) : selected.has(permission) ? (
                   <Badge
-                    variant="outline"
+                    variant="accent"
                     size="sm"
                     className="normal-case tracking-normal"
                   >
-                    From role
+                    Granted
                   </Badge>
-                )
-              ) : selected.has(permission) ? (
-                <Badge
-                  variant="accent"
-                  size="sm"
-                  className="normal-case tracking-normal"
-                >
-                  Granted
-                </Badge>
+                ) : null}
+              </div>
+
+              {/*
+                Payroll is the one tick on this list whose blast radius is other
+                people. Every other permission widens what somebody can do with
+                the organization's own data; this one hands them the whole
+                team's salaries, and the label — "View payroll & salaries" —
+                reads like the name of a page rather than like that. It is
+                grantable on purpose, so the answer is not to hide it: it is to
+                say the consequence out loud at the moment the box is ticked,
+                where an admin is still deciding, rather than in a permanent
+                line under the list that everyone would stop seeing.
+              */}
+              {permission === "payroll.view" &&
+              !roleCovers &&
+              selected.has(permission) ? (
+                <FieldHint tone="danger" className="pb-1 pl-9">
+                  This shows {label} every colleague&rsquo;s salary, hit payment
+                  and monthly total — not only their own.
+                </FieldHint>
               ) : null}
-            </div>
+            </React.Fragment>
           );
         })}
 

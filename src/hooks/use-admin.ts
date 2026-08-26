@@ -87,8 +87,12 @@ export function useAuditLog(query: AuditLogQuery = {}) {
 export function useInviteMember() {
   const invalidate = useInvalidateAdmin();
   return useMutation({
-    mutationFn: (payload: { email: string; name?: string; role: string }) =>
-      api.inviteMember(payload),
+    mutationFn: (payload: {
+      email: string;
+      name?: string;
+      role: string;
+      nicheIds?: readonly string[];
+    }) => api.inviteMember(payload),
     onSuccess: () => invalidate(),
   });
 }

@@ -1,5 +1,5 @@
 import { handle } from "@/server/http";
-import { requirePermission } from "@/server/auth/dal";
+import { actorCan, requirePermission } from "@/server/auth/dal";
 import { listAuditEvents } from "@/server/audit/audit-service";
 import { getCurrentOrgId } from "@/server/services/user-service";
 
@@ -30,6 +30,17 @@ function readFilter(value: string | null): string | undefined {
  * capability, and the separation is what lets somebody investigate an incident
  * without also being handed the ability to change who has access.
  *
+ * TWO PERMISSIONS, BECAUSE THE LOG CARRIES TWO KINDS OF THING. `audit.view`
+ * gets the entries. The amounts an `employee.pay_updated` entry carries in its
+ * metadata are payroll data that happens to live in the audit table, and they
+ * need `payroll.view` as well — because `audit.view` is grantable on its own,
+ * so without this second check granting somebody the log to investigate an
+ * incident would hand them every salary change in the company as a side effect.
+ *
+ * The flag is resolved from the SESSION, here, and there is deliberately no
+ * query parameter for it: a flag the caller can set is a flag the caller can
+ * grant themselves.
+ *
  * The organization comes from the session and is passed explicitly, so there is
  * no code path here that could list another workspace's events.
  */
@@ -37,6 +48,7 @@ export function GET(request: Request) {
   return handle(async () => {
     await requirePermission("audit.view");
 
+    const includeSensitiveMetadata = await actorCan("payroll.view");
     const organizationId = await getCurrentOrgId();
     const params = new URL(request.url).searchParams;
 
@@ -44,6 +56,7 @@ export function GET(request: Request) {
     // value degrades to a sane page rather than a 400 the UI has to handle.
     return listAuditEvents({
       organizationId,
+      includeSensitiveMetadata,
       limit: readInt(params.get("limit")),
       offset: readInt(params.get("offset")),
       action: readFilter(params.get("action")),

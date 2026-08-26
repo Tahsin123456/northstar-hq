@@ -16,6 +16,7 @@ import type {
   RefreshResultDTO,
 } from "@/lib/dto";
 import { youtubeChannelUrl } from "@/lib/format";
+import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { setChannelNiches } from "./niche-service";
 import { syncChannel, upsertChannel, type SyncOptions } from "./channel-sync";
 import { buildSyncOptions } from "./sync-service";
@@ -185,13 +186,21 @@ export async function listTrackedChannels(
   options: { includeRemoved?: boolean } = {},
 ): Promise<ChannelDTO[]> {
   // The tracker is the team's, so everyone in the organization sees the same
-  // list regardless of who added each channel.
-  const organizationId = await getCurrentOrgId();
+  // list regardless of who added each channel — everyone, that is, whose role
+  // is not niche-scoped. This list is `/api/channels`, gated on `analytics.view`
+  // and therefore reachable by an editor, so it carries the same narrowing the
+  // dataset does; without it the sidebar would be filtered and the endpoint
+  // behind it would not.
+  const [organizationId, visibleNiches] = await Promise.all([
+    getCurrentOrgId(),
+    getVisibleNicheIds(),
+  ]);
 
   const rows = await prisma.trackedChannel.findMany({
     where: {
       organizationId,
       ...(options.includeRemoved ? {} : { isActive: true }),
+      ...trackedChannelNicheFilter(visibleNiches),
     },
     include: { channel: true, ...TRACKED_WITH_NICHES },
     orderBy: { addedAt: "asc" },
@@ -201,10 +210,19 @@ export async function listTrackedChannels(
 }
 
 export async function getTrackedChannel(channelId: string): Promise<ChannelDTO> {
-  const organizationId = await getCurrentOrgId();
+  const [organizationId, visibleNiches] = await Promise.all([
+    getCurrentOrgId(),
+    getVisibleNicheIds(),
+  ]);
 
+  // A lookup by id is exactly how frontend filtering gets bypassed: the list is
+  // narrowed, but the id from someone else's link, a bookmark or a guess still
+  // resolves. So the niche narrowing is part of the lookup, and a channel
+  // outside the caller's niches is a 404 — the same answer as a channel this
+  // organization does not track, which is what stops the endpoint confirming
+  // that the channel exists at all.
   const row = await prisma.trackedChannel.findFirst({
-    where: { organizationId, channelId },
+    where: { organizationId, channelId, ...trackedChannelNicheFilter(visibleNiches) },
     include: { channel: true, ...TRACKED_WITH_NICHES },
   });
 

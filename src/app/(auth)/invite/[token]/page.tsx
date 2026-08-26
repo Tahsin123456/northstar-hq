@@ -9,6 +9,17 @@ import { roleDefinition } from "@/lib/auth/permissions";
 export const metadata: Metadata = { title: "Accept your invitation" };
 export const dynamic = "force-dynamic";
 
+/**
+ * The invitation acceptance screen.
+ *
+ * Two states live under this route, and only the first is rendered here: the
+ * form that sets a password, and the "waiting for approval" screen that
+ * replaces it once the account exists. The second one is inside the client
+ * component on purpose — it is the outcome of a POST, so a server-rendered page
+ * could only reach it by redirecting somewhere, and there is nowhere to
+ * redirect to: the person still has no session and every app route would send
+ * them to /login.
+ */
 export default async function InvitePage({
   params,
 }: {

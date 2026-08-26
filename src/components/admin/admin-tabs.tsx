@@ -36,6 +36,33 @@ interface AdminTab {
 const ADMIN_TABS: readonly AdminTab[] = [
   { href: "/admin", label: "Overview", exact: true },
   { href: "/admin/users", label: "Users", requires: "users.manage" },
+  /*
+   * Employees is `users.manage`, not `payroll.view`.
+   *
+   * The screen is a roster first — who works here, on what, since when — and
+   * only widens into salaries for a viewer who also holds `payroll.view`. Gating
+   * the tab on the payroll permission would hide the approval queue from the
+   * admins who are meant to work it; gating the *columns* is the API's job, and
+   * it does it by omitting the fields rather than by blanking them.
+   */
+  { href: "/admin/employees", label: "Employees", requires: "users.manage" },
+  /*
+   * Payroll is the other half of that split, and it IS `payroll.view`.
+   *
+   * Where Employees is a roster that widens into pay, this tab is nothing but
+   * pay — the run, the totals, every colleague's figure — so the permission
+   * that guards the columns there guards the whole door here. It comes with the
+   * Admin role, and unlike `users.manage` it IS individually grantable: the
+   * brief's rule is "no access unless explicitly granted", so this tab
+   * legitimately appears for somebody an admin has deliberately given payroll
+   * access to. `payroll.manage` — changing pay rather than reading it — is the
+   * one that never appears on the grant checklist.
+   *
+   * The prefix match keeps it lit on /admin/payroll/history: history is the
+   * same area rather than a sixth destination, and a sub-navigation for two
+   * pages would be one more row of chrome than either page earns.
+   */
+  { href: "/admin/payroll", label: "Payroll", requires: "payroll.view" },
   { href: "/admin/audit", label: "Audit log", requires: "audit.view" },
   { href: "/admin/youtube", label: "YouTube", requires: "youtube.manage" },
 ];
