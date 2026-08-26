@@ -54,6 +54,32 @@ export const PERMISSIONS = [
   /** Create, edit and delete financial entries and categories. */
   "finance.manage",
 
+  // --- Payroll --------------------------------------------------------------
+  /**
+   * Read salaries, hit payments and payroll runs.
+   *
+   * Separate from finance because they answer different questions and leak
+   * differently: company revenue is commercially sensitive, an individual's
+   * salary is personal. Somebody trusted with one is not automatically trusted
+   * with the other.
+   */
+  "payroll.view",
+  /** Set pay, finalize a period, mark it paid, record an adjustment. */
+  "payroll.manage",
+
+  // --- Long Form (reserved) --------------------------------------------------
+  /**
+   * The Long Form system does not exist yet.
+   *
+   * The key is declared now so the Longs roles below are real rather than
+   * aspirational: they can be assigned, they appear in the admin UI, and when
+   * the Longs features land they gate themselves without anybody having to
+   * revisit the employee or payroll systems. Nothing checks it today, which is
+   * correct — an unenforced permission that grants nothing is safe; a role that
+   * cannot be created until a feature ships is not.
+   */
+  "longs.view",
+
   // --- Administration -------------------------------------------------------
   /** Invite, deactivate and reactivate people; change their roles. */
   "users.manage",
@@ -71,8 +97,10 @@ export type Permission = (typeof PERMISSIONS)[number];
 export const ROLES = [
   "admin",
   "head_of_shorts",
-  "channel_director",
-  "creative_director",
+  "head_of_longs",
+  "short_form_editor",
+  "long_form_editor",
+  "short_form_clip_producer",
 ] as const;
 
 export type Role = (typeof ROLES)[number];
@@ -82,6 +110,23 @@ export interface RoleDefinition {
   readonly label: string;
   readonly description: string;
   readonly permissions: readonly Permission[];
+  /**
+   * Whether this role sees only the niches the person is assigned to.
+   *
+   * A Head sees the whole operation because their job is comparing across it.
+   * An editor assigned to GTA sees GTA. This is enforced server-side, in the
+   * same query that already scopes by organization — not by filtering in the
+   * browser, which would send the data and then hide it.
+   */
+  readonly nicheScoped: boolean;
+  /**
+   * Which side of the operation the role belongs to.
+   *
+   * "longs" roles are real and assignable today; the Long Form features they
+   * will eventually unlock simply do not exist yet. Modelling it now is what
+   * keeps adding Longs from becoming a rewrite of the employee system.
+   */
+  readonly contentScope: "shorts" | "longs" | "all";
 }
 
 /** Everything an admin can do — kept as a derived list so it cannot drift. */
@@ -97,44 +142,67 @@ const RESEARCH_BASELINE: readonly Permission[] = [
   "reports.generate",
 ];
 
+/** What a department head needs on top of the research baseline. */
+const HEAD_OPERATIONS: readonly Permission[] = ["channels.manage", "niches.manage", "sync.trigger"];
+
 export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
   admin: {
     id: "admin",
     label: "Admin",
     description:
-      "Full access, including finance, user administration, YouTube connections and system settings.",
+      "Full access, including payroll, finance, user administration, YouTube connections and system settings.",
     permissions: ALL_PERMISSIONS,
+    nicheScoped: false,
+    contentScope: "all",
   },
   head_of_shorts: {
     id: "head_of_shorts",
     label: "Head of Shorts",
     description:
-      "Runs the Shorts operation: full analytics and research, plus the channel, niche and sync controls the job needs. No finance, user administration or system settings.",
-    permissions: [
-      ...RESEARCH_BASELINE,
-      // Operational capabilities. Deliberately included: someone accountable
-      // for Shorts performance who cannot add a competitor channel to track,
-      // or set the hit threshold for their own niche, cannot actually do the
-      // job. None of these appear in the role's excluded list, and every one
-      // of them is reversible and audited.
-      "channels.manage",
-      "niches.manage",
-      "sync.trigger",
-    ],
+      "Runs the Shorts operation across every niche: full analytics and research, plus the channel, niche and sync controls the job needs. No payroll, finance or user administration.",
+    // Operational capabilities are deliberately included: someone accountable
+    // for Shorts performance who cannot add a competitor channel to track, or
+    // set the hit threshold for their own niche, cannot do the job. Each one is
+    // reversible and audited.
+    permissions: [...RESEARCH_BASELINE, ...HEAD_OPERATIONS],
+    nicheScoped: false,
+    contentScope: "shorts",
   },
-  channel_director: {
-    id: "channel_director",
-    label: "Channel Director",
+  head_of_longs: {
+    id: "head_of_longs",
+    label: "Head of Longs",
     description:
-      "Analytics and competitor research for the channels they work on, with notes, saved Shorts and reports.",
-    permissions: RESEARCH_BASELINE,
+      "Runs the Long Form operation. The Long Form features are not built yet, so today this role sees the same analytics and research as a Head of Shorts.",
+    permissions: [...RESEARCH_BASELINE, ...HEAD_OPERATIONS, "longs.view"],
+    nicheScoped: false,
+    contentScope: "longs",
   },
-  creative_director: {
-    id: "creative_director",
-    label: "Creative Director",
+  short_form_editor: {
+    id: "short_form_editor",
+    label: "Short Form Editor",
     description:
-      "Analytics and creative research, with notes, saved Shorts and reports. No administrative or financial access.",
+      "Edits Shorts for their assigned niches. Sees analytics and research for those niches only, and can write notes and save Shorts.",
     permissions: RESEARCH_BASELINE,
+    nicheScoped: true,
+    contentScope: "shorts",
+  },
+  long_form_editor: {
+    id: "long_form_editor",
+    label: "Long Form Editor",
+    description:
+      "Edits long-form video for their assigned niches. The Long Form features are not built yet; today this role sees the same niche-scoped analytics as a Short Form Editor.",
+    permissions: [...RESEARCH_BASELINE, "longs.view"],
+    nicheScoped: true,
+    contentScope: "longs",
+  },
+  short_form_clip_producer: {
+    id: "short_form_clip_producer",
+    label: "Short Form Clip Producer",
+    description:
+      "Finds and produces clips for their assigned niches. Sees analytics and research for those niches, and can write notes and save Shorts.",
+    permissions: RESEARCH_BASELINE,
+    nicheScoped: true,
+    contentScope: "shorts",
   },
 };
 
@@ -142,9 +210,28 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
 export const ROLE_ORDER: readonly Role[] = [
   "admin",
   "head_of_shorts",
-  "channel_director",
-  "creative_director",
+  "head_of_longs",
+  "short_form_editor",
+  "long_form_editor",
+  "short_form_clip_producer",
 ];
+
+/**
+ * Roles retired when the team model moved to job titles.
+ *
+ * Kept as a mapping rather than deleted so an account still carrying an old
+ * role resolves to the closest current one instead of silently falling back to
+ * the least-privileged default. Remove once no membership row uses them.
+ */
+const RETIRED_ROLE_ALIASES: Readonly<Record<string, Role>> = {
+  channel_director: "short_form_editor",
+  creative_director: "short_form_clip_producer",
+};
+
+/** True when the role only ever sees its own assigned niches. */
+export function isNicheScoped(role: string): boolean {
+  return roleDefinition(role).nicheScoped;
+}
 
 export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
@@ -162,7 +249,14 @@ export function isPermission(value: string): value is Permission {
  * here means the worst case is somebody sees too little and says so.
  */
 export function roleDefinition(role: string): RoleDefinition {
-  return isRole(role) ? ROLE_DEFINITIONS[role] : ROLE_DEFINITIONS.creative_director;
+  if (isRole(role)) return ROLE_DEFINITIONS[role];
+
+  const alias = RETIRED_ROLE_ALIASES[role];
+  if (alias) return ROLE_DEFINITIONS[alias];
+
+  // Unknown string: fail closed to the least privileged role rather than
+  // guessing. The worst outcome is somebody seeing too little and saying so.
+  return ROLE_DEFINITIONS.short_form_clip_producer;
 }
 
 /** The permissions a member actually has: their role's set, widened by grants. */
@@ -216,8 +310,19 @@ export function canAny(
  * so it may only arrive with the Admin role — a deliberate, visible decision —
  * never as a quiet checkbox on somebody's profile.
  */
+const NON_GRANTABLE: readonly Permission[] = [
+  // Creating administrators is the one capability that lets a person escalate
+  // themselves without limit, so it may only arrive with the Admin role.
+  "users.manage",
+  // Payroll carries every colleague's salary. It is grantable in principle but
+  // deliberately not from the ordinary permission checklist — widening someone
+  // into everyone's pay should be a considered act, not a stray tick. An admin
+  // who genuinely needs to delegate it can still assign the Admin role.
+  "payroll.manage",
+];
+
 export const GRANTABLE_PERMISSIONS: readonly Permission[] = PERMISSIONS.filter(
-  (permission) => permission !== "users.manage",
+  (permission) => !NON_GRANTABLE.includes(permission),
 );
 
 /** Human-readable labels for the admin UI and the audit log. */
@@ -230,6 +335,9 @@ export const PERMISSION_LABELS: Readonly<Record<Permission, string>> = {
   "sync.trigger": "Trigger data syncs",
   "finance.view": "View finance",
   "finance.manage": "Manage finance",
+  "payroll.view": "View payroll & salaries",
+  "payroll.manage": "Manage payroll",
+  "longs.view": "Long Form access (reserved)",
   "users.manage": "Manage users & roles",
   "audit.view": "View audit log",
   "youtube.manage": "Manage YouTube connections",

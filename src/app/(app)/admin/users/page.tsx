@@ -819,7 +819,7 @@ function InviteUserDialog({
 function InviteUserForm({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
   const [name, setName] = React.useState("");
   const [email, setEmail] = React.useState("");
-  const [role, setRole] = React.useState<Role>("channel_director");
+  const [role, setRole] = React.useState<Role>("short_form_editor");
   const [error, setError] = React.useState<string | null>(null);
   const invite = useInviteMember();
 

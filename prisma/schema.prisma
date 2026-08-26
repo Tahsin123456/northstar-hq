@@ -69,7 +69,13 @@ model AppUser {
   /// Never selected into any DTO. See src/server/auth/password.ts.
   passwordHash String?
 
-  /// "active" | "invited" | "deactivated".
+  /// "invited" | "pending_approval" | "active" | "deactivated".
+  ///
+  /// `pending_approval` is the gate an invited person waits behind: they have
+  /// accepted the invitation and chosen a password, but an administrator has
+  /// not yet let them in. No new check enforces this — the session layer
+  /// already refuses anything that is not "active", so the account simply
+  /// cannot authenticate until it is approved.
   ///
   /// A String rather than an enum, per the portability contract at the top of
   /// this file; narrowed to a union and validated with Zod at every boundary.
@@ -108,6 +114,7 @@ model AppUser {
   auditEvents            AuditEvent[]
   invitationsSent        Invitation[]         @relation("InvitationCreatedBy")
   passwordResets         PasswordResetToken[]
+  employeeProfile        EmployeeProfile?
 
   @@index([status])
   @@map("app_users")
@@ -135,19 +142,22 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  settings           OrganizationSettings?
-  members            OrganizationMember[]
-  niches             Niche[]
-  trackedChannels    TrackedChannel[]
-  notes              Note[]
-  collections        Collection[]
-  savedShorts        SavedShort[]
-  invitations        Invitation[]
-  auditEvents        AuditEvent[]
-  youtubeConnections YouTubeConnection[]
-  financeCategories  FinanceCategory[]
-  financeEntries     FinanceEntry[]
-  exchangeRates      ExchangeRate[]
+  settings             OrganizationSettings?
+  members              OrganizationMember[]
+  niches               Niche[]
+  trackedChannels      TrackedChannel[]
+  notes                Note[]
+  collections          Collection[]
+  savedShorts          SavedShort[]
+  invitations          Invitation[]
+  auditEvents          AuditEvent[]
+  youtubeConnections   YouTubeConnection[]
+  financeCategories    FinanceCategory[]
+  financeEntries       FinanceEntry[]
+  exchangeRates        ExchangeRate[]
+  employeeProfiles     EmployeeProfile[]
+  payrollPeriods       PayrollPeriod[]
+  notificationSettings NotificationSettings?
 
   @@map("organizations")
 }
@@ -177,6 +187,7 @@ model OrganizationMember {
   updatedAt DateTime @updatedAt
 
   grants MemberPermissionGrant[]
+  niches MemberNiche[]
 
   @@unique([organizationId, userId])
   @@index([userId])
@@ -290,8 +301,9 @@ model Niche {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  channels TrackedChannelNiche[]
-  notes    Note[]
+  channels     TrackedChannelNiche[]
+  notes        Note[]
+  memberNiches MemberNiche[]
 
   @@unique([organizationId, slug])
   @@index([organizationId, sortOrder])
@@ -1027,4 +1039,259 @@ model ExchangeRate {
 
   @@unique([organizationId, fromCurrency, toCurrency])
   @@map("exchange_rates")
+}
+
+// ---------------------------------------------------------------------------
+// TEAM, EMPLOYMENT AND PAYROLL
+//
+// Deliberately built on the models that already exist rather than beside them.
+// An "employee" is an OrganizationMember — the same row that carries their role
+// and permissions — with employment facts attached. A "hit" is decided by the
+// niche's existing `hitThreshold`, the same number the dashboard, the charts
+// and the PDF report all read. There is exactly one definition of a hit in this
+// system, and payroll uses it rather than owning a second copy.
+// ---------------------------------------------------------------------------
+
+/// Which niches a member is assigned to.
+///
+/// Two jobs at once, which is why it hangs off the membership rather than off
+/// an employment record:
+///   • Payroll — a hit only counts toward someone's pay if it happened in a
+///     niche they are assigned to.
+///   • Access — roles marked niche-scoped in src/lib/auth/roles.ts see only the
+///     channels in their assigned niches. That filtering happens server-side,
+///     in the same query that already scopes by organization.
+model MemberNiche {
+  id String @id @default(cuid())
+
+  memberId String
+  member   OrganizationMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  nicheId String
+  niche   Niche  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+
+  /// Attribution for the audit trail: who put this person on this niche.
+  assignedById String?
+  assignedAt   DateTime @default(now())
+
+  @@unique([memberId, nicheId])
+  @@index([nicheId])
+  @@map("member_niches")
+}
+
+/// Employment and pay configuration for one person.
+///
+/// Separate from OrganizationMember on purpose. Salary is the most sensitive
+/// field in this database, and keeping it in its own table means the ordinary
+/// member queries — the ones behind /api/admin/users, the dataset payload, the
+/// audit log — cannot leak it by widening a `select`. Reaching pay requires
+/// deliberately joining this table, which happens only behind `payroll.view`.
+model EmployeeProfile {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  userId String  @unique
+  user   AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Fixed monthly pay, in integer minor units — never a float. Shares the
+  /// representation and the helpers in src/lib/finance/money.ts.
+  salaryMinor Int @default(0)
+
+  /// Paid once per qualifying hit, on top of salary.
+  hitPaymentMinor Int @default(0)
+
+  currency String @default("USD")
+
+  /// Employment dates. A period is only paid to someone who was employed during
+  /// it, which is what stops a leaver appearing on next month's run.
+  joinedOn          DateTime?
+  employmentEndedOn DateTime?
+
+  /// Free-text, admin-only. Never surfaced outside the payroll screens.
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@map("employee_profiles")
+}
+
+/// One calendar month of payroll.
+///
+/// Periods are explicit rows rather than something derived from dates on the
+/// fly, because "what did we actually pay in August" must keep its answer after
+/// somebody edits a salary in September.
+model PayrollPeriod {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  year  Int
+  /// 1-12.
+  month Int
+
+  /// Half-open window [startsAt, endsAt) in UTC, matching how every other date
+  /// range in this codebase is handled.
+  startsAt DateTime
+  endsAt   DateTime
+  /// The first of the following month.
+  payOn    DateTime
+
+  /// "open" | "finalized" | "paid".
+  ///
+  /// An open period is recalculated live as views change. Finalizing freezes
+  /// it: the records below stop being derived and become the record of what was
+  /// owed. That transition is what makes historical payroll reproducible.
+  status String @default("open")
+
+  finalizedAt   DateTime?
+  finalizedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  records       PayrollRecord[]
+  notifications PayrollNotification[]
+
+  @@unique([organizationId, year, month])
+  @@index([organizationId, status])
+  @@map("payroll_periods")
+}
+
+/// What one person earned in one period.
+model PayrollRecord {
+  id String @id @default(cuid())
+
+  periodId String
+  period   PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+
+  /// Intentionally NOT a foreign key.
+  ///
+  /// A payroll record is a financial document. It has to survive the deletion
+  /// of the account it refers to, and a cascade — or a null — would erase
+  /// evidence of a payment that really happened. The identifying details below
+  /// are copied in at finalization for the same reason.
+  userId String
+
+  employeeName  String
+  employeeEmail String
+  roleAtRun     String
+
+  baseSalaryMinor Int
+  hitPaymentMinor Int
+  hitCount        Int
+  hitBonusMinor   Int
+
+  /// Manual correction by an administrator, positive or negative. Kept apart
+  /// from the computed figures so the original calculation stays legible and
+  /// the adjustment is obvious.
+  adjustmentMinor  Int     @default(0)
+  adjustmentReason String?
+
+  totalMinor Int
+  currency   String @default("USD")
+
+  /// "pending" | "paid"
+  paymentStatus String    @default("pending")
+  paidAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hits PayrollHit[]
+
+  @@unique([periodId, userId])
+  @@index([userId])
+  @@map("payroll_records")
+}
+
+/// One Short that earned a bonus.
+///
+/// THIS TABLE IS THE ANTI-DOUBLE-COUNT GUARANTEE. The unique constraint on
+/// (record, video) makes it impossible for the same Short to be paid twice
+/// within one person's period, whatever a re-sync, a re-run or a duplicate
+/// request does. Recalculation writes the same rows and the constraint absorbs
+/// them.
+///
+/// It is also the answer to "which Shorts did I pay for?", captured with the
+/// view count and threshold as they stood — so a bonus can be explained months
+/// later even after the video's counter has moved on.
+model PayrollHit {
+  id String @id @default(cuid())
+
+  recordId String
+  record   PayrollRecord @relation(fields: [recordId], references: [id], onDelete: Cascade)
+
+  videoId String
+
+  /// Snapshots, for the same reason the record copies the employee's name.
+  videoTitle     String
+  channelId      String?
+  channelName    String
+  nicheId        String?
+  nicheName      String
+  thresholdAtRun Int
+  viewCountAtRun BigInt
+  publishedAt    DateTime
+
+  @@unique([recordId, videoId])
+  @@index([videoId])
+  @@map("payroll_hits")
+}
+
+/// One notification attempt per period, per channel.
+///
+/// The unique constraint is the duplicate-send protection: the scheduled job
+/// claims the row before it sends, so a second invocation — a retry, an
+/// overlapping cron, a manual trigger — finds the row already there and stops.
+model PayrollNotification {
+  id String @id @default(cuid())
+
+  periodId String
+  period   PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+
+  /// "telegram". Room for another channel without a migration.
+  channel String @default("telegram")
+
+  /// "pending" | "sent" | "failed"
+  status   String @default("pending")
+  attempts Int    @default(0)
+
+  /// Surfaced to the admin so a silent failure is not silent.
+  lastError String?
+  sentAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([periodId, channel])
+  @@map("payroll_notifications")
+}
+
+/// Where notifications go.
+///
+/// The destination is configurable data; the bot token is not. The token lives
+/// in TELEGRAM_BOT_TOKEN and never enters the database, never reaches a DTO and
+/// never appears in a log — a chat id is harmless on its own, a bot token is
+/// the whole bot.
+model NotificationSettings {
+  id String @id @default(cuid())
+
+  organizationId String       @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  telegramChatId  String?
+  telegramEnabled Boolean @default(false)
+
+  /// Lets an admin mute the monthly summary without disconnecting Telegram.
+  payrollNotificationsEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("notification_settings")
 }
