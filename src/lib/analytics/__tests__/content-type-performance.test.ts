@@ -27,7 +27,7 @@ function tagged(
 ): TaggedVideo {
   return {
     ...makeShort({ views, publishedAt: daysAgo(5, NOW), ...overrides }),
-    contentTypeIds,
+    effectiveContentTypeIds: contentTypeIds,
   };
 }
 
@@ -293,7 +293,7 @@ describe("scope", () => {
       videos: [
         tagged(1_000_000, [FUNNY.id], { publishedAt: daysAgo(5, NOW) }),
         tagged(9_000_000, [FUNNY.id], { publishedAt: daysAgo(200, NOW) }),
-        { ...makeLongform({ views: 8_000_000, publishedAt: daysAgo(5, NOW) }), contentTypeIds: [FUNNY.id] },
+        { ...makeLongform({ views: 8_000_000, publishedAt: daysAgo(5, NOW) }), effectiveContentTypeIds: [FUNNY.id] },
       ],
       range: range(30),
       threshold: 1_000_000,

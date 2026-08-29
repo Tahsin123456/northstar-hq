@@ -1,23 +1,22 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
-import { Check, Minus, Plus, Settings2, Tag } from "lucide-react";
+import { Plus, Tag } from "lucide-react";
 import { toast } from "sonner";
 import type { ContentTypeDTO } from "@/lib/dto";
+import type { ContentTypeResolution } from "@/lib/content-types/resolve";
 import {
-  useActiveContentTypes,
   useAssignContentTypeToVideos,
   useContentTypesByIds,
-  useCreateContentType,
+  useExcludeContentTypeFromVideo,
+  useRestoreInheritedContentType,
   useSetVideoContentTypes,
 } from "@/hooks/use-content-types";
-import { useOptionalSession } from "@/components/providers/session-provider";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ContentTypeChips, contentTypeColor } from "./content-type-chip";
+import { ContentTypeChips } from "./content-type-chip";
+import { ContentTypeMenu } from "./content-type-menu";
+import { useCanAssignContentTypes } from "./permissions";
 import { cn } from "@/lib/utils";
 
 /**
@@ -29,15 +28,50 @@ import { cn } from "@/lib/utils";
  * director can do it wherever they happen to notice something.
  *
  * THE GESTURE
- * Clicking a type files the Short under that type and nothing else, then
- * closes. That is the whole interaction for the overwhelmingly common case: a
- * Short is one kind of thing. Clicking the type it already carries clears it.
+ * Clicking a type files the Short under that type and closes. That is the whole
+ * interaction for the overwhelmingly common case: a Short is one kind of thing.
+ * Clicking the manual type it already carries clears it.
+ *
+ * "And nothing else" is scoped to the Short's OWN tags. Whatever the channel
+ * provides is carried through, because refusing an inherited tag is an override
+ * that outlives the channel changing its mind, and a click in a list is not
+ * where somebody asks for that. The "−" button is, and it says so.
  *
  * Multiple types are supported because the data model allows them, but they are
  * reached through the small +/− button on the right of each row, which leaves
  * the popover open. Nobody is asked up front whether they want single or
  * multiple select — the default gesture answers for them, and the second one is
  * there when it is actually needed.
+ *
+ * MOST CHIPS HERE WERE NEVER APPLIED TO THIS SHORT
+ *
+ * A Short's tags are mostly its CHANNEL's tags: `(channel − exclusions) ∪
+ * manual`, resolved in `src/lib/content-types/resolve.ts` and handed in as
+ * `resolution`. Two things follow, and both are visible in the UI rather than
+ * left implicit.
+ *
+ * Inherited chips are marked as such, because "this Short is a Ranking because
+ * somebody said so" and "…because everything on this channel is" are different
+ * facts and only one of them is about this Short. The MENU says it too, on the
+ * row and in the tooltip of the button that would take it off — a tick beside a
+ * name is not the place to discover that removing it is an override.
+ *
+ * And REMOVING an inherited chip cannot delete a row — there is no row. It
+ * writes a refusal, which is why that gesture goes to its own single-tag route
+ * instead of through the whole-set write. The undo is offered on the same
+ * button, on a tag shown as "excluded".
+ *
+ * ALL THREE STATES FIT HERE, so none of them is deferred to the detail dialog.
+ *
+ * The brief allows this control to do the common cases and hand the rest off,
+ * and it turned out not to need the escape hatch: inherited, manual and excluded
+ * are already three states of ONE row in a list the popover was always going to
+ * render, distinguished by a hollow dot and a word, and acted on by the one
+ * +/− button that was already there. What the DIALOG adds is not a fourth
+ * capability but a different shape of answer — the tags grouped BY ORIGIN under
+ * headings, where the question is "what is this Short?" rather than "make it a
+ * Ranking". Splitting the capability instead would have meant a director who
+ * spotted a wrong inherited tag mid-table could see the problem and not fix it.
  *
  * WHAT IT OFFERS
  * The organization's live catalogue, in full. A content type is a flat org-wide
@@ -48,19 +82,9 @@ import { cn } from "@/lib/utils";
  * the server agreeing about it, is over.
  *
  * PERMISSIONS
- * Two different capabilities meet in this one control, and conflating them is
- * how it ends up useless to the people who use it most.
- *
- * APPLYING a tag is `research.write` — the same permission behind writing a
- * note or saving a Short — so every editor can label the Shorts they work on.
- * Without it the control degrades to the chips alone.
- *
- * CREATING a tag from inside the picker is `niches.manage`, because it adds a
- * word to the vocabulary the whole team then argues in. An editor sees the list
- * and can file against it; they do not get to extend it in passing.
- *
- * The routes enforce both regardless; hiding an affordance only spares somebody
- * a control that would answer 403.
+ * Applying and refusing are `research.write`; creating a type is
+ * `niches.manage`. Both hooks and the argument for the split live in
+ * `./permissions`.
  */
 
 /**
@@ -75,21 +99,9 @@ export const MAX_BULK_ASSIGN = 500;
 /** Stable identity, so the menu's memo is not invalidated by a fresh literal. */
 const NO_SELECTION: readonly string[] = [];
 
-/** May file a Short under a tag the team already has. */
-function useCanAssign(): boolean {
-  const session = useOptionalSession();
-  return session?.can("research.write") ?? false;
-}
-
-/** May add a word to the vocabulary — a narrower thing, see the note above. */
-function useCanManage(): boolean {
-  const session = useOptionalSession();
-  return session?.can("niches.manage") ?? false;
-}
-
 export function ContentTypeControl({
   videoId,
-  contentTypeIds,
+  resolution,
   align = "start",
   className,
   /** Shown in place of the chips when nothing is filed and editing is allowed. */
@@ -124,24 +136,86 @@ export function ContentTypeControl({
   emptyLabel,
 }: {
   videoId: string;
-  contentTypeIds: readonly string[];
+  /**
+   * This Short's tags, already resolved against its channel.
+   *
+   * A RESOLUTION RATHER THAN AN ID LIST, and the prop was renamed so that no
+   * caller could keep passing the old thing. What used to arrive here was "the
+   * ids stored on this Short"; that array is now the Short's DEVIATIONS, and
+   * rendering it would show a chip on the handful of Shorts somebody singled out
+   * and nothing on the thousands that inherit. The list is resolved once per
+   * dataset in `useVideoContentTypeResolutions` and looked up per row.
+   */
+  resolution: ContentTypeResolution;
   align?: "start" | "center" | "end";
   className?: string;
   placeholder?: string;
   revealOnHover?: boolean;
   emptyLabel?: string;
 }) {
-  const canAssign = useCanAssign();
+  const canAssign = useCanAssignContentTypes();
   const [open, setOpen] = React.useState(false);
-  const assigned = useContentTypesByIds(contentTypeIds);
-  const save = useSetVideoContentTypes();
 
+  const effectiveIds = resolution.effectiveIds;
+  const assigned = useContentTypesByIds(effectiveIds);
+
+  /*
+   * Which of the chips came from the channel.
+   *
+   * Derived from the resolution rather than recomputed, and memoised on the
+   * resolution object — which is shared by every Short that does not deviate, so
+   * on a typical channel this builds one list for the whole table rather than
+   * one per row. Both shapes come out of the single pass: the chips want a Set
+   * to test membership per chip, the menu wants the ids.
+   */
+  const { inheritedIds, inheritedIdSet } = React.useMemo(() => {
+    const ids = resolution.effective
+      .filter((entry) => entry.origin === "inherited")
+      .map((entry) => entry.id);
+    return { inheritedIds: ids, inheritedIdSet: new Set(ids) };
+  }, [resolution]);
+
+  const save = useSetVideoContentTypes();
+  /*
+   * THE TWO SINGLE-TAG GESTURES, which deliberately do not go through `commit`.
+   *
+   * Taking one chip off a Short is one click, and sending the Short's whole
+   * state to express it would mean a tab left open for a minute could revert a
+   * colleague's edit to a DIFFERENT tag as a side effect. These two requests
+   * name one tag and can touch one tag.
+   *
+   * `exclude` is also the only correct way to remove an INHERITED chip: there is
+   * no row to delete, so removing it has to write a refusal. Expressing that as
+   * "here is the new set minus one" would work, and would leave the meaning of
+   * a one-click removal depending on how the client happened to phrase it.
+   */
+  const exclude = useExcludeContentTypeFromVideo();
+  const restore = useRestoreInheritedContentType();
+
+  const busy = save.isPending || exclude.isPending || restore.isPending;
+
+  const onSingleTagError = (error: unknown) =>
+    toast.error("Could not save that content type", {
+      description: error instanceof Error ? error.message : undefined,
+    });
+
+  /*
+   * `nextIds` is the DESIRED EFFECTIVE SET — what this Short should end up
+   * carrying, inherited tags included.
+   *
+   * That is what a person edits, because it is what they can see, and it is what
+   * the route takes. Turning it into rows is `planDeviations`' job on the server
+   * (and in the cache patch), which is the only place that knows a tag the
+   * channel already gives needs no row at all. Sending "the tags I want" rather
+   * than "the rows to write" is also why removing an inherited chip works
+   * without this component knowing what an exclusion is.
+   */
   const commit = (nextIds: readonly string[], closeAfter: boolean) => {
     if (closeAfter) setOpen(false);
     // Nothing to say to the server, and no reason to make the row flicker.
     if (
-      nextIds.length === contentTypeIds.length &&
-      nextIds.every((id) => contentTypeIds.includes(id))
+      nextIds.length === effectiveIds.length &&
+      nextIds.every((id) => effectiveIds.includes(id))
     ) {
       return;
     }
@@ -161,6 +235,7 @@ export function ContentTypeControl({
     return assigned.length > 0 || emptyLabel ? (
       <ContentTypeChips
         contentTypes={assigned}
+        inheritedIds={inheritedIdSet}
         limit={2}
         size="sm"
         className={className}
@@ -176,13 +251,19 @@ export function ContentTypeControl({
           type="button"
           aria-label={
             assigned.length > 0
-              ? `Content types: ${assigned.map((type) => type.name).join(", ")}. Change them.`
+              ? `Content types: ${assigned
+                  .map((type) =>
+                    inheritedIdSet.has(type.id)
+                      ? `${type.name} (from the channel)`
+                      : type.name,
+                  )
+                  .join(", ")}. Change them.`
               : "File this Short under a content type"
           }
           className={cn(
             "inline-flex max-w-full items-center gap-1 rounded px-1 py-0.5 text-left transition-colors",
             "hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent",
-            save.isPending && "opacity-60",
+            busy && "opacity-60",
             revealOnHover &&
               assigned.length === 0 &&
               "opacity-40 focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100",
@@ -190,7 +271,12 @@ export function ContentTypeControl({
           )}
         >
           {assigned.length > 0 ? (
-            <ContentTypeChips contentTypes={assigned} limit={2} size="sm" />
+            <ContentTypeChips
+              contentTypes={assigned}
+              inheritedIds={inheritedIdSet}
+              limit={2}
+              size="sm"
+            />
           ) : (
             <span className="inline-flex items-center gap-1 rounded border border-dashed border-border px-1.5 py-px text-[10px] text-subtle-foreground">
               <Plus className="size-2.5" />
@@ -202,21 +288,73 @@ export function ContentTypeControl({
 
       <PopoverContent align={align} className="w-[268px] p-0">
         <ContentTypeMenu
-          selectedIds={contentTypeIds}
+          // The menu ticks what this Short CARRIES, inherited included. A tick
+          // that only appeared for manual rows would tell somebody a Short is
+          // not a Ranking while a Ranking chip sits on the row behind the
+          // popover. Which of them are the channel's is said beside the name
+          // instead, where it does not have to be inferred from a missing tick.
+          selectedIds={effectiveIds}
+          inheritedIds={inheritedIds}
+          suppressedIds={resolution.suppressedIds}
           heading="Content type"
           hint="Click to file it under one. Use + to add another."
-          onSelectOnly={(id) =>
-            commit(contentTypeIds.length === 1 && contentTypeIds[0] === id ? [] : [id], true)
-          }
-          onToggle={(id) =>
-            commit(
-              contentTypeIds.includes(id)
-                ? contentTypeIds.filter((existing) => existing !== id)
-                : [...contentTypeIds, id],
-              false,
-            )
-          }
-          busy={save.isPending}
+          /*
+           * A CLICK SETS THIS SHORT'S OWN TAG. IT NEVER OVERRIDES THE CHANNEL'S.
+           *
+           * This used to narrow the desired set to the single clicked id, which
+           * before inheritance meant "replace the one or two rows on this
+           * Short" — cheap, and obviously undoable. It now means "and refuse
+           * everything the channel gives", so on a channel carrying three tags
+           * one click would write three permanent tombstones, each of which
+           * outlives the channel dropping and re-adding the tag. That is a
+           * heavy, near-invisible consequence for the lightest gesture in the
+           * product, and nobody clicking a name in a list is asking for it.
+           *
+           * So the click owns only the manual half: whatever the channel gives
+           * is carried through untouched, and overriding it stays a deliberate
+           * act through the "−" button, which says what it does.
+           *
+           * Clicking a tag the channel already provides therefore changes
+           * nothing, and is treated as such rather than as a request to make it
+           * the only one.
+           */
+          onSelect={(id) => {
+            const inherited = effectiveIds.filter((current) => inheritedIds.includes(current));
+            if (inherited.includes(id)) {
+              setOpen(false);
+              return;
+            }
+
+            const manual = effectiveIds.filter((current) => !inheritedIds.includes(current));
+            const clearing = manual.length === 1 && manual[0] === id;
+            commit(clearing ? inherited : [...inherited, id], true);
+          }}
+          /*
+           * THREE OUTCOMES, because the "+/−" button has three meanings now.
+           *
+           * Removing goes through the single-tag DELETE whether the chip was
+           * inherited or manual — the server decides which of a tombstone and a
+           * row deletion that means, and it is the only side that can, because
+           * it is the side that knows what the channel gives right now.
+           *
+           * Adding splits: a tag this Short is REFUSING is put back with the
+           * restore route, which is the honest description of that click and the
+           * one the audit log will show. A tag it has simply never carried is an
+           * ordinary addition and goes through the whole-set write, which is what
+           * `contenttype.video_assigned` is for.
+           */
+          onToggle={(id) => {
+            if (effectiveIds.includes(id)) {
+              exclude.mutate({ videoId, contentTypeId: id }, { onError: onSingleTagError });
+              return;
+            }
+            if (resolution.suppressedIds.includes(id)) {
+              restore.mutate({ videoId, contentTypeId: id }, { onError: onSingleTagError });
+              return;
+            }
+            commit([...effectiveIds, id], false);
+          }}
+          busy={busy}
         />
       </PopoverContent>
     </Popover>
@@ -243,7 +381,7 @@ export function BulkContentTypeButton({
   onAssigned?: () => void;
   className?: string;
 }) {
-  const canAssign = useCanAssign();
+  const canAssign = useCanAssignContentTypes();
   const [open, setOpen] = React.useState(false);
   const [mode, setMode] = React.useState<"add" | "replace">("add");
   const assign = useAssignContentTypeToVideos();
@@ -264,8 +402,20 @@ export function BulkContentTypeButton({
 
           const details: string[] = [];
           if (result.alreadyAssigned > 0) {
+            // Includes Shorts that inherit the tag from their channel and were
+            // correctly left alone — which is the common outcome when the
+            // selection comes from one tagged channel, and would look like a
+            // failure if it were not named.
             details.push(
               `${result.alreadyAssigned} already ${result.alreadyAssigned === 1 ? "was" : "were"}`,
+            );
+          }
+          if (result.restored > 0) {
+            // Surfaced because it OVERRODE somebody: these Shorts had an
+            // explicit refusal of this tag, and a run that silently reversed
+            // that would be the one thing this toast must not do quietly.
+            details.push(
+              `${result.restored} ${result.restored === 1 ? "refusal" : "refusals"} lifted`,
             );
           }
           if (result.removed > 0) {
@@ -347,268 +497,18 @@ export function BulkContentTypeButton({
         <ContentTypeMenu
           // Nothing is pre-selected: a bulk run is a statement about the
           // selection, not a reflection of what any one Short already carries.
+          // Nothing is marked inherited either — there is no single channel to
+          // inherit from across a selection.
           selectedIds={NO_SELECTION}
           heading={null}
           hint={null}
           disabled={overLimit || assign.isPending}
           busy={assign.isPending}
           showToggle={false}
-          onSelectOnly={(_id, contentType) => run(contentType)}
+          onSelect={(_id, contentType) => run(contentType)}
           onToggle={(_id, contentType) => run(contentType)}
         />
       </PopoverContent>
     </Popover>
-  );
-}
-
-/**
- * The list body both controls hang off.
- *
- * ONE NARROWING, and it is not about niches. The catalogue is org-wide, so
- * every option is offered on every Short; what is filtered here is ARCHIVING —
- * a retired type is never offered for new work, but one the current selection
- * already carries stays in the list so it remains removable. A Short filed
- * under a since-retired type keeps its label, and stranding it would be the
- * data loss the whole archive/delete distinction exists to prevent.
- */
-function ContentTypeMenu({
-  selectedIds,
-  heading,
-  hint,
-  onSelectOnly,
-  onToggle,
-  busy = false,
-  disabled = false,
-  showToggle = true,
-}: {
-  selectedIds: readonly string[];
-  heading: string | null;
-  hint: string | null;
-  onSelectOnly: (id: string, contentType: ContentTypeDTO) => void;
-  onToggle: (id: string, contentType: ContentTypeDTO) => void;
-  busy?: boolean;
-  disabled?: boolean;
-  showToggle?: boolean;
-}) {
-  const available = useActiveContentTypes();
-  const assigned = useContentTypesByIds(selectedIds);
-  // Only for the inline create at the foot of this menu — everything else in
-  // here is assignment, which the caller has already gated on `research.write`.
-  const canManage = useCanManage();
-
-  const options = React.useMemo(() => {
-    // The archived exception, and only that. Everything active is already in
-    // `available`, so this appends the retired types the selection carries and
-    // nothing else.
-    const archivedAssigned = assigned.filter((type) => !type.isActive);
-    return archivedAssigned.length > 0 ? [...available, ...archivedAssigned] : available;
-  }, [available, assigned]);
-
-  const [creating, setCreating] = React.useState(false);
-
-  const renderRow = (contentType: ContentTypeDTO) => {
-    const selected = selectedIds.includes(contentType.id);
-    return (
-      <div key={contentType.id} className="flex items-center gap-0.5">
-        <button
-          type="button"
-          disabled={disabled || busy}
-          onClick={() => onSelectOnly(contentType.id, contentType)}
-          className={cn(
-            "flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] transition-colors",
-            "hover:bg-surface-hover disabled:pointer-events-none disabled:opacity-50",
-            selected ? "text-foreground" : "text-muted-foreground",
-          )}
-        >
-          <span
-            aria-hidden
-            className={cn(
-              "size-[6px] shrink-0 rounded-[1px]",
-              !contentType.isActive && "opacity-50",
-            )}
-            style={{ background: contentTypeColor(contentType.colorIndex) }}
-          />
-          <span className="truncate">{contentType.name}</span>
-          {!contentType.isActive ? (
-            <span className="shrink-0 text-[10px] text-subtle-foreground">archived</span>
-          ) : null}
-          {selected ? <Check className="ml-auto size-3.5 shrink-0 text-accent" /> : null}
-        </button>
-
-        {showToggle ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                disabled={disabled || busy}
-                onClick={() => onToggle(contentType.id, contentType)}
-                aria-label={
-                  selected
-                    ? `Remove ${contentType.name}`
-                    : `Also file under ${contentType.name}`
-                }
-                className={cn(
-                  "flex size-6 shrink-0 items-center justify-center rounded text-subtle-foreground transition-colors",
-                  "hover:bg-surface-hover hover:text-foreground",
-                  "disabled:pointer-events-none disabled:opacity-50",
-                )}
-              >
-                {selected ? <Minus className="size-3" /> : <Plus className="size-3" />}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>
-              {selected
-                ? `Remove ${contentType.name}, keep the rest`
-                : `Add ${contentType.name} alongside the current ones`}
-            </TooltipContent>
-          </Tooltip>
-        ) : null}
-      </div>
-    );
-  };
-
-  return (
-    <div className="flex flex-col">
-      {heading || hint ? (
-        <div className="border-b border-border px-3 py-2">
-          {heading ? (
-            <div className="text-[11px] font-medium uppercase tracking-wider text-subtle-foreground">
-              {heading}
-            </div>
-          ) : null}
-          {hint ? (
-            <p className="mt-0.5 text-[11px] leading-tight text-subtle-foreground">{hint}</p>
-          ) : null}
-        </div>
-      ) : null}
-
-      {options.length > 0 ? (
-        <div className="max-h-[220px] overflow-y-auto p-1">{options.map(renderRow)}</div>
-      ) : !creating ? (
-        /*
-         * ONE EMPTINESS, with one cause and one fix.
-         *
-         * The list is org-wide, so a menu with nothing in it means the team has
-         * not defined a vocabulary yet — never that this particular Short is
-         * ineligible. That used to be two different messages; collapsing them
-         * is the point of the flat catalogue.
-         */
-        <p className="px-3 py-3 text-[11px] leading-relaxed text-subtle-foreground">
-          No content types yet. They are whatever vocabulary your team actually argues
-          in &mdash; &ldquo;Funny Moment&rdquo;, &ldquo;Ranking&rdquo;,
-          &ldquo;Cutscene&rdquo;.
-        </p>
-      ) : null}
-
-      <div className="border-t border-border p-1">
-        {creating ? (
-          <InlineCreate
-            onCancel={() => setCreating(false)}
-            onCreated={(created) => {
-              setCreating(false);
-              onSelectOnly(created.id, created);
-            }}
-          />
-        ) : (
-          <>
-            {/*
-             * Inline create — the one thing in this menu that is catalogue
-             * management rather than use, so it is gated separately. An editor
-             * files against the vocabulary; extending it is a heads-and-admin
-             * decision, and offering the button to everybody would put a 403
-             * behind the most inviting item in the list.
-             */}
-            {canManage ? (
-            <button
-              type="button"
-              disabled={disabled || busy}
-              onClick={() => setCreating(true)}
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-            >
-              <Plus className="size-3.5 shrink-0" />
-              New content type
-            </button>
-            ) : null}
-            <Link
-              href="/content-types"
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
-            >
-              <Settings2 className="size-3.5 shrink-0" />
-              Manage content types
-            </Link>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Create a type without leaving the Short.
- *
- * Same reasoning as the niche picker's inline create: the moment somebody
- * notices they need a new label is the moment they are looking at the Short
- * that needs it, and a trip to a management screen mid-flow is exactly the
- * friction that stops people classifying at all.
- */
-function InlineCreate({
-  onCancel,
-  onCreated,
-}: {
-  onCancel: () => void;
-  onCreated: (contentType: ContentTypeDTO) => void;
-}) {
-  const [name, setName] = React.useState("");
-  const create = useCreateContentType();
-
-  const submit = () => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    create.mutate(
-      { name: trimmed },
-      {
-        onSuccess: ({ contentType }) => {
-          toast.success(`Content type “${contentType.name}” created`);
-          onCreated(contentType);
-        },
-        onError: (error) =>
-          toast.error("Could not create that content type", {
-            description: error instanceof Error ? error.message : undefined,
-          }),
-      },
-    );
-  };
-
-  return (
-    // A div rather than a <form>: this renders inside the Shorts table, and a
-    // nested form would be invalid HTML there.
-    <div className="flex items-center gap-1.5 p-1">
-      <Input
-        autoFocus
-        value={name}
-        maxLength={48}
-        placeholder="New type — e.g. Ranking"
-        onChange={(event) => setName(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            submit();
-          }
-          if (event.key === "Escape") onCancel();
-        }}
-        className="h-8 text-[13px]"
-      />
-      <Button
-        type="button"
-        variant="primary"
-        size="sm"
-        loading={create.isPending}
-        disabled={!name.trim()}
-        onClick={submit}
-      >
-        Create
-      </Button>
-    </div>
   );
 }

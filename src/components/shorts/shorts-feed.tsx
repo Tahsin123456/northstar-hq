@@ -9,7 +9,8 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ShortCard, ShortCardHeader } from "./short-card";
 import { ShortDetailDialog, type ShortDetailTarget } from "./short-detail-dialog";
-import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
+import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
+import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
 
 /**
  * The shared feed body used by Winners, Outliers and any other ranked list.
@@ -40,7 +41,7 @@ export function ShortsFeed({
   // Resolved here, once, and handed down exactly like `noteCount` already is —
   // a scored feed row carries the analytics engine's projection of a video,
   // which deliberately knows nothing about this organization's labels.
-  const contentTypeIndex = useVideoContentTypeIndex();
+  const contentTypeIndex = useVideoContentTypeResolutions();
 
   const visible = React.useMemo(() => shorts.slice(0, limit), [shorts, limit]);
 
@@ -110,7 +111,7 @@ export function ShortsFeed({
               short={short}
               rank={showRank ? index + 1 : undefined}
               noteCount={noteCounts[short.video.id] ?? 0}
-              contentTypeIds={contentTypeIndex.get(short.video.id) ?? NO_CONTENT_TYPES}
+              resolution={contentTypeIndex.get(short.video.id) ?? EMPTY_RESOLUTION}
               onOpenShort={setOpenShort}
             />
           ))}

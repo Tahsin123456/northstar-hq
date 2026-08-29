@@ -39,6 +39,8 @@ import {
   HIT_RATE_DEFINITION,
   UNCONFIGURED_THRESHOLD_LABEL,
 } from "@/lib/analytics/constants";
+import { effectiveContentTypeIds } from "@/lib/content-types/resolve";
+import { tallyEffectiveShorts } from "@/lib/content-types/tally";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import type { ContentTypeDTO, VideoDTO } from "@/lib/dto";
 
@@ -56,6 +58,8 @@ const EMPTY_NICHES: readonly { id: string }[] = [];
 // Stable identities for the fallbacks below. A fresh array literal on every
 // render would be a new dependency on every render, defeating the memos.
 const EMPTY_VIDEOS: readonly VideoDTO[] = [];
+/** A channel that has not loaded yet gives its Shorts nothing to inherit. */
+const EMPTY_TYPE_IDS: readonly string[] = [];
 const EMPTY_CONTENT_TYPES: readonly ContentTypeDTO[] = [];
 
 export default function ChannelDetailPage({
@@ -102,21 +106,51 @@ export default function ChannelDetailPage({
   const scopedVideos = React.useMemo(() => {
     const videos = row?.videos ?? EMPTY_VIDEOS;
     if (contentType === "all") return videos;
-    return videos.filter((video) =>
-      contentType === "unassigned"
-        ? video.contentTypeIds.length === 0
-        : video.contentTypeIds.includes(contentType),
-    );
+
+    // Resolved against THIS channel's tags, which is the whole reason the filter
+    // finds anything: the Shorts that carry a type here overwhelmingly inherit
+    // it and store nothing, so reading their own rows would narrow a four
+    // hundred Short library down to the two somebody had singled out.
+    const channelTypeIds = row?.channel.contentTypeIds ?? EMPTY_TYPE_IDS;
+    return videos.filter((video) => {
+      const effective = effectiveContentTypeIds({
+        channelTypeIds,
+        manualIds: video.manualContentTypeIds,
+        excludedIds: video.excludedContentTypeIds,
+      });
+      return contentType === "unassigned"
+        ? effective.length === 0
+        : effective.includes(contentType);
+    });
   }, [row, contentType]);
 
-  // This channel's unclassified Shorts, for the "Untagged" option's badge.
-  // Counted over the channel's whole stored history rather than the current
-  // window, so the number does not move every time the period does.
-  const untaggedShorts = React.useMemo(
+  /*
+   * This channel's Shorts, resolved: the per-type counts and the untagged count
+   * behind the filter menu's badges, and the reach of a channel-level tag for
+   * the Content Types block below.
+   *
+   * ONE PASS FOR ALL THREE, because all three have to agree with each other and
+   * with `scopedVideos` above. A menu that offered "Rankings · 40" over a table
+   * of twelve, or a Content Types block promising to reach a different number of
+   * Shorts than the filter can find, would each be the same bug: two counts of
+   * one library derived two ways.
+   *
+   * Counted over the channel's whole stored history rather than the current
+   * window, so none of these numbers moves every time the period does.
+   *
+   * ON A TAGGED CHANNEL `untagged` IS NOW ZERO, and that is the correct answer
+   * rather than a broken one: every Short inherits the channel's tags, so none of
+   * them is unclassified. The badge collapsing to nothing the moment somebody
+   * tags the channel is the feature working.
+   */
+  const shortsTally = React.useMemo(
     () =>
-      (row?.videos ?? EMPTY_VIDEOS).filter(
-        (video) => video.isShort && video.contentTypeIds.length === 0,
-      ).length,
+      tallyEffectiveShorts([
+        {
+          channelTypeIds: row?.channel.contentTypeIds ?? EMPTY_TYPE_IDS,
+          videos: row?.videos ?? EMPTY_VIDEOS,
+        },
+      ]),
     [row],
   );
 
@@ -210,7 +244,8 @@ export default function ChannelDetailPage({
             below counts Shorts. */}
         <ContentTypeFilterControl
           contentTypes={data?.contentTypes ?? EMPTY_CONTENT_TYPES}
-          unassignedCount={untaggedShorts}
+          unassignedCount={shortsTally.untagged}
+          shortCounts={shortsTally.byType}
           unit="short"
         />
         <ThresholdSelector
@@ -297,17 +332,20 @@ export default function ChannelDetailPage({
       </div>
 
       {/*
-        Directly above the Shorts table on purpose.
+        Directly above the Shorts table on purpose, and now for a stronger
+        reason than adjacency.
 
-        This is the channel's own claim about what it makes; every row below is
-        the record of what each Short actually turned out to be. Adjacent, the
-        two can be read against each other in one glance — which is the entire
-        reason the channel carries tags of its own rather than inheriting the
-        union of its Shorts'. Note it deliberately ignores the content-type
-        FILTER above: this states what the channel is, not what you are
-        currently looking at.
+        This block is where the tags on every row below come FROM. A reader who
+        sees the same two chips on two hundred Shorts and wonders who filed them
+        all has the answer immediately above the table, rather than having to
+        infer inheritance from the fact that it is unlikely anybody did that by
+        hand. The rows that differ from it are the deviations, and they are
+        drawn to look like deviations.
+
+        Note it deliberately ignores the content-type FILTER above: this states
+        what the channel is, not what you are currently looking at.
       */}
-      <ChannelContentTypes channel={channel} />
+      <ChannelContentTypes channel={channel} shortsCount={shortsTally.total} />
 
       {/* --- Every Short in the window --- */}
       <div className="flex flex-col gap-3">

@@ -155,6 +155,7 @@ export function NicheFilterControl({
 export function ContentTypeFilterControl({
   contentTypes,
   unassignedCount,
+  shortCounts,
   unit = "channel",
   className,
 }: {
@@ -167,6 +168,22 @@ export function ContentTypeFilterControl({
    * different one.
    */
   unassignedCount: number;
+  /**
+   * typeId -> Shorts effectively carrying it. Required in the `"short"` unit.
+   *
+   * PASSED IN, BECAUSE THE CATALOGUE ROW CAN NO LONGER ANSWER IT. It used to
+   * read `ContentTypeDTO.videoCount` — a count of stored rows — and that number
+   * has stopped meaning "Shorts filed as this". A tag on a channel reaches every
+   * Short beneath it without a row existing, so the catalogue's
+   * `manualVideoCount` now counts only the deviations: it would offer
+   * "Memes · 3" above a feed that is about to return four hundred.
+   *
+   * There is no honest way to fix that on the server either — the answer depends
+   * on resolving every Short against its channel, which is exactly what the
+   * caller has already done to produce `unassignedCount`. So it comes from the
+   * same pass, and the badge and the filter cannot disagree.
+   */
+  shortCounts?: ReadonlyMap<string, number>;
   /**
    * What this menu is about to narrow.
    *
@@ -251,11 +268,15 @@ export function ContentTypeFilterControl({
                   ) : null}
                 </span>
                 {/* The count has to be in the unit this menu narrows, or it
-                    promises a number of rows it will not deliver. Both are on
-                    the catalogue row precisely because a tag attaches to both
-                    channels and Shorts. */}
+                    promises a number of rows it will not deliver — and in the
+                    Shorts unit it now has to be RESOLVED, not counted off the
+                    catalogue. The channel unit is unaffected: a channel's tags
+                    are its own, so `channelCount` is still exactly the rows this
+                    option will show. */}
                 <span className="tnum shrink-0 text-[11px] text-subtle-foreground">
-                  {unit === "channel" ? item.channelCount : item.videoCount}
+                  {unit === "channel"
+                    ? item.channelCount
+                    : (shortCounts?.get(item.id) ?? 0)}
                 </span>
               </span>
             </DropdownMenuRadioItem>

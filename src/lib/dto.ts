@@ -88,15 +88,36 @@ export interface ContentTypeDTO extends ContentTypeRefDTO {
    * for new work.
    */
   readonly isActive: boolean;
-  /** Shorts currently filed under it, across the organization. */
-  readonly videoCount: number;
+  /**
+   * Shorts carrying this tag MANUALLY — over and above what their channel gives
+   * them.
+   *
+   * NOT "how many Shorts have this tag". That number is no longer a row count
+   * and never can be: a tag on a channel reaches every Short the channel has
+   * published and every one it publishes tomorrow, without a row existing for
+   * any of them. Naming this `manualVideoCount` rather than leaving it as
+   * `videoCount` is deliberate — the rename is what forced every reader of the
+   * old field to be re-examined instead of quietly reporting a fraction of the
+   * truth under the old label.
+   */
+  readonly manualVideoCount: number;
+  /**
+   * Shorts REFUSING this tag — the tombstones.
+   *
+   * Reported because deleting the type destroys them, and an exclusion is
+   * exactly as much a human judgement as an assignment: somebody looked at a
+   * Short their channel had labelled and said no. A delete that silently
+   * dropped them would let the tag come back on those Shorts the moment
+   * anybody re-created it.
+   */
+  readonly excludedVideoCount: number;
   /**
    * Tracked channels tagged with it, across the organization.
    *
    * A content type is a tag on two different things — channels and Shorts — so
    * "how much is this in use?" has two answers and both are reported. The two
-   * are independent: a channel tagged "Rankings" says what the team expects of
-   * it, and the Shorts filed under "Rankings" say what it actually produced.
+   * are no longer independent: the channel tag is what REACHES the Shorts, and
+   * the per-Short rows above only record where a Short departs from it.
    */
   readonly channelCount: number;
   readonly createdAt: number;
@@ -143,10 +164,15 @@ export interface ChannelDTO {
    * Content types tagged on the channel itself — what the team says this
    * channel makes.
    *
-   * A SEPARATE STATEMENT FROM WHAT ITS SHORTS ARE FILED UNDER, and deliberately
-   * so: this is the editorial read on a channel ("they do Rankings"), while
-   * `VideoDTO.contentTypeIds` is the record of what each Short actually was.
-   * The two are allowed to disagree, and the disagreement is often the finding.
+   * THE LIVE SOURCE FOR EVERY SHORT ON THIS CHANNEL, not merely an editorial
+   * note beside them. A Short's effective tags are
+   *
+   *     (this array − the Short's exclusions) ∪ the Short's manual tags
+   *
+   * so adding a tag here reaches every Short the channel has ever published and
+   * every one it publishes tomorrow, with nothing written per Short. See
+   * `src/lib/content-types/resolve.ts`, which is where that is computed for both
+   * the server and the browser.
    *
    * Ids into `DatasetDTO.contentTypes`, for the same reason the video side ships
    * ids: the catalogue travels once and renaming a tag stays a one-row change.
@@ -165,15 +191,36 @@ export interface VideoDTO extends AnalyticsVideo {
   readonly classificationConfidence: number;
   readonly isAvailable: boolean;
   /**
-   * Content types filed against this Short, as ids into `DatasetDTO.contentTypes`.
+   * =======================================================================
+   * DEVIATIONS FROM THE CHANNEL — NOT THIS SHORT'S EFFECTIVE TAGS
+   * =======================================================================
    *
-   * Ids, not objects. This is the one field on the wire that is repeated a few
-   * thousand times, and a `{ id, name, colorIndex }` per assignment would ship
-   * the same forty names over and over. The catalogue travels once at the top
-   * of the payload and the client joins — which is also what makes renaming a
-   * type a one-row change rather than a rewrite of every video it touches.
+   * There used to be one `contentTypeIds` array here meaning "this Short's
+   * tags". That is now ambiguous, so it is gone: a Short's tags are
+   *
+   *     (its channel's tags − `excludedContentTypeIds`) ∪ `manualContentTypeIds`
+   *
+   * and the join is done by `resolveContentTypes` in
+   * `src/lib/content-types/resolve.ts`, which both the server and the browser
+   * import. Consumers resolve against `ChannelDTO.contentTypeIds`; that is what
+   * keeps the channel the LIVE source rather than a thing that was copied onto
+   * these rows once.
+   *
+   * A PRECOMPUTED EFFECTIVE LIST WOULD BE WRONG HERE, not merely redundant. It
+   * would be a snapshot taken when the server assembled the payload: the client
+   * re-slices this dataset in memory for the whole session without refetching,
+   * so a channel tag added or removed in that time would reach nothing already
+   * shipped. Two short arrays that describe only the exceptions cannot go stale
+   * in that way, because they do not restate what the channel says.
+   *
+   * Ids, not objects, for the same reason the catalogue ships once: this is the
+   * field repeated a few thousand times on the wire. And both arrays are EMPTY
+   * for the overwhelming majority of Shorts — a Short that agrees with its
+   * channel records nothing at all, which is the entire point.
    */
-  readonly contentTypeIds: readonly string[];
+  readonly manualContentTypeIds: readonly string[];
+  /** Tags this Short refuses. A tombstone survives the channel dropping the tag. */
+  readonly excludedContentTypeIds: readonly string[];
 }
 
 /** One channel plus every video of its stored history. */
@@ -204,11 +251,11 @@ export interface DatasetDTO {
   /**
    * The content-type catalogue, once, including archived types.
    *
-   * Archived ones are included because `VideoDTO.contentTypeIds` can still
-   * point at them — a Short filed under a since-archived type keeps its label,
-   * and a catalogue that omitted the target would render it as a dangling id.
-   * The client filters to `isActive` when it offers a choice, not when it
-   * renders one already made.
+   * Archived ones are included because a channel tag or a Short's manual row
+   * can still point at them — a Short filed under a since-archived type keeps
+   * its label, and a catalogue that omitted the target would render it as a
+   * dangling id. The client filters to `isActive` when it offers a choice, not
+   * when it renders one already made.
    *
    * ONE FLAT, ORG-WIDE LIST — there is no per-niche narrowing to apply. Any of
    * these tags may go on any of the organization's channels or Shorts, so "what

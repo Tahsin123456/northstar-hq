@@ -101,22 +101,26 @@ export function toContentTypeRefDTO(
  * what "in use" means (content-type-service) from being quietly duplicated
  * here.
  *
- * BOTH counts, because a tag attaches to both a channel and a Short and the
- * two are independent facts. A tag with 40 Shorts and no channels is a live
- * vocabulary; one with 6 channels and no Shorts is an expectation nobody has
- * yet checked. Reporting only one of them would hide whichever the reader
- * happened to need.
+ * THREE counts, because a tag now attaches to a channel and DEVIATES on a
+ * Short, and those are three different facts. The channel count is the one that
+ * describes reach — a tag on 6 channels labels every Short those channels have
+ * published, with no row per Short anywhere. The two video counts describe only
+ * the exceptions: Shorts that carry the tag their channel does not give them,
+ * and Shorts that refuse the one it does. Reporting a single "videoCount" here
+ * would state a fraction of the truth under a label that claims to be all of
+ * it.
  */
 export function toContentTypeDTO(
   contentType: ContentType,
-  counts: { videoCount: number; channelCount: number },
+  counts: { manualVideoCount: number; excludedVideoCount: number; channelCount: number },
 ): ContentTypeDTO {
   return {
     ...toContentTypeRefDTO(contentType),
     slug: contentType.slug,
     sortOrder: contentType.sortOrder,
     isActive: contentType.isActive,
-    videoCount: counts.videoCount,
+    manualVideoCount: counts.manualVideoCount,
+    excludedVideoCount: counts.excludedVideoCount,
     channelCount: counts.channelCount,
     createdAt: contentType.createdAt.getTime(),
   };
@@ -214,20 +218,48 @@ export type VideoProjection = Pick<
   | "isAvailable"
 > & {
   /**
-   * The caller's own content-type assignments for this video.
+   * The caller's own content-type DEVIATIONS for this video — never its tags.
+   *
+   * `state` comes with the id and is not optional, because a row is meaningless
+   * without it: the same shape means "carries this tag" and "refuses this tag"
+   * depending on that one column, and a projection that dropped it would be
+   * read as the first by anything that compiled.
    *
    * REQUIRED, not optional like the join rows on `TrackedChannelProjection`.
    * `Video` is a global, deduplicated row shared between organizations, so
    * these join rows only mean anything once they have been narrowed to one
    * tenant — and an optional field defaulting to `[]` would let a query that
-   * forgot the relation ship "this Short has no content types" to a team that
-   * had classified it, which reads as data loss rather than as a missing
-   * include. Making it required turns that omission into a compile error.
+   * forgot the relation ship a Short as agreeing with its channel when the team
+   * had explicitly said otherwise. Making it required turns that omission into
+   * a compile error.
    */
-  contentTypes: Array<{ contentTypeId: string }>;
+  contentTypes: Array<{ contentTypeId: string; state: string }>;
 };
 
 export function toVideoDTO(video: VideoProjection): VideoDTO {
+  /*
+   * Split by state, and nothing is resolved here.
+   *
+   * The mapper's job is to report the two kinds of deviation the row can be;
+   * turning them into the Short's actual tags needs the CHANNEL, which this
+   * function does not have and deliberately is not given. Resolution happens in
+   * `src/lib/content-types/resolve.ts`, once, where the browser can reach it —
+   * see the note on `VideoDTO.manualContentTypeIds` for why a precomputed
+   * effective list must not travel on the wire.
+   *
+   * An unrecognised state is treated as neither. The column is a plain String
+   * for SQLite/PostgreSQL portability, so a value written by a future migration
+   * this build has never heard of is possible, and guessing which of the two
+   * opposite meanings it has would be worse than ignoring it.
+   */
+  const manualContentTypeIds: string[] = [];
+  const excludedContentTypeIds: string[] = [];
+
+  for (const row of video.contentTypes) {
+    if (row.state === "manual") manualContentTypeIds.push(row.contentTypeId);
+    else if (row.state === "excluded") excludedContentTypeIds.push(row.contentTypeId);
+  }
+
   return {
     id: video.id,
     youtubeVideoId: video.youtubeVideoId,
@@ -242,8 +274,9 @@ export function toVideoDTO(video: VideoProjection): VideoDTO {
     classificationConfidence: video.classificationConfidence,
     isAvailable: video.isAvailable,
     // Sorted so a re-save cannot reorder the chips on a Short, and so a
-    // client memoising on this array does not invalidate for no reason.
-    contentTypeIds: video.contentTypes.map((row) => row.contentTypeId).sort(),
+    // client memoising on these arrays does not invalidate for no reason.
+    manualContentTypeIds: manualContentTypeIds.sort(),
+    excludedContentTypeIds: excludedContentTypeIds.sort(),
   };
 }
 

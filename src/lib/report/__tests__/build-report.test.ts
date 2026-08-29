@@ -27,9 +27,12 @@ function asVideoDTO(video: ReturnType<typeof makeShort>): VideoDTO {
     classification: video.isShort ? "short" : "not_short",
     classificationConfidence: 0.99,
     isAvailable: true,
-    // Unclassified. The report is built from view counts and hit thresholds and
-    // must not start depending on a label an organization may never apply.
-    contentTypeIds: [],
+    // No deviations from the channel — which, with the untagged channel below,
+    // makes these Shorts genuinely unclassified. The report is built from view
+    // counts and hit thresholds and must not start depending on a label an
+    // organization may never apply.
+    manualContentTypeIds: [],
+    excludedContentTypeIds: [],
   };
 }
 const range = (days: number) => ({ startMs: NOW - days * DAY_MS, endMs: NOW });

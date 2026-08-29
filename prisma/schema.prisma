@@ -1494,6 +1494,32 @@ model VideoContentType {
   contentType   ContentType @relation(fields: [contentTypeId], references: [id], onDelete: Cascade)
 
   /// Attribution, so a bulk assignment can be traced back to whoever ran it.
+  /// "manual" | "excluded" — and note what is NOT in that list.
+  ///
+  /// INHERITED TAGS ARE NEVER STORED. A Short's effective content types are
+  /// computed, every time, as:
+  ///
+  ///     (the channel's tags − this Short's exclusions) ∪ this Short's manual tags
+  ///
+  /// That is the whole design, and it is why this column exists rather than a
+  /// row per inherited tag. Copying the channel's tags onto each Short would
+  /// make the relationship a one-time snapshot: removing a tag from a channel
+  /// with 400 Shorts would leave 400 stale rows behind, and adding one later
+  /// would reach nothing already published. The channel stays the live source
+  /// and a Short only records where it DIFFERS from its channel.
+  ///
+  /// So a row here is always a deviation:
+  ///   "manual"   — this Short carries a tag its channel does not.
+  ///   "excluded" — this Short refuses a tag its channel does have. A
+  ///                tombstone, deliberately kept even after the channel drops
+  ///                the tag, because somebody said no to it once and re-adding
+  ///                it to the channel must not silently undo that.
+  ///
+  /// The two are mutually exclusive by construction: one row per
+  /// (organization, video, content type), so a Short cannot both add and refuse
+  /// the same tag, and the unique constraint below is what enforces it.
+  state String @default("manual")
+
   assignedById String?
   assignedAt   DateTime @default(now())
 

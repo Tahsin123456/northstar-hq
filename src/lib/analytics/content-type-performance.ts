@@ -23,6 +23,18 @@ import type { AnalyticsVideo, DateRange } from "./types";
  * the overlap rather than leave a reader to discover it by adding up a column
  * and finding it wrong.
  *
+ * IT COUNTS EFFECTIVE TAGS, AND IT HAS NO CHOICE.
+ *
+ * A Short's tags are its channel's, minus what it refuses, plus what it adds —
+ * and the inherited majority of that is stored NOWHERE. Grouping by the rows
+ * filed against each Short would therefore report a library where a channel
+ * tagged "Rankings" with four hundred Shorts contributes four hundred to
+ * "Untagged" and nothing to "Rankings": the table would say the team has
+ * classified almost nothing, at the exact moment they had classified everything
+ * in one gesture. The resolution happens before anything gets here — see
+ * `effectiveContentTypeIds` on the input below, which is named the way it is so
+ * that handing this function stored ids does not typecheck.
+ *
  * THE UNTAGGED ROW IS PART OF THE ANSWER, NOT A REMAINDER.
  *
  * "Untagged: 310 Shorts" tells the owner how much of the library nobody has
@@ -31,6 +43,13 @@ import type { AnalyticsVideo, DateRange } from "./types";
  * sentinel id, because it is the one row that is NOT a tag: it cannot be
  * clicked through to a filter on a content type that does not exist, and a
  * caller that treats it as one should have to opt in by ignoring the flag.
+ *
+ * Its MEANING has moved with the rest: untagged is now "no tag reached this
+ * Short from either direction" — its channel says nothing about it and nobody
+ * said anything about it either. That is a stricter and much more useful claim
+ * than the old one, and it is why the row is worth keeping rather than watching
+ * it collapse to zero: the Shorts left in it are the genuinely undescribed ones,
+ * on channels nobody has characterised.
  *
  * It is also the one row that never overlaps with any other — a Short is either
  * classified or it is not — so `untaggedShorts + taggedShorts === totalShorts`
@@ -54,15 +73,23 @@ import type { AnalyticsVideo, DateRange } from "./types";
  */
 
 /**
- * The engine's video shape plus the tags filed against it.
+ * The engine's video shape plus THE TAGS THAT ACTUALLY APPLY TO IT.
  *
- * Structural, not a Prisma or DTO type — `VideoDTO` already satisfies it, so a
- * dataset row can be handed straight in, and the maths stays testable with
- * plain objects and no database. Ids rather than objects because that is what
- * travels on the wire; the names come from the catalogue below.
+ * Structural, not a Prisma or DTO type, so the maths stays testable with plain
+ * objects and no database. Ids rather than objects because that is what travels
+ * on the wire; the names come from the catalogue below.
+ *
+ * `VideoDTO` DELIBERATELY NO LONGER SATISFIES THIS. It used to, and a dataset
+ * row could be handed straight in — a convenience that is now a trap, because a
+ * `VideoDTO` carries deviations from its channel rather than its tags, and the
+ * two coincide only for a Short on an untagged channel. The field is named for
+ * what it must contain so the mistake is a compile error rather than a table
+ * that quietly reports the wrong library; the caller resolves first, which it
+ * can only do where the channel is in scope.
  */
 export interface TaggedVideo extends AnalyticsVideo {
-  readonly contentTypeIds: readonly string[];
+  /** `(channel's tags − exclusions) ∪ manual tags`, from `resolveContentTypes`. */
+  readonly effectiveContentTypeIds: readonly string[];
 }
 
 /**
@@ -188,11 +215,11 @@ export function calculateContentTypePerformance(
   let taggedAssignments = 0;
 
   for (const short of shorts) {
-    // Deduplicated per video. A Short carrying the same tag twice is not a
-    // state the server can produce — `(organizationId, videoId, contentTypeId)`
-    // is unique — but this function is also handed optimistically patched
-    // client caches, and a double count here would inflate a row silently.
-    const ids = new Set(short.contentTypeIds);
+    // Deduplicated per video. `resolveContentTypes` already guarantees it — a
+    // tag both inherited and manually added collapses to one entry there — but
+    // this function is structural and takes anything shaped like the input, and
+    // a double count here would inflate a row silently rather than loudly.
+    const ids = new Set(short.effectiveContentTypeIds);
 
     let counted = false;
     for (const id of ids) {

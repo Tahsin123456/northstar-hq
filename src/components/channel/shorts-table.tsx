@@ -33,7 +33,8 @@ import {
   ContentTypeControl,
 } from "@/components/content-types/content-type-control";
 import { useOptionalSession } from "@/components/providers/session-provider";
-import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
+import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
+import { EMPTY_RESOLUTION, type ContentTypeResolution } from "@/lib/content-types/resolve";
 import { cn } from "@/lib/utils";
 
 type ShortsSortKey = "publishedAt" | "views" | "likes" | "comments" | "duration";
@@ -82,7 +83,7 @@ export function ShortsTable({
   const canManage = session?.can("research.write") ?? false;
   // Built once for the whole table rather than per row: it is one Map lookup
   // each, but the query subscription behind it is not free a hundred times.
-  const contentTypeIndex = useVideoContentTypeIndex();
+  const contentTypeIndex = useVideoContentTypeResolutions();
 
   const sorted = React.useMemo(() => {
     const factor = direction === "asc" ? 1 : -1;
@@ -311,7 +312,7 @@ export function ShortsTable({
               <ShortRow
                 key={short.id}
                 short={short}
-                contentTypeIds={contentTypeIndex.get(short.id) ?? NO_CONTENT_TYPES}
+                resolution={contentTypeIndex.get(short.id) ?? EMPTY_RESOLUTION}
                 selectable={canManage}
                 isSelected={selected.has(short.id)}
                 onToggleSelected={() => toggleRow(short.id)}
@@ -332,13 +333,13 @@ export function ShortsTable({
 
 function ShortRow({
   short,
-  contentTypeIds,
+  resolution,
   selectable,
   isSelected,
   onToggleSelected,
 }: {
   short: EvaluatedShort;
-  contentTypeIds: readonly string[];
+  resolution: ContentTypeResolution;
   selectable: boolean;
   isSelected: boolean;
   onToggleSelected: () => void;
@@ -399,7 +400,7 @@ function ShortRow({
       </td>
 
       <td className="px-2 py-2">
-        <ContentTypeControl videoId={short.id} contentTypeIds={contentTypeIds} />
+        <ContentTypeControl videoId={short.id} resolution={resolution} />
       </td>
 
       <td className="px-2 py-2">

@@ -279,15 +279,31 @@ function ContentTypeRow({
             ) : null}
           </div>
           <p className="mt-0.5 text-[11px] text-subtle-foreground">
-            {/* Both counts, always shown — "0 Shorts · 0 channels" is the fact
-                that decides whether this type can be deleted, so hiding either
-                when zero would hide the answer to the only question this row
-                raises. */}
-            <span className="tnum">{formatNumber(contentType.videoCount)}</span>{" "}
-            {contentType.videoCount === 1 ? "Short" : "Shorts"}
-            {" · "}
+            {/*
+                THE CHANNEL COUNT LEADS, because it is the one that describes
+                reach: a tag on six channels labels every Short those channels
+                have published and every one they publish next week, and no row
+                exists for any of them. The number beside it is only the
+                EXCEPTIONS — Shorts individually tagged over and above what
+                their channel gives them — which is why it is labelled "tagged
+                directly" rather than left to read as "Shorts with this tag".
+                Both are always shown, zero included, because together they are
+                what decides whether this type can be deleted.
+            */}
             <span className="tnum">{formatNumber(contentType.channelCount)}</span>{" "}
             {contentType.channelCount === 1 ? "channel" : "channels"}
+            {" · "}
+            <span className="tnum">{formatNumber(contentType.manualVideoCount)}</span>{" "}
+            {contentType.manualVideoCount === 1 ? "Short" : "Shorts"} tagged directly
+            {contentType.excludedVideoCount > 0 ? (
+              <>
+                {" · "}
+                <span className="tnum">
+                  {formatNumber(contentType.excludedVideoCount)}
+                </span>{" "}
+                excluded
+              </>
+            ) : null}
           </p>
         </div>
 
@@ -561,7 +577,10 @@ function DeleteContentTypeDialog({
   // The server is the only place that knows the true counts (a niche-scoped
   // member cannot see the whole tracker), so the pre-check here is only a hint
   // and the refusal below is what actually decides.
-  const looksInUse = contentType.videoCount > 0 || contentType.channelCount > 0;
+  const looksInUse =
+    contentType.manualVideoCount > 0 ||
+    contentType.excludedVideoCount > 0 ||
+    contentType.channelCount > 0;
 
   return (
     <Dialog
@@ -586,7 +605,23 @@ function DeleteContentTypeDialog({
             {refusal
               ? refusal.message
               : looksInUse
-                ? `“${contentType.name}” is on ${formatNumber(contentType.videoCount)} ${contentType.videoCount === 1 ? "Short" : "Shorts"} and ${formatNumber(contentType.channelCount)} ${contentType.channelCount === 1 ? "channel" : "channels"}. Deleting it destroys those classifications — they are judgements somebody made and are recorded nowhere else. Archiving keeps them and stops the type being offered on new work.`
+                ? /*
+                   * The channel clause carries its consequence with it. "6
+                   * channels" reads as the smallest of these numbers and is by
+                   * far the largest thing a delete would take: those channels
+                   * hand this tag to their entire back catalogue.
+                   *
+                   * Exclusions are named too, and not as a technicality. A
+                   * refusal is somebody looking at a Short their channel had
+                   * labelled and saying no; cascading it away would mean
+                   * re-creating a type of the same name silently puts the tag
+                   * back on precisely the Shorts a person had refused it for.
+                   */
+                  `“${contentType.name}” is on ${formatNumber(contentType.channelCount)} ${contentType.channelCount === 1 ? "channel" : "channels"} — which gives it to every Short they have published — and ${formatNumber(contentType.manualVideoCount)} ${contentType.manualVideoCount === 1 ? "Short is" : "Shorts are"} tagged with it directly${
+                    contentType.excludedVideoCount > 0
+                      ? `, with ${formatNumber(contentType.excludedVideoCount)} explicitly refusing it`
+                      : ""
+                  }. Deleting it destroys those judgements — including the refusals — and they are recorded nowhere else. Archiving keeps them and stops the type being offered on new work.`
                 : "Nothing carries this type, so nothing is lost. No Short, channel or view count is affected — a content type is only a label."}
           </p>
         </DialogBody>

@@ -19,14 +19,30 @@ const setContentTypesSchema = z.object({
 /**
  * PUT /api/videos/:videoId/content-types
  *
- * Replaces one Short's content-type tags. `:videoId` is the internal `Video`
- * row id (`VideoDTO.id`), which the client already holds from the dataset — not
- * the YouTube id, which is public and guessable.
+ * Sets one Short's content-type tags. `:videoId` is the internal `Video` row id
+ * (`VideoDTO.id`), which the client already holds from the dataset — not the
+ * YouTube id, which is public and guessable.
  *
- * Returns the ids it stored rather than a video DTO. There is no video-shaped
- * read endpoint to mirror — the client gets its videos from `/api/dataset` —
- * and echoing the stored set is what the caller needs to reconcile its
- * optimistic update.
+ * THE BODY IS THE DESIRED EFFECTIVE SET, not a list of rows to write. The
+ * client sends what it wants the Short to carry — which is the only thing it can
+ * honestly send, since a person sees a Short's tags and not which of them came
+ * from the channel — and the service translates that into deviations: a channel
+ * tag left out becomes an exclusion, a tag the channel does not give becomes a
+ * manual row, and a tag the channel does give is stored nowhere at all.
+ *
+ * So an empty array is not "delete this Short's rows". On a Short whose channel
+ * is tagged it is a set of refusals, and it has to be, or clearing the field
+ * would leave the inherited tags showing.
+ *
+ * Returns the DEVIATIONS it stored plus the resolved effective set, rather than
+ * a video DTO. There is no video-shaped read endpoint to mirror — the client
+ * gets its videos from `/api/dataset` — and the deviations are exactly the two
+ * fields `VideoDTO` carries, so the caller can patch its cache with them
+ * without inferring the storage shape from a rendering one.
+ *
+ * The single-tag override lives next door at
+ * `/api/videos/:videoId/content-types/:contentTypeId`; see the note there for
+ * why removing one inherited chip must not be expressed as a whole-set PUT.
  *
  * THERE IS NO SIBLING `/available` ROUTE, and now there is nothing one could
  * usefully say. The catalogue is flat and org-wide, so the picker's options are
@@ -59,8 +75,9 @@ export function PUT(request: Request, context: RouteContext) {
       throw errors.invalidInput("Provide a list of content type ids to assign.");
     }
 
-    await setVideoContentTypes(videoId, parsed.data.contentTypeIds, request);
-
-    return { videoId, contentTypeIds: [...new Set(parsed.data.contentTypeIds)].sort() };
+    // Echoing what the SERVICE stored rather than what the request asked for.
+    // The two are no longer the same shape: the request names tags, the answer
+    // names deviations, and the client patches its dataset with the answer.
+    return setVideoContentTypes(videoId, parsed.data.contentTypeIds, request);
   });
 }

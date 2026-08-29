@@ -135,6 +135,23 @@ export const AUDIT_ACTIONS = {
    * one filter.
    */
   "contenttype.video_assigned": "Short content types assigned",
+  /**
+   * A Short REFUSED a tag its channel gives it, or took the refusal back.
+   *
+   * GENUINELY NEW EVENTS, not a stylistic split of `video_assigned`. A channel
+   * tag reaches every Short beneath it with no row written anywhere, so the
+   * only trace an exclusion leaves is this entry and one tombstone row — and
+   * the question it answers is the one somebody actually asks: "this Short
+   * obviously belongs to Rankings, why isn't it in the Rankings numbers?"
+   * Filing that under "content types assigned" would describe a REMOVAL as an
+   * assignment, and the summary is the part of an audit entry people read.
+   *
+   * `restored` is its own key for the same reason `reactivated` is: undoing is
+   * a decision somebody made, and collapsing it into the doing would make "was
+   * this ever put back?" unanswerable from the log.
+   */
+  "contenttype.video_excluded": "Short refused an inherited content type",
+  "contenttype.video_restored": "Short's inherited content type restored",
 
   // --- YouTube connections --------------------------------------------------
   "youtube.connected": "YouTube account connected",

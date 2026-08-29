@@ -7,6 +7,7 @@ import {
   type OutlierShort,
   type OutlierSortKey,
 } from "@/lib/analytics/outliers";
+import { effectiveContentTypeIds } from "@/lib/content-types/resolve";
 import type { DateRange } from "@/lib/analytics/types";
 import type { ChannelDTO, DatasetDTO, NicheRefDTO, OwnershipType } from "@/lib/dto";
 import type {
@@ -52,15 +53,16 @@ export interface FeedOptions {
   readonly niche: NicheFilter;
   readonly ownership: OwnershipFilter;
   /**
-   * Which content type the Shorts themselves must carry.
+   * Which content type the Shorts themselves must carry, EFFECTIVELY.
    *
    * A PER-SHORT predicate here, unlike the channel-list filter in
    * `filterRowsByScope` which reads the channel's own tags. That is not an
    * inconsistency — it is the two surfaces having different units. A row on the
    * dashboard is a channel and its numbers describe everything that channel
    * published, so filtering it by a per-Short label would put a figure next to a
-   * label that did not describe it. Here the row IS a Short, so the Short's own
-   * classification is exactly the right question.
+   * label that did not describe it. Here the row IS a Short, so what that Short
+   * actually carries — inherited from its channel or filed against it directly —
+   * is exactly the right question.
    */
   readonly contentType?: ContentTypeFilter;
   readonly minViews?: number;
@@ -128,22 +130,40 @@ export function useShortsFeed(
      * outlier among rankings. Filtering the output keeps the multiples the same
      * numbers they are on every other screen.
      *
+     * MATCHED ON EFFECTIVE TAGS, WHICH IS THE ONLY WAY IT FINDS ANYTHING.
+     *
+     * A Short inheriting "Memes" from its channel stores no row for it, so the
+     * old `video.contentTypeIds.includes(...)` would have matched only the
+     * handful of Shorts somebody had singled out — and would have returned an
+     * almost empty feed for a tag applied to thousands of Shorts. Resolving each
+     * candidate against its channel is what makes "Memes" mean the Memes.
+     *
+     * "Unassigned" comes along for free and gets stricter: a Short with nothing
+     * effective is one whose channel is untagged AND which nobody classified,
+     * rather than merely one with no row of its own.
+     *
      * `null` means no filter at all, which is the overwhelmingly common case and
-     * costs nothing to check.
+     * skips the resolve pass entirely.
      */
     const allowedVideoIds =
       contentType === "all"
         ? null
         : new Set(
-            scoped.flatMap((entry) =>
-              entry.videos
-                .filter((video) =>
-                  contentType === "unassigned"
-                    ? video.contentTypeIds.length === 0
-                    : video.contentTypeIds.includes(contentType),
-                )
-                .map((video) => video.id),
-            ),
+            scoped.flatMap((entry) => {
+              const channelTypeIds = entry.channel.contentTypeIds;
+              return entry.videos
+                .filter((video) => {
+                  const effective = effectiveContentTypeIds({
+                    channelTypeIds,
+                    manualIds: video.manualContentTypeIds,
+                    excludedIds: video.excludedContentTypeIds,
+                  });
+                  return contentType === "unassigned"
+                    ? effective.length === 0
+                    : effective.includes(contentType);
+                })
+                .map((video) => video.id);
+            }),
           );
 
     const scored = calculateOutliers(

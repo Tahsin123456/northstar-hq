@@ -3,17 +3,37 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import type { ContentTypeDTO, DatasetDTO } from "@/lib/dto";
+import type { ContentTypeDTO, DatasetDTO, VideoDTO } from "@/lib/dto";
+import {
+  EMPTY_RESOLUTION,
+  planDeviations,
+  resolveContentTypes,
+  type ContentTypeResolution,
+  type DeviationPlan,
+} from "@/lib/content-types/resolve";
 import { DATASET_KEY, useDataset, useInvalidateDataset } from "./use-dataset";
 
 /**
  * Content types — catalogue reads, assignment writes, and the client-side index
- * that lets any surface render a Short's labels.
+ * that resolves every Short against its channel.
  *
  * ONE FLAT CATALOGUE. A content type is an org-wide tag, so there is no
  * per-niche narrowing anywhere in this file and no "which types may this Short
  * take?" to derive: the answer is the organization's active types, the same
  * array for every Short in the tracker.
+ *
+ * WHAT A SHORT CARRIES IS COMPUTED HERE, NEVER READ OFF THE WIRE
+ *
+ * `VideoDTO` ships DEVIATIONS — the tags a Short adds to its channel's, and the
+ * ones it refuses. Its actual tags are
+ *
+ *     (channel's tags − exclusions) ∪ manual tags
+ *
+ * resolved by `src/lib/content-types/resolve.ts`, the same module the server
+ * imports. That is what keeps the channel the LIVE source: tagging a channel
+ * relabels every Short beneath it on the next render, with nothing written per
+ * Short and nothing refetched. A precomputed effective list on the wire would
+ * have gone stale the moment somebody edited a channel in another tab.
  *
  * WHY ASSIGNMENT PATCHES THE CACHE INSTEAD OF INVALIDATING IT
  *
@@ -26,11 +46,13 @@ import { DATASET_KEY, useDataset, useInvalidateDataset } from "./use-dataset";
  * slowest.
  *
  * So the writes below apply the server's own answer to the cached dataset in
- * place. This is not an optimistic guess: `PUT /api/videos/:id/content-types`
- * echoes back exactly what it stored, and the bulk endpoint's outcome is
- * deterministic ("add" unions, "replace" leaves exactly one). The usage counts
- * on the catalogue are adjusted by the same delta, so nothing on screen can
- * drift out of step with what was written.
+ * place. This is not an optimistic guess: every per-Short route echoes back the
+ * DEVIATIONS it stored, and the bulk endpoint's outcome is derived here with
+ * `planDeviations` — the same function the server used, against the same channel
+ * tags, so "what the client thinks it wrote" and "what was written" are the same
+ * computation rather than two that agree today. The usage counts on the
+ * catalogue are adjusted by the same delta, so nothing on screen can drift out
+ * of step with what was written.
  *
  * The CHANNEL-level write is the exception and invalidates like the niche
  * assignment it sits beside: it happens once per channel from a dialog, not
@@ -205,6 +227,14 @@ export function useSetChannelContentTypes() {
   });
 }
 
+/**
+ * Set one Short's tags — the whole set, as the picker's main gesture sends it.
+ *
+ * Patches with the DEVIATIONS the server echoed back rather than re-deriving
+ * them from the ids that were requested. Both would agree today, and the echo is
+ * the one that stays right: the server planned against the Short's stored rows
+ * at the instant it wrote, and this cache may have been a moment behind.
+ */
 export function useSetVideoContentTypes() {
   const queryClient = useQueryClient();
   const invalidateCounts = useInvalidateCatalogueCounts();
@@ -218,7 +248,45 @@ export function useSetVideoContentTypes() {
       contentTypeIds: readonly string[];
     }) => api.setVideoContentTypes(videoId, contentTypeIds),
     onSuccess: (result) => {
-      patchAssignments(queryClient, new Map([[result.videoId, result.contentTypeIds]]));
+      patchStoredDeviations(queryClient, result);
+      invalidateCounts();
+    },
+  });
+}
+
+/**
+ * REFUSE ONE INHERITED TAG — the "remove this chip" gesture, as one request.
+ *
+ * Its own mutation rather than a `setVideoContentTypes` call with one id
+ * dropped, and the difference is what goes on the wire: this sends the tag being
+ * removed and nothing else, so a tab that is a minute out of date cannot revert
+ * somebody's edit to a DIFFERENT tag as a side effect of this click. See the
+ * route for the whole argument.
+ */
+export function useExcludeContentTypeFromVideo() {
+  const queryClient = useQueryClient();
+  const invalidateCounts = useInvalidateCatalogueCounts();
+
+  return useMutation({
+    mutationFn: ({ videoId, contentTypeId }: { videoId: string; contentTypeId: string }) =>
+      api.excludeContentTypeFromVideo(videoId, contentTypeId),
+    onSuccess: (result) => {
+      patchStoredDeviations(queryClient, result);
+      invalidateCounts();
+    },
+  });
+}
+
+/** Take that refusal back, so the channel's tag flows through again. */
+export function useRestoreInheritedContentType() {
+  const queryClient = useQueryClient();
+  const invalidateCounts = useInvalidateCatalogueCounts();
+
+  return useMutation({
+    mutationFn: ({ videoId, contentTypeId }: { videoId: string; contentTypeId: string }) =>
+      api.restoreInheritedContentType(videoId, contentTypeId),
+    onSuccess: (result) => {
+      patchStoredDeviations(queryClient, result);
       invalidateCounts();
     },
   });
@@ -236,9 +304,18 @@ export function useAssignContentTypeToVideos() {
 
   return useMutation({
     mutationFn: (input: BulkAssignInput) => api.assignContentTypeToVideos(input),
-    // `input` is the second argument React Query hands to onSuccess, so the
-    // patch is derived from the request that actually succeeded rather than
-    // from state that may have moved on while it was in flight.
+    /*
+     * `input` is the second argument React Query hands to onSuccess, so the
+     * patch is derived from the request that actually succeeded rather than
+     * from state that may have moved on while it was in flight.
+     *
+     * THE ONE WRITE WHOSE RESULT THE CLIENT DERIVES. The per-Short routes echo
+     * back the rows they stored; this endpoint answers with counts, because it
+     * has up to 500 Shorts to describe. So the outcome is recomputed here with
+     * `planDeviations` — the same function the server wrote through, against the
+     * same channel tags. Not a parallel guess at the outcome: the same
+     * computation, run twice.
+     */
     onSuccess: (_result, input) => {
       const targets = new Set(input.videoIds);
 
@@ -249,18 +326,51 @@ export function useAssignContentTypeToVideos() {
         // two overlapping bulk runs cannot each apply a stale "before".
         const updates = new Map<string, readonly string[]>();
         for (const entry of current.channels) {
+          const channelTypeIds = entry.channel.contentTypeIds;
+
           for (const video of entry.videos) {
             if (!targets.has(video.id)) continue;
+
+            /*
+             * "Add" unions with the Short's EFFECTIVE tags, not its stored rows.
+             *
+             * Those are different sets now, and using the rows would be a
+             * destructive read: a Short inheriting "Ranking" from its channel
+             * stores nothing, so unioning the rows would produce a desired set
+             * of just the new tag — and `planDeviations` would dutifully write
+             * an exclusion for the Ranking nobody asked to remove. The mode is
+             * called "add" and it has to only add.
+             */
+            const effectiveIds = resolveContentTypes({
+              channelTypeIds,
+              manualIds: video.manualContentTypeIds,
+              excludedIds: video.excludedContentTypeIds,
+            }).effectiveIds;
+
             updates.set(
               video.id,
               input.mode === "replace"
                 ? [input.contentTypeId]
-                : normaliseIds([...video.contentTypeIds, input.contentTypeId]),
+                : normaliseIds([...effectiveIds, input.contentTypeId]),
             );
           }
         }
 
-        return applyAssignments(current, updates);
+        return applyVideoDeviations(current, targets, (video, channelTypeIds) =>
+          planDeviations({
+            channelTypeIds,
+            // Present for every id in `targets` that this cache knows about;
+            // one it does not know about is a Short outside this viewer's niche
+            // scope, and leaving its rows alone is the correct answer there.
+            desiredIds: updates.get(video.id) ?? video.manualContentTypeIds,
+            existingManualIds: video.manualContentTypeIds,
+            // Carried through so the cache patch keeps dormant tombstones the
+            // server keeps. Without it the optimistic view would show a refusal
+            // dropped that the database still holds, and the two would disagree
+            // until the next dataset fetch.
+            existingExcludedIds: video.excludedContentTypeIds,
+          }),
+        );
       });
 
       invalidateCounts();
@@ -272,20 +382,13 @@ export function useAssignContentTypeToVideos() {
 // Reading assignments client-side
 // ---------------------------------------------------------------------------
 
-/**
- * The shared empty assignment.
- *
- * A stable reference on purpose: callers write `index.get(id) ?? NO_CONTENT_TYPES`
- * during render, and a fresh `[]` there would be a new dependency on every pass,
- * defeating each memo downstream of it.
- */
-export const NO_CONTENT_TYPES: readonly string[] = [];
-
-const EMPTY_INDEX: ReadonlyMap<string, readonly string[]> = new Map();
+const EMPTY_INDEX: ReadonlyMap<string, ContentTypeResolution> = new Map();
 const EMPTY_CATALOGUE: readonly ContentTypeDTO[] = [];
+/** A stable empty list, so the shared resolution below allocates nothing per channel. */
+const NO_IDS: readonly string[] = [];
 
 /**
- * videoId -> the type ids filed against it, built once per dataset payload.
+ * videoId -> its RESOLVED tags, built once per dataset payload.
  *
  * A WeakMap keyed on the dataset object rather than a `useMemo` in each caller:
  * four surfaces need this index, several of them render a hundred rows, and a
@@ -293,19 +396,66 @@ const EMPTY_CATALOGUE: readonly ContentTypeDTO[] = [];
  * payload means the index is derived exactly when the payload changes — which
  * includes the in-place patches above, since those produce a new dataset object
  * — and is garbage collected with it.
+ *
+ * THE INDEX IS WHERE THE CHANNEL AND THE SHORT ARE JOINED.
+ *
+ * It used to hold a Short's own stored ids and skip the ones that had none. Both
+ * halves of that are now wrong: a Short's stored ids are its DEVIATIONS, and a
+ * Short with none is not untagged — it is the ordinary case that carries exactly
+ * what its channel carries. So every video is resolved here, against the channel
+ * that owns it, and the map is built from the answer rather than from the rows.
+ *
+ * This is also the only place in the client where the two are in scope together.
+ * Resolving here rather than at each surface is what stops the Shorts table, the
+ * feeds and Saved deriving the rule three times and drifting.
  */
-const INDEX_BY_DATASET = new WeakMap<DatasetDTO, Map<string, readonly string[]>>();
+const INDEX_BY_DATASET = new WeakMap<DatasetDTO, Map<string, ContentTypeResolution>>();
 
-function indexFor(dataset: DatasetDTO): ReadonlyMap<string, readonly string[]> {
+function indexFor(dataset: DatasetDTO): ReadonlyMap<string, ContentTypeResolution> {
   const cached = INDEX_BY_DATASET.get(dataset);
   if (cached) return cached;
 
-  const index = new Map<string, readonly string[]>();
+  const index = new Map<string, ContentTypeResolution>();
+
   for (const entry of dataset.channels) {
+    const channelTypeIds = entry.channel.contentTypeIds;
+
+    /*
+     * The channel's own answer, resolved once and SHARED by every Short that
+     * does not deviate from it.
+     *
+     * That is the overwhelming majority of rows — the whole point of storing
+     * nothing per Short — so giving each of them a private copy of the same two
+     * arrays would allocate a few thousand identical objects per payload for
+     * nothing. Shared identity also means a consumer comparing resolutions by
+     * reference gets a true answer cheaply.
+     */
+    const inheritedOnly =
+      channelTypeIds.length === 0
+        ? EMPTY_RESOLUTION
+        : resolveContentTypes({
+            channelTypeIds,
+            manualIds: NO_IDS,
+            excludedIds: NO_IDS,
+          });
+
     for (const video of entry.videos) {
-      // Only videos that carry a label go in. A miss means "no content types",
-      // which is the overwhelmingly common case and costs nothing to store.
-      if (video.contentTypeIds.length > 0) index.set(video.id, video.contentTypeIds);
+      const deviates =
+        video.manualContentTypeIds.length > 0 || video.excludedContentTypeIds.length > 0;
+
+      const resolution = deviates
+        ? resolveContentTypes({
+            channelTypeIds,
+            manualIds: video.manualContentTypeIds,
+            excludedIds: video.excludedContentTypeIds,
+          })
+        : inheritedOnly;
+
+      // A genuinely tagless Short still misses the map, exactly as before —
+      // `EMPTY_RESOLUTION` is what a miss means, so storing it would be storing
+      // the default. What changed is that "tagless" is now a fact about the
+      // channel too, not just about the Short.
+      if (resolution !== EMPTY_RESOLUTION) index.set(video.id, resolution);
     }
   }
 
@@ -314,12 +464,23 @@ function indexFor(dataset: DatasetDTO): ReadonlyMap<string, readonly string[]> {
 }
 
 /**
- * The index for the currently cached dataset.
+ * The resolved index for the currently cached dataset.
  *
  * Call it once per list and look each row up, rather than once per row: the
- * lookup is a Map hit, but the query subscription behind it is not free.
+ * lookup is a Map hit, but the query subscription behind it is not free. A miss
+ * is `EMPTY_RESOLUTION`, which is a real answer ("nothing, from either source")
+ * rather than an absence to handle.
+ *
+ * RENAMED FROM `useVideoContentTypeIndex` on purpose. It used to hand back the
+ * Short's own ids and now hands back a resolution against the channel; a caller
+ * that kept reading it as "the ids stored on this Short" would be silently
+ * wrong, so the rename makes every one of them fail to compile until it has been
+ * looked at.
  */
-export function useVideoContentTypeIndex(): ReadonlyMap<string, readonly string[]> {
+export function useVideoContentTypeResolutions(): ReadonlyMap<
+  string,
+  ContentTypeResolution
+> {
   const { data } = useDataset();
   return data ? indexFor(data) : EMPTY_INDEX;
 }
@@ -384,6 +545,26 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
+ * Records one array's movement to another as +1/-1 per id.
+ *
+ * Extracted because it is now run twice per video — once for the manual rows and
+ * once for the exclusions — and the two counts must be adjusted by identical
+ * arithmetic or they will disagree about the same edit.
+ */
+function accumulate(
+  delta: Map<string, number>,
+  before: readonly string[],
+  after: readonly string[],
+): void {
+  for (const id of after) {
+    if (!before.includes(id)) delta.set(id, (delta.get(id) ?? 0) + 1);
+  }
+  for (const id of before) {
+    if (!after.includes(id)) delta.set(id, (delta.get(id) ?? 0) - 1);
+  }
+}
+
+/**
  * Adds, replaces or removes one entry in the dataset's catalogue copy.
  *
  * Re-sorted to match the order `listContentTypes` uses on the server, so a type
@@ -414,18 +595,46 @@ function patchCatalogue(
   });
 }
 
-function patchAssignments(
+/**
+ * Applies the rows a per-Short route says it stored, verbatim.
+ *
+ * Nothing is re-planned here, and that is the point: the server has already
+ * answered the question, against the state that actually existed at write time.
+ * Re-deriving it from the request would reintroduce the possibility of this
+ * cache and the database disagreeing about a Short nobody has refetched.
+ */
+function patchStoredDeviations(
   queryClient: QueryClient,
-  updates: ReadonlyMap<string, readonly string[]>,
+  stored: {
+    videoId: string;
+    manualContentTypeIds: readonly string[];
+    excludedContentTypeIds: readonly string[];
+  },
 ): void {
+  const plan: DeviationPlan = {
+    manualIds: stored.manualContentTypeIds,
+    excludedIds: stored.excludedContentTypeIds,
+  };
   queryClient.setQueryData<DatasetDTO>(DATASET_KEY, (current) =>
-    current ? applyAssignments(current, updates) : current,
+    current
+      ? applyVideoDeviations(current, new Set([stored.videoId]), () => plan)
+      : current,
   );
 }
 
 /**
- * Rewrites `contentTypeIds` on the named videos and adjusts the catalogue's
- * `videoCount` by the same movement.
+ * Rewrites the named videos' deviation rows, and moves the catalogue counts by
+ * the same arithmetic.
+ *
+ * ONE WALK, TWO CALLERS. The per-Short routes hand back the rows they stored and
+ * the bulk path derives them; both end up here, so the delta arithmetic and the
+ * object-identity rules exist once. What differs between them is only where the
+ * plan comes from, which is why that arrives as a function rather than as data.
+ *
+ * The channel is in scope inside this walk, which is why the translation happens
+ * at this level rather than in the mutation callbacks: `planDeviations` cannot
+ * decide whether a wanted tag needs a row without knowing what the channel
+ * already gives.
  *
  * The counts are adjusted by DELTA rather than recounted from the payload. A
  * niche-scoped member sees only part of the organization's tracker, so counting
@@ -434,41 +643,55 @@ function patchAssignments(
  * deleted. Adding what changed to what the server said is correct whatever the
  * viewer can see.
  *
- * Only `videoCount` moves. `channelCount` is not touched by any write in this
- * file — the channel path invalidates instead of patching, so the fresh count
- * arrives with the refetch rather than being guessed at here.
+ * BOTH ROW COUNTS MOVE, and they move independently. Clearing a tag off a Short
+ * whose channel provides it does not decrement `manualVideoCount` — there was no
+ * manual row — it INCREMENTS `excludedVideoCount`, because refusing it is what
+ * actually got written. A patch that only tracked the first number would drift
+ * the moment anybody used the feature as designed.
+ *
+ * `channelCount` is not touched by any write in this file — the channel path
+ * invalidates instead of patching, so the fresh count arrives with the refetch
+ * rather than being guessed at here.
  *
  * Object identity is preserved for every channel, video and type that did not
  * move, so the analytics memos downstream re-run over the same arrays.
  */
-function applyAssignments(
+function applyVideoDeviations(
   dataset: DatasetDTO,
-  updates: ReadonlyMap<string, readonly string[]>,
+  videoIds: ReadonlySet<string>,
+  planFor: (video: VideoDTO, channelTypeIds: readonly string[]) => DeviationPlan,
 ): DatasetDTO {
-  if (updates.size === 0) return dataset;
+  if (videoIds.size === 0) return dataset;
 
-  const delta = new Map<string, number>();
+  const manualDelta = new Map<string, number>();
+  const excludedDelta = new Map<string, number>();
   let anyChanged = false;
 
   const channels = dataset.channels.map((entry) => {
     let changed = false;
+    const channelTypeIds = entry.channel.contentTypeIds;
 
     const videos = entry.videos.map((video) => {
-      const next = updates.get(video.id);
-      if (next === undefined) return video;
+      if (!videoIds.has(video.id)) return video;
 
-      const before = video.contentTypeIds;
-      if (sameIds(before, next)) return video;
+      const beforeManual = video.manualContentTypeIds;
+      const beforeExcluded = video.excludedContentTypeIds;
 
-      for (const id of next) {
-        if (!before.includes(id)) delta.set(id, (delta.get(id) ?? 0) + 1);
+      const plan = planFor(video, channelTypeIds);
+
+      if (sameIds(beforeManual, plan.manualIds) && sameIds(beforeExcluded, plan.excludedIds)) {
+        return video;
       }
-      for (const id of before) {
-        if (!next.includes(id)) delta.set(id, (delta.get(id) ?? 0) - 1);
-      }
+
+      accumulate(manualDelta, beforeManual, plan.manualIds);
+      accumulate(excludedDelta, beforeExcluded, plan.excludedIds);
 
       changed = true;
-      return { ...video, contentTypeIds: next };
+      return {
+        ...video,
+        manualContentTypeIds: plan.manualIds,
+        excludedContentTypeIds: plan.excludedIds,
+      };
     });
 
     if (!changed) return entry;
@@ -479,9 +702,14 @@ function applyAssignments(
   if (!anyChanged) return dataset;
 
   const contentTypes = dataset.contentTypes.map((type) => {
-    const movement = delta.get(type.id);
-    if (!movement) return type;
-    return { ...type, videoCount: Math.max(0, type.videoCount + movement) };
+    const manualMovement = manualDelta.get(type.id) ?? 0;
+    const excludedMovement = excludedDelta.get(type.id) ?? 0;
+    if (manualMovement === 0 && excludedMovement === 0) return type;
+    return {
+      ...type,
+      manualVideoCount: Math.max(0, type.manualVideoCount + manualMovement),
+      excludedVideoCount: Math.max(0, type.excludedVideoCount + excludedMovement),
+    };
   });
 
   return { ...dataset, channels, contentTypes };

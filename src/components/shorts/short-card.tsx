@@ -15,7 +15,7 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { NO_CONTENT_TYPES } from "@/hooks/use-content-types";
+import { EMPTY_RESOLUTION, type ContentTypeResolution } from "@/lib/content-types/resolve";
 import { NicheChips } from "@/components/niches/niche-chip";
 import { ContentTypeControl } from "@/components/content-types/content-type-control";
 import { SaveShortButton } from "./save-short-button";
@@ -104,7 +104,7 @@ export function ShortCard({
   rank,
   onOpenShort,
   noteCount = 0,
-  contentTypeIds = NO_CONTENT_TYPES,
+  resolution = EMPTY_RESOLUTION,
   className,
 }: {
   short: FeedShort;
@@ -118,7 +118,7 @@ export function ShortCard({
   onOpenShort?: (short: FeedShort) => void;
   noteCount?: number;
   /** Supplied by the feed, which resolves the whole list in one pass. */
-  contentTypeIds?: readonly string[];
+  resolution?: ContentTypeResolution;
   className?: string;
 }) {
   const { video, channel } = short;
@@ -190,7 +190,7 @@ export function ShortCard({
               classifying at the moment somebody notices it, which is here. */}
           <ContentTypeControl
             videoId={video.id}
-            contentTypeIds={contentTypeIds}
+            resolution={resolution}
             revealOnHover
             className="-ml-1"
           />

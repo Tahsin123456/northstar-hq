@@ -6,6 +6,7 @@ import type { OutlierSortKey } from "@/lib/analytics/outliers";
 import type { DateRange } from "@/lib/analytics/types";
 import type { DatasetDTO } from "@/lib/dto";
 import type { OwnershipFilter } from "@/lib/filters-store";
+import { tallyEffectiveShorts } from "@/lib/content-types/tally";
 import { useFilters } from "@/components/providers/filters-provider";
 import {
   ContentTypeFilterControl,
@@ -138,8 +139,14 @@ export function FeedControls({
    * Shorts with no classification, counted over the Shorts this feed can show.
    *
    * The unit is a SHORT here, not a channel — the rows on these pages are
-   * Shorts, and `useShortsFeed` reads each one's own `contentTypeIds`. Counting
+   * Shorts, and `useShortsFeed` matches each one's EFFECTIVE tags. Counting
    * channels would offer "Untagged · 4" above a list of two hundred Shorts.
+   *
+   * RESOLVED, because the badge has to agree with the filter it labels. A Short
+   * on a tagged channel is classified whether or not a row exists for it, so
+   * counting empty rows would advertise "Untagged · 3,900" and then produce an
+   * empty feed — the badge and the predicate reading the same rule is the only
+   * thing that keeps that promise honest.
    *
    * Deliberately over every stored Short rather than the feed's current window:
    * the window is a page-local control that moves constantly, and a count that
@@ -147,15 +154,13 @@ export function FeedControls({
    * order-of-magnitude cue for whether the option is worth picking, which is all
    * a menu badge ever is.
    */
-  const untaggedShortCount = React.useMemo(
+  const shortsTally = React.useMemo(
     () =>
-      channels.reduce(
-        (total, entry) =>
-          total +
-          entry.videos.filter(
-            (video) => video.isShort && video.contentTypeIds.length === 0,
-          ).length,
-        0,
+      tallyEffectiveShorts(
+        channels.map((entry) => ({
+          channelTypeIds: entry.channel.contentTypeIds,
+          videos: entry.videos,
+        })),
       ),
     [channels],
   );
@@ -213,7 +218,8 @@ export function FeedControls({
           without appearing above it is indistinguishable from missing data. */}
       <ContentTypeFilterControl
         contentTypes={contentTypes}
-        unassignedCount={untaggedShortCount}
+        unassignedCount={shortsTally.untagged}
+        shortCounts={shortsTally.byType}
         unit="short"
       />
 

@@ -73,11 +73,22 @@ function videoSelect(organizationId: string) {
     classification: true,
     classificationConfidence: true,
     isAvailable: true,
-    // Ids only. The catalogue travels once at the top of the payload; see the
-    // note on `VideoDTO.contentTypeIds`.
+    /*
+     * DEVIATIONS, not tags — and `state` is what says which kind.
+     *
+     * These rows exist only where a Short DIFFERS from its channel: one per tag
+     * it carries that the channel does not, one per tag it refuses that the
+     * channel does. For the overwhelming majority of Shorts there are none at
+     * all, which is what keeps this select cheap on a payload carrying a few
+     * thousand videos — and is the whole reason the channel is left as the live
+     * source instead of being copied down.
+     *
+     * Ids only. The catalogue travels once at the top of the payload; see the
+     * note on `VideoDTO.manualContentTypeIds`.
+     */
     contentTypes: {
       where: { organizationId },
-      select: { contentTypeId: true },
+      select: { contentTypeId: true, state: true },
     },
   } as const;
 }
@@ -119,10 +130,11 @@ export async function buildDataset(
       where: { organizationId, isActive: true, ...trackedChannelNicheFilter(visibleNiches) },
       include: {
         niches: { include: { niche: true } },
-        // The channel's own tags — "what this channel makes" — as ids into the
-        // catalogue shipped once below. A separate statement from what its
-        // Shorts were actually filed under, and the two are allowed to
-        // disagree; see `ChannelDTO.contentTypeIds`.
+        // The channel's own tags — as ids into the catalogue shipped once
+        // below. THE LIVE SOURCE for every Short beneath it: the client
+        // resolves each video's deviations against this array, so a tag added
+        // here appears on all of them with nothing written per Short. See
+        // `src/lib/content-types/resolve.ts`.
         //
         // No tenant filter here and none needed: `ChannelContentType` hangs off
         // the `TrackedChannel` this query has already narrowed to one

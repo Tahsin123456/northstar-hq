@@ -1,23 +1,36 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * WHAT AN ASSIGNMENT IS STILL ALLOWED TO DO.
+ * WHAT AN ASSIGNMENT IS ALLOWED TO WRITE.
  *
  * Content types are flat, org-wide tags: any channel and any Short may carry
  * any of the organization's types. The cross-niche refusal this file used to
  * pin is GONE, deliberately and at the owner's instruction — a test asserting
  * it would now be asserting a bug.
  *
- * What is left is the part that cannot be recovered by hand once broken, and it
- * is a tenancy rule rather than a taxonomy one:
+ * ==========================================================================
+ * AND A SHORT'S TAGS ARE MOSTLY ITS CHANNEL'S
+ * ==========================================================================
+ *
+ *     effective(short) = (channel's tags − exclusions) ∪ manual tags
+ *
+ * The RULE itself is pinned in `src/lib/__tests__/content-type-inheritance.test.ts`,
+ * against the pure function both sides share. What is pinned HERE is the thing
+ * that file cannot see: which rows this service actually puts in the table. The
+ * two failure modes worth a test are opposite and equally bad —
+ *
+ *   • writing a row for a tag the channel already gives, which is the stale-copy
+ *     problem the whole design exists to avoid, and
+ *   • deleting a row where a refusal was needed, which would leave an inherited
+ *     tag showing after somebody removed it.
+ *
+ * On top of that, the tenancy rules that cannot be recovered by hand once broken:
  *   • a tag from another organization is refused, in one message that does not
  *     reveal whether the id exists,
  *   • a Short outside the caller's tracker is a 404,
- *   • and NEITHER refusal reaches the write — this is a replace, so a throw
- *     after the delete would strip a Short's labels to apply a set that was
- *     rejected,
- *   • the channel path reconciles rather than rewriting, so re-saving an
- *     unchanged selection writes nothing and reassigns nobody's attribution.
+ *   • NEITHER refusal reaches the write,
+ *   • and every path reconciles rather than rewriting, so re-saving an unchanged
+ *     selection writes nothing and reassigns nobody's attribution.
  *
  * Prisma, the session, the niche scope and the audit writer are all stubs;
  * what is under test is the decision, not the plumbing.
@@ -38,6 +51,7 @@ const mocks = vi.hoisted(() => ({
   findContentType: vi.fn(),
   findVideoAssignments: vi.fn(),
   deleteVideoAssignments: vi.fn(),
+  updateVideoAssignments: vi.fn(),
   createVideoAssignments: vi.fn(),
   findChannelAssignments: vi.fn(),
   deleteChannelAssignments: vi.fn(),
@@ -54,6 +68,7 @@ vi.mock("@/server/db", () => ({
     videoContentType: {
       findMany: mocks.findVideoAssignments,
       deleteMany: mocks.deleteVideoAssignments,
+      updateMany: mocks.updateVideoAssignments,
       createMany: mocks.createVideoAssignments,
     },
     channelContentType: {
@@ -87,11 +102,41 @@ vi.mock("@/server/auth/niche-scope", () => ({
 
 vi.mock("@/server/audit/audit-service", () => ({ recordAudit: mocks.recordAudit }));
 
-const { assignContentTypeToVideos, setChannelContentTypes, setVideoContentTypes } =
-  await import("../content-type-service");
+const {
+  assignContentTypeToVideos,
+  excludeContentTypeFromVideo,
+  restoreInheritedContentType,
+  setChannelContentTypes,
+  setVideoContentTypes,
+} = await import("../content-type-service");
 
-/** The projection `loadTaggableVideos` selects, for one Short. */
-const VIDEO_ROW = { id: "video_1", title: "Trevor loses it" };
+/**
+ * The projection `loadTaggableVideos` selects, for one Short.
+ *
+ * THE CHANNEL COMES WITH IT, and that is the interesting part of the shape: no
+ * decision this service makes can be reached without knowing what the channel
+ * already gives, so the tracking row rides along inside the same query. The
+ * nested `trackedBy` array is the organization-filtered relation — one row at
+ * most, because the tag hangs off OUR tracking row and not off the globally
+ * shared channel.
+ */
+function videoRow(id: string, title: string, channelTypeIds: readonly string[] = []) {
+  return {
+    id,
+    title,
+    channelId: "channel_1",
+    channel: {
+      trackedBy: [
+        { contentTypes: channelTypeIds.map((contentTypeId) => ({ contentTypeId })) },
+      ],
+    },
+  };
+}
+
+/** One stored DEVIATION, as the reconciler reads it back. */
+function deviation(videoId: string, contentTypeId: string, state: "manual" | "excluded") {
+  return { id: `row_${videoId}_${contentTypeId}`, videoId, contentTypeId, state };
+}
 
 /** The projection `requireVisibleTrackedChannel` selects. */
 const CHANNEL_ROW = {
@@ -104,6 +149,13 @@ const CHANNEL_ROW = {
 /** The projection `requireOwnContentTypes` selects. */
 function contentTypeRow(id: string, name: string) {
   return { id, name };
+}
+
+/** Every row `createMany` was asked to write, flattened. */
+function written(): Array<Record<string, unknown>> {
+  return mocks.createVideoAssignments.mock.calls.flatMap(
+    (call) => call[0].data as Array<Record<string, unknown>>,
+  );
 }
 
 beforeEach(() => {
@@ -121,41 +173,117 @@ describe("setVideoContentTypes", () => {
   /**
    * The whole point of the flat catalogue, stated as a test.
    *
-   * There is no channel niche in the fixture at all, and there does not need to
-   * be: the Short's channel plays no part in deciding which tags it may carry.
+   * The channel here carries no tags at all, so every requested tag is a genuine
+   * deviation and every one of them gets a row.
    */
   it("files a Short under any of the organization's tags", async () => {
-    mocks.findVideos.mockResolvedValue([VIDEO_ROW]);
+    mocks.findVideos.mockResolvedValue([videoRow("video_1", "Trevor loses it")]);
     mocks.findContentTypes.mockResolvedValue([
       contentTypeRow("ct_moments", "Character Moments"),
       contentTypeRow("ct_ranking", "Ranking"),
     ]);
 
-    await expect(
-      setVideoContentTypes("video_1", ["ct_moments", "ct_ranking"]),
-    ).resolves.toBeUndefined();
+    const result = await setVideoContentTypes("video_1", ["ct_moments", "ct_ranking"]);
+
+    expect(result.effectiveContentTypeIds).toEqual(["ct_moments", "ct_ranking"]);
+    expect(result.manualContentTypeIds).toEqual(["ct_moments", "ct_ranking"]);
+    expect(result.excludedContentTypeIds).toEqual([]);
 
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
-    expect(mocks.createVideoAssignments).toHaveBeenCalledWith({
-      data: [
-        {
-          organizationId: ORG_ID,
-          videoId: "video_1",
-          contentTypeId: "ct_moments",
-          assignedById: USER_ID,
-        },
-        {
-          organizationId: ORG_ID,
-          videoId: "video_1",
-          contentTypeId: "ct_ranking",
-          assignedById: USER_ID,
-        },
-      ],
-    });
+    expect(written()).toEqual([
+      {
+        organizationId: ORG_ID,
+        videoId: "video_1",
+        contentTypeId: "ct_moments",
+        state: "manual",
+        assignedById: USER_ID,
+      },
+      {
+        organizationId: ORG_ID,
+        videoId: "video_1",
+        contentTypeId: "ct_ranking",
+        state: "manual",
+        assignedById: USER_ID,
+      },
+    ]);
+  });
+
+  /**
+   * THE ROW THAT MUST NEVER BE WRITTEN.
+   *
+   * The channel already says this Short is a Ranking, and the caller has asked
+   * for exactly that. Storing a row here would be a per-Short copy of the
+   * channel's decision — the thing that goes stale the moment the channel
+   * changes its mind, and that would leave 400 orphans behind on a channel with
+   * 400 Shorts.
+   */
+  it("stores NOTHING for a tag the Short already inherits", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking"]),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_ranking", "Ranking")]);
+
+    const result = await setVideoContentTypes("video_1", ["ct_ranking"]);
+
+    // It carries the tag — from the channel, with no row anywhere.
+    expect(result.effectiveContentTypeIds).toEqual(["ct_ranking"]);
+    expect(result.manualContentTypeIds).toEqual([]);
+    expect(result.excludedContentTypeIds).toEqual([]);
+
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    // And no audit entry describing work that did not happen.
+    expect(mocks.recordAudit).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The opposite mistake, and the reason `[]` could not stay a plain delete.
+   *
+   * On a Short whose channel is tagged, "carry nothing" is a set of REFUSALS.
+   * Deleting rows would have left both inherited chips on screen immediately
+   * after somebody cleared the field.
+   */
+  it("turns clearing a Short on a tagged channel into refusals, not deletions", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking", "ct_funny"]),
+    ]);
+
+    const result = await setVideoContentTypes("video_1", []);
+
+    expect(result.effectiveContentTypeIds).toEqual([]);
+    expect(result.excludedContentTypeIds).toEqual(["ct_funny", "ct_ranking"]);
+
+    expect(written()).toEqual([
+      expect.objectContaining({ contentTypeId: "ct_funny", state: "excluded" }),
+      expect.objectContaining({ contentTypeId: "ct_ranking", state: "excluded" }),
+    ]);
+    // An empty set is a removal, and there is nothing about it to validate
+    // against the catalogue.
+    expect(mocks.findContentTypes).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Reconciled, not rewritten — the attribution rule.
+   *
+   * A delete-everything-then-recreate would store the same final state and stamp
+   * `assignedById` on the survivor with whoever pressed Save, quietly reassigning
+   * a colleague's decision to somebody who only looked at it.
+   */
+  it("leaves an unchanged deviation completely alone", async () => {
+    mocks.findVideos.mockResolvedValue([videoRow("video_1", "Trevor loses it")]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_moments", "Moments")]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_moments", "manual"),
+    ]);
+
+    await setVideoContentTypes("video_1", ["ct_moments"]);
+
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.updateVideoAssignments).not.toHaveBeenCalled();
+    expect(mocks.deleteVideoAssignments).not.toHaveBeenCalled();
   });
 
   it("refuses a tag this organization does not own, and writes nothing", async () => {
-    mocks.findVideos.mockResolvedValue([VIDEO_ROW]);
+    mocks.findVideos.mockResolvedValue([videoRow("video_1", "Trevor loses it")]);
     // The id resolved to no row for this organization — deleted, or somebody
     // else's. The query cannot tell the two apart and neither may the message.
     mocks.findContentTypes.mockResolvedValue([]);
@@ -169,14 +297,15 @@ describe("setVideoContentTypes", () => {
     // would confirm that an id belongs to somebody.
     expect((error as { userMessage: string }).userMessage).toMatch(/no longer exists/i);
 
-    // Nothing was written. This is a replace, so a throw after the delete would
-    // have stripped the Short's existing labels to apply a set that was refused.
+    // Nothing was written. This path can now create refusals as well as remove
+    // rows, so a throw partway through would leave a Short refusing tags to
+    // satisfy a set that was rejected.
     expect(mocks.transaction).not.toHaveBeenCalled();
     expect(mocks.recordAudit).not.toHaveBeenCalled();
   });
 
   it("refuses the whole request when only one of several tags is unknown", async () => {
-    mocks.findVideos.mockResolvedValue([VIDEO_ROW]);
+    mocks.findVideos.mockResolvedValue([videoRow("video_1", "Trevor loses it")]);
     mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_moments", "Moments")]);
 
     await expect(
@@ -198,15 +327,149 @@ describe("setVideoContentTypes", () => {
     expect(mocks.findContentTypes).not.toHaveBeenCalled();
     expect(mocks.transaction).not.toHaveBeenCalled();
   });
+});
 
-  it("clears a Short's tags without consulting the catalogue at all", async () => {
-    mocks.findVideos.mockResolvedValue([VIDEO_ROW]);
+/**
+ * THE SINGLE-TAG OVERRIDE.
+ *
+ * Two cases that store opposite things, which is the whole reason this is a
+ * service function and not a client that sends a shorter list: only the server
+ * knows whether the tag being removed comes from the channel, and therefore
+ * whether removing it means writing a refusal or deleting a row.
+ */
+describe("excludeContentTypeFromVideo", () => {
+  it("writes a TOMBSTONE when the channel provides the tag", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking", "ct_funny"]),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_ranking", "Ranking")]);
 
-    // An empty set is a removal, and there is nothing to validate about it.
-    await expect(setVideoContentTypes("video_1", [])).resolves.toBeUndefined();
+    const result = await excludeContentTypeFromVideo("video_1", "ct_ranking");
 
-    expect(mocks.findContentTypes).not.toHaveBeenCalled();
-    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    // The other inherited tag is untouched — this request named one tag and may
+    // only affect one tag.
+    expect(result.effectiveContentTypeIds).toEqual(["ct_funny"]);
+    expect(result.excludedContentTypeIds).toEqual(["ct_ranking"]);
+
+    expect(written()).toEqual([
+      expect.objectContaining({
+        videoId: "video_1",
+        contentTypeId: "ct_ranking",
+        state: "excluded",
+        assignedById: USER_ID,
+      }),
+    ]);
+  });
+
+  /**
+   * The other case, and it deliberately leaves NO row behind.
+   *
+   * The person is taking back their own earlier "yes", not refusing the channel.
+   * No row means "agrees with the channel", which is exactly true again — and a
+   * tombstone here would assert something nobody said: that if this channel ever
+   * picks the tag up, this Short is to be exempt.
+   */
+  it("deletes the manual row instead when the channel does not provide the tag", async () => {
+    mocks.findVideos.mockResolvedValue([videoRow("video_1", "Trevor loses it")]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_moments", "Moments")]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_moments", "manual"),
+    ]);
+
+    const result = await excludeContentTypeFromVideo("video_1", "ct_moments");
+
+    expect(result.effectiveContentTypeIds).toEqual([]);
+    expect(result.excludedContentTypeIds).toEqual([]);
+
+    expect(mocks.deleteVideoAssignments).toHaveBeenCalledWith({
+      where: { organizationId: ORG_ID, id: { in: ["row_video_1_ct_moments"] } },
+    });
+    expect(mocks.createVideoAssignments).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The one case that RE-STATES a row instead of writing or removing one.
+   *
+   * This Short was tagged "Ranking" by hand before its channel was; the manual
+   * row is kept alive through the channel picking the tag up, so that dropping
+   * it later does not silently take the Short's own classification with it.
+   * Refusing the tag now has to turn that row into a tombstone rather than
+   * delete it — deleting would leave the channel's tag flowing straight back
+   * through, which is the opposite of what was asked.
+   *
+   * Attribution IS re-stamped here, unlike everywhere else in this file, and
+   * deliberately: flipping "manual" to "excluded" is not an edit of the old
+   * judgement, it is the opposite judgement, and whoever made it is its author.
+   */
+  it("turns a redundant manual row into a tombstone rather than deleting it", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking"]),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_ranking", "Ranking")]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_ranking", "manual"),
+    ]);
+
+    const result = await excludeContentTypeFromVideo("video_1", "ct_ranking");
+
+    expect(result.effectiveContentTypeIds).toEqual([]);
+    expect(result.excludedContentTypeIds).toEqual(["ct_ranking"]);
+
+    expect(mocks.updateVideoAssignments).toHaveBeenCalledWith({
+      where: { organizationId: ORG_ID, id: { in: ["row_video_1_ct_ranking"] } },
+      data: expect.objectContaining({ state: "excluded", assignedById: USER_ID }),
+    });
+    expect(mocks.deleteVideoAssignments).not.toHaveBeenCalled();
+    expect(mocks.createVideoAssignments).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when the Short already refuses the tag", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking"]),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_ranking", "Ranking")]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_ranking", "excluded"),
+    ]);
+
+    await excludeContentTypeFromVideo("video_1", "ct_ranking");
+
+    // Idempotency matters on a control people double-click, and a second audit
+    // entry would claim a refusal happened twice.
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.recordAudit).not.toHaveBeenCalled();
+  });
+});
+
+describe("restoreInheritedContentType", () => {
+  it("deletes the tombstone so the channel's tag flows through again", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking"]),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_ranking", "Ranking")]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_ranking", "excluded"),
+    ]);
+
+    const result = await restoreInheritedContentType("video_1", "ct_ranking");
+
+    expect(result.effectiveContentTypeIds).toEqual(["ct_ranking"]);
+    expect(result.excludedContentTypeIds).toEqual([]);
+    expect(mocks.deleteVideoAssignments).toHaveBeenCalledWith({
+      where: { organizationId: ORG_ID, id: { in: ["row_video_1_ct_ranking"] } },
+    });
+  });
+
+  it("is a no-op when there is no refusal to undo", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_ranking"]),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_ranking", "Ranking")]);
+
+    await restoreInheritedContentType("video_1", "ct_ranking");
+
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.recordAudit).not.toHaveBeenCalled();
   });
 });
 
@@ -234,6 +497,17 @@ describe("setChannelContentTypes", () => {
         { trackedChannelId: "tracked_1", contentTypeId: "ct_add", assignedById: USER_ID },
       ],
     });
+
+    /*
+     * NOTHING IS WRITTEN TO THE VIDEO TABLE, and that is the property worth
+     * pinning here. Dropping "ct_drop" from the channel removes it from every
+     * Short beneath it, and adding "ct_add" gives it to every one of them —
+     * including Shorts imported after this edit. A design that copied tags down
+     * would have had to touch every video row on both counts, and would have
+     * left the ones it missed asserting something the channel no longer says.
+     */
+    expect(mocks.createVideoAssignments).not.toHaveBeenCalled();
+    expect(mocks.deleteVideoAssignments).not.toHaveBeenCalled();
   });
 
   /**
@@ -271,47 +545,51 @@ describe("setChannelContentTypes", () => {
 /**
  * THE BULK PATH.
  *
- * Untested until now, and it is the one that touches the most rows: a single
- * request may relabel hundreds of Shorts, so every rule it enforces is enforced
- * hundreds of times over and every rule it drops is dropped the same way.
+ * The one that touches the most rows: a single request may relabel hundreds of
+ * Shorts, so every rule it enforces is enforced hundreds of times over and every
+ * rule it drops is dropped the same way.
  *
- * Three properties matter here and none of them are visible from the return
- * value alone, which is why the assertions reach for what was WRITTEN:
+ * The properties that matter are not visible from the return value alone, which
+ * is why the assertions reach for what was WRITTEN:
  *   • it is all-or-nothing across the id list,
  *   • re-running it writes nothing rather than duplicating,
- *   • and "add" leaves other labels alone while "replace" clears them.
+ *   • a tag the channel already gives is a no-op and NOT a new manual row,
+ *   • an existing refusal is lifted and reported, because that overrides a
+ *     decision somebody made,
+ *   • and "add" leaves other labels alone while "replace" clears them — through
+ *     refusals, where the other labels came from the channel.
  */
 describe("assignContentTypeToVideos", () => {
   const ACTIVE_TAG = { id: "ct_ranking", name: "Ranking", isActive: true };
 
-  function threeVideos() {
+  function threeVideos(channelTypeIds: readonly string[] = []) {
     return [
-      { id: "video_1", title: "Trevor loses it" },
-      { id: "video_2", title: "Michael remembers" },
-      { id: "video_3", title: "Franklin's ranking" },
+      videoRow("video_1", "Trevor loses it", channelTypeIds),
+      videoRow("video_2", "Michael remembers", channelTypeIds),
+      videoRow("video_3", "Franklin's ranking", channelTypeIds),
     ];
   }
 
+  const bulk = (mode: "add" | "replace", videoIds: string[] = ["video_1", "video_2", "video_3"]) =>
+    assignContentTypeToVideos({ videoIds, contentTypeId: ACTIVE_TAG.id, mode });
+
   it("files every selected Short under the tag", async () => {
-    mocks.findContentTypes.mockResolvedValue([]);
     mocks.findVideos.mockResolvedValue(threeVideos());
 
-    const result = await assignContentTypeToVideos({
-      videoIds: ["video_1", "video_2", "video_3"],
-      contentTypeId: ACTIVE_TAG.id,
-      mode: "add",
-    });
+    const result = await bulk("add");
 
     expect(result.assigned).toBe(3);
     expect(result.alreadyAssigned).toBe(0);
-    expect(mocks.createVideoAssignments).toHaveBeenCalledTimes(1);
+    expect(result.restored).toBe(0);
+
     // Attribution on every row, so a 400-Short relabelling stays traceable long
     // after the audit entry has scrolled away.
-    const written = mocks.createVideoAssignments.mock.calls[0][0].data;
-    expect(written).toHaveLength(3);
-    for (const row of written) {
+    const rows = written();
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
       expect(row.organizationId).toBe(ORG_ID);
       expect(row.assignedById).toBe(USER_ID);
+      expect(row.state).toBe("manual");
     }
   });
 
@@ -320,27 +598,68 @@ describe("assignContentTypeToVideos", () => {
    *
    * Filing the same selection twice is a normal gesture — the control is fast
    * and repeatable by design — and the second run must be a no-op rather than a
-   * duplicate. `createMany({ skipDuplicates })` is unavailable on SQLite, which
-   * this schema's portability contract still requires, so the dedupe is done by
-   * reading the existing rows and subtracting. That is the thing under test.
+   * duplicate.
    */
   it("writes nothing on a re-run", async () => {
     mocks.findVideos.mockResolvedValue(threeVideos());
     mocks.findVideoAssignments.mockResolvedValue([
-      { videoId: "video_1" },
-      { videoId: "video_2" },
-      { videoId: "video_3" },
+      deviation("video_1", ACTIVE_TAG.id, "manual"),
+      deviation("video_2", ACTIVE_TAG.id, "manual"),
+      deviation("video_3", ACTIVE_TAG.id, "manual"),
     ]);
 
-    const result = await assignContentTypeToVideos({
-      videoIds: ["video_1", "video_2", "video_3"],
-      contentTypeId: ACTIVE_TAG.id,
-      mode: "add",
-    });
+    const result = await bulk("add");
 
     expect(result.assigned).toBe(0);
     expect(result.alreadyAssigned).toBe(3);
     expect(mocks.createVideoAssignments).not.toHaveBeenCalled();
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ASSIGNING A TAG THE CHANNEL ALREADY GIVES IS A NO-OP.
+   *
+   * The most likely way to fill this table with junk: select every Short on a
+   * channel tagged "Ranking" and file them under "Ranking". Each of them already
+   * carries it. Writing 400 manual rows here would produce exactly the stale
+   * copies the design exists to avoid, and they would outlive the channel tag
+   * that justified them.
+   */
+  it("is a no-op for Shorts that already inherit the tag", async () => {
+    mocks.findVideos.mockResolvedValue(threeVideos([ACTIVE_TAG.id]));
+
+    const result = await bulk("add");
+
+    expect(result.assigned).toBe(0);
+    expect(result.alreadyAssigned).toBe(3);
+    expect(mocks.createVideoAssignments).not.toHaveBeenCalled();
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  /**
+   * LIFTING A REFUSAL, and reporting it separately.
+   *
+   * Somebody is explicitly asking for this tag on this selection, so skipping the
+   * Shorts that carry a tombstone would be a bulk run that quietly did not do
+   * what it said. But it OVERRIDES an earlier decision, so it is counted apart
+   * from the ordinary assignments rather than folded in: "38 filed, 2 refusals
+   * lifted" is something a director can go and ask about, and "40 filed" is not.
+   */
+  it("lifts an existing refusal and counts it apart", async () => {
+    mocks.findVideos.mockResolvedValue(threeVideos([ACTIVE_TAG.id]));
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_2", ACTIVE_TAG.id, "excluded"),
+    ]);
+
+    const result = await bulk("add");
+
+    expect(result.restored).toBe(1);
+    expect(result.assigned).toBe(1);
+    expect(result.alreadyAssigned).toBe(2);
+
+    expect(mocks.deleteVideoAssignments).toHaveBeenCalledWith({
+      where: { organizationId: ORG_ID, id: { in: ["row_video_2_ct_ranking"] } },
+    });
   });
 
   /**
@@ -353,11 +672,7 @@ describe("assignContentTypeToVideos", () => {
     mocks.findVideos.mockResolvedValue(threeVideos().slice(0, 2));
 
     await expect(
-      assignContentTypeToVideos({
-        videoIds: ["video_1", "video_2", "video_elsewhere"],
-        contentTypeId: ACTIVE_TAG.id,
-        mode: "add",
-      }),
+      bulk("add", ["video_1", "video_2", "video_elsewhere"]),
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
 
     expect(mocks.transaction).not.toHaveBeenCalled();
@@ -367,64 +682,71 @@ describe("assignContentTypeToVideos", () => {
   it("refuses a tag from another organization without confirming it exists", async () => {
     mocks.findContentType.mockResolvedValue(null);
 
-    await expect(
-      assignContentTypeToVideos({
-        videoIds: ["video_1"],
-        contentTypeId: "ct_other_org",
-        mode: "add",
-      }),
-    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(bulk("add", ["video_1"])).rejects.toMatchObject({ code: "NOT_FOUND" });
 
     expect(mocks.findVideos).not.toHaveBeenCalled();
     expect(mocks.transaction).not.toHaveBeenCalled();
   });
 
   /**
-   * Archiving has to mean something. The replace path accepts an archived tag —
+   * Archiving has to mean something. The per-Short path accepts an archived tag —
    * it receives a complete desired set and refusing would silently strip a
    * Short's historical label — but bulk filing is unambiguously new work.
    */
   it("refuses to bulk-file under an archived tag", async () => {
     mocks.findContentType.mockResolvedValue({ ...ACTIVE_TAG, isActive: false });
 
-    await expect(
-      assignContentTypeToVideos({
-        videoIds: ["video_1"],
-        contentTypeId: ACTIVE_TAG.id,
-        mode: "add",
-      }),
-    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(bulk("add", ["video_1"])).rejects.toMatchObject({
+      code: "INVALID_INPUT",
+    });
 
     expect(mocks.transaction).not.toHaveBeenCalled();
   });
 
-  it("leaves other labels alone in add mode, and clears them in replace", async () => {
-    mocks.findVideos.mockResolvedValue([threeVideos()[0]]);
+  it("leaves other labels alone in add mode", async () => {
+    mocks.findVideos.mockResolvedValue([videoRow("video_1", "Trevor loses it")]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_moments", "manual"),
+    ]);
 
-    await assignContentTypeToVideos({
-      videoIds: ["video_1"],
-      contentTypeId: ACTIVE_TAG.id,
-      mode: "add",
-    });
+    const result = await bulk("add", ["video_1"]);
+
+    expect(result.removed).toBe(0);
     expect(mocks.deleteVideoAssignments).not.toHaveBeenCalled();
+    expect(written()).toEqual([
+      expect.objectContaining({ contentTypeId: ACTIVE_TAG.id, state: "manual" }),
+    ]);
+  });
 
-    vi.clearAllMocks();
-    mocks.findVideoAssignments.mockResolvedValue([]);
-    mocks.transaction.mockResolvedValue([{ count: 2 }]);
-    mocks.findVideos.mockResolvedValue([threeVideos()[0]]);
+  /**
+   * "Replace" has to reach the INHERITED labels too, or it is the one mode in
+   * the product whose name does not describe it. The channel's other tag becomes
+   * a refusal; the Short's own manual row is simply removed.
+   */
+  it("clears inherited and manual labels alike in replace mode", async () => {
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "Trevor loses it", ["ct_funny"]),
+    ]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_moments", "manual"),
+    ]);
 
-    await assignContentTypeToVideos({
-      videoIds: ["video_1"],
-      contentTypeId: ACTIVE_TAG.id,
-      mode: "replace",
+    const result = await bulk("replace", ["video_1"]);
+
+    // Two labels went: one inherited, one the Short carried itself.
+    expect(result.removed).toBe(2);
+    expect(result.assigned).toBe(1);
+
+    expect(mocks.deleteVideoAssignments).toHaveBeenCalledWith({
+      where: { organizationId: ORG_ID, id: { in: ["row_video_1_ct_moments"] } },
     });
-
-    expect(mocks.deleteVideoAssignments).toHaveBeenCalledTimes(1);
-    const where = mocks.deleteVideoAssignments.mock.calls[0][0].where;
-    expect(where.organizationId).toBe(ORG_ID);
-    // The tag being applied is excluded from the sweep, so a re-run does not
-    // delete and rewrite the row it just made — which would churn `assignedAt`
-    // and lose the original attribution.
-    expect(where.contentTypeId).toEqual({ not: ACTIVE_TAG.id });
+    // Manual rows are planned before refusals, so they are written in that
+    // order. Asserted as a whole array rather than with `arrayContaining` so
+    // that a stray extra row — the failure mode this whole file is about —
+    // cannot slip past.
+    expect(written()).toEqual([
+      expect.objectContaining({ contentTypeId: ACTIVE_TAG.id, state: "manual" }),
+      expect.objectContaining({ contentTypeId: "ct_funny", state: "excluded" }),
+    ]);
   });
 });

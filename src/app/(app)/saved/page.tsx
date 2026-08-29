@@ -59,7 +59,8 @@ import {
 import { useSession } from "@/components/providers/session-provider";
 import { useDataset } from "@/hooks/use-dataset";
 import { useEmployees } from "@/hooks/use-employees";
-import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
+import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
+import { EMPTY_RESOLUTION, type ContentTypeResolution } from "@/lib/content-types/resolve";
 import {
   useCreateCollection,
   useDeleteCollection,
@@ -178,7 +179,7 @@ export default function SavedPage() {
   // types of its own — nor should it, since a label applied tomorrow is not a
   // fact about the moment the Short was saved. It is resolved live from the
   // dataset instead, by the same index every other surface uses.
-  const contentTypeIndex = useVideoContentTypeIndex();
+  const contentTypeIndex = useVideoContentTypeResolutions();
 
   // A saved row flattened into what the single-Short view needs. The dialog
   // reads the labels live from the dataset itself, so nothing here goes stale
@@ -442,7 +443,7 @@ export default function SavedPage() {
                     item={item}
                     collections={collections}
                     noteCount={noteCounts[item.videoId] ?? 0}
-                    contentTypeIds={contentTypeIndex.get(item.videoId) ?? NO_CONTENT_TYPES}
+                    resolution={contentTypeIndex.get(item.videoId) ?? EMPTY_RESOLUTION}
                     isMine={item.savedById === viewerId}
                     onOpenShort={() => setOpenShort(item)}
                   />
@@ -628,14 +629,14 @@ function SavedRow({
   item,
   collections,
   noteCount,
-  contentTypeIds,
+  resolution,
   isMine,
   onOpenShort,
 }: {
   item: SavedShortDTO;
   collections: readonly CollectionDTO[];
   noteCount: number;
-  contentTypeIds: readonly string[];
+  resolution: ContentTypeResolution;
   /**
    * Whether this row is the viewer's own save.
    *
@@ -721,7 +722,7 @@ function SavedRow({
 
           <ContentTypeControl
             videoId={item.videoId}
-            contentTypeIds={contentTypeIds}
+            resolution={resolution}
             revealOnHover
             className="-ml-1"
           />

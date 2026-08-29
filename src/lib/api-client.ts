@@ -58,7 +58,10 @@ import type {
   UpdateEmployeePayResult,
 } from "@/server/services/employee-service";
 import type { AuditPage } from "@/server/audit/audit-service";
-import type { BulkAssignResult } from "@/server/services/content-type-service";
+import type {
+  BulkAssignResult,
+  VideoContentTypeState,
+} from "@/server/services/content-type-service";
 import type {
   NoteLogQuery,
   SavedShortsQuery,
@@ -441,7 +444,12 @@ export const api = {
     request(`/api/content-types/${id}`, { method: "DELETE" }),
 
   /**
-   * Replaces one Short's tags. Echoes back what the server actually stored.
+   * Sets one Short's tags — the DESIRED EFFECTIVE SET, not a list of rows.
+   *
+   * The server translates it into deviations from the channel and echoes those
+   * back, which is what the caller patches its dataset with: `VideoDTO` carries
+   * the deviations, never an effective list. `effectiveContentTypeIds` comes
+   * along so the caller does not resolve what it was just told.
    *
    * Any of the organization's tags may go on any Short, so the only refusals
    * are tenancy ones: a tag another team owns, or a Short outside this caller's
@@ -450,10 +458,37 @@ export const api = {
   setVideoContentTypes: (
     videoId: string,
     contentTypeIds: readonly string[],
-  ): Promise<{ videoId: string; contentTypeIds: string[] }> =>
+  ): Promise<VideoContentTypeState> =>
     request(`/api/videos/${videoId}/content-types`, {
       method: "PUT",
       body: JSON.stringify({ contentTypeIds }),
+    }),
+
+  /**
+   * Refuses ONE tag on ONE Short, and its undo.
+   *
+   * Separate from the whole-set PUT above on purpose: "remove this inherited
+   * chip" is one click, and sending the Short's entire state to express it would
+   * let a stale tab revert somebody else's edit to a different tag as a side
+   * effect. See the route for the full argument.
+   *
+   * On a tag the channel provides, the DELETE writes a tombstone that survives
+   * the channel dropping and re-adding it. Both directions are idempotent.
+   */
+  excludeContentTypeFromVideo: (
+    videoId: string,
+    contentTypeId: string,
+  ): Promise<VideoContentTypeState> =>
+    request(`/api/videos/${videoId}/content-types/${contentTypeId}`, {
+      method: "DELETE",
+    }),
+
+  restoreInheritedContentType: (
+    videoId: string,
+    contentTypeId: string,
+  ): Promise<VideoContentTypeState> =>
+    request(`/api/videos/${videoId}/content-types/${contentTypeId}`, {
+      method: "POST",
     }),
 
   /**

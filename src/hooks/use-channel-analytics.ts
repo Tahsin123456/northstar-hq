@@ -8,7 +8,9 @@ import {
 } from "@/lib/analytics/content-type-performance";
 import type { ChannelMetrics, DateRange, PortfolioSummary } from "@/lib/analytics";
 import type { ChannelDTO, ContentTypeDTO, DatasetDTO, VideoDTO } from "@/lib/dto";
+import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
 import { useFilters } from "@/components/providers/filters-provider";
+import { useVideoContentTypeResolutions } from "./use-content-types";
 import { sortRows, type SortState } from "@/lib/sorting";
 import type {
   ContentTypeFilter,
@@ -86,26 +88,42 @@ export type ScopeableRow = {
  * what makes "GTA + Our Channels + 30D + ≥1M" a single coherent question
  * rather than a filtered view of a global average.
  *
- * THE CONTENT-TYPE PREDICATE READS THE CHANNEL'S OWN TAGS AGAIN.
+ * THE CONTENT-TYPE PREDICATE READS THE CHANNEL'S OWN TAGS, AND UNDER
+ * INHERITANCE THAT IS *ALREADY* THE EFFECTIVE ANSWER.
  *
- * `ChannelContentType` is back, so "channels that make Rankings" is answered by
- * the tag on the channel rather than by scanning every Short it ever published
- * for one. That is the simplification the flat catalogue makes available, and
- * it is a better answer as well as a cheaper one: a channel tagged "Rankings"
- * is the team saying what they watch it for, whereas "has at least one Short
- * filed as a Ranking" made a channel that posted one ranking in 2024 a
- * permanent member of the set.
+ * This is worth stating plainly, because "match on effective tags" sounds like
+ * it must mean resolving something here, and here is the one surface where it
+ * does not. A channel's tags are not a copy of anything — they are the SOURCE
+ * every one of its Shorts resolves against. So `contentTypeIds.includes("memes")`
+ * on a channel row is exactly the set of channels whose Shorts inherit Memes;
+ * there is no second thing to consult, and calling `resolveContentTypes` on a
+ * channel would be resolving a value against itself.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO is admit a channel because one of its
+ * Shorts was manually tagged Memes while the channel is not. That is a genuine
+ * hole and it is the old "has at least one Short filed as a Ranking" rule
+ * wearing a new hat — the one that made a channel which posted a single ranking
+ * in 2024 a permanent member of the set. The row here is a CHANNEL and its
+ * metrics describe everything it published; admitting it on the strength of one
+ * deviating Short would put a "Memes" label above a hit rate computed from four
+ * hundred Shorts that are not memes. Per-Short filtering, where that question is
+ * the right one, happens where Shorts are the unit: `useShortsFeed` and the
+ * channel page's own table, both of which DO resolve.
+ *
+ * "Unassigned" moves with it and gets stronger: a channel with no tags is now
+ * one whose Shorts inherit nothing either, so the option finds exactly the
+ * backlog it claims to — channels nobody has characterised, and therefore whole
+ * libraries no tag reaches.
  *
  * It also drops the niche narrowing entirely. A content type belongs to no
  * niche now, so there is no "type within the niche" to compose — niche and type
  * are two independent narrowings again, and picking "Rankings" with no niche
  * selected is a perfectly ordinary org-wide question.
  *
- * The row is still the CHANNEL, and its metrics still describe everything the
- * channel published — this narrows which channels appear, never which of their
- * Shorts count. A row labelled "Ranking" whose hit rate silently described only
- * its rankings would be a different, unasked question. Per-Short filtering
- * happens where Shorts are the unit: `useShortsFeed` and the Shorts table.
+ * NOTHING HERE TOUCHES THE NETWORK, and that is load-bearing rather than
+ * incidental. This is a plain predicate over arrays already in memory, called
+ * from the `useMemo`s below; the scope never reaches a React Query key, so
+ * picking a content type re-runs this filter and nothing else.
  */
 export function filterRowsByScope<T extends ScopeableRow>(
   rows: readonly T[],
@@ -240,16 +258,44 @@ export function useContentTypePerformance(
   contentTypes: readonly ContentTypeDTO[],
 ): ContentTypePerformance {
   const { range, threshold } = useFilters();
+  /*
+   * The dataset-wide resolution index, NOT a resolve pass of this hook's own.
+   *
+   * It is already built — the Shorts table and both feeds read the same map —
+   * and it is memoised on the payload object, so reusing it here costs a Map
+   * lookup per video instead of a second full resolve over the library. It is
+   * also the only way this table and the chips below it are guaranteed to be
+   * describing the same tags: one derivation, several readers.
+   */
+  const resolutions = useVideoContentTypeResolutions();
 
   return React.useMemo(
     () =>
       calculateContentTypePerformance({
-        videos: rows.flatMap((row) => row.videos),
+        /*
+         * Resolved on the way in, because this is the altitude where the channel
+         * is still in scope. `calculateContentTypePerformance` is handed one flat
+         * pool of Shorts from every channel at once, so by the time it runs there
+         * is no way back to "which channel provided this tag" — the join has to
+         * happen here or not at all.
+         *
+         * One object allocated per video per recompute, which is the price of
+         * keeping the aggregate a pure function of what it is given rather than
+         * teaching it to look up channels. The pool is a few thousand rows and
+         * this memo only re-runs when a filter moves.
+         */
+        videos: rows.flatMap((row) =>
+          row.videos.map((video) => ({
+            ...video,
+            effectiveContentTypeIds: (resolutions.get(video.id) ?? EMPTY_RESOLUTION)
+              .effectiveIds,
+          })),
+        ),
         range,
         threshold,
         contentTypes,
       }),
-    [rows, contentTypes, range, threshold],
+    [rows, contentTypes, range, threshold, resolutions],
   );
 }
 

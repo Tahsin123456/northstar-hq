@@ -17,13 +17,21 @@ import { ContentTypePicker } from "@/components/content-types/content-type-picke
 /**
  * What this channel makes — stated on the channel's own page, and editable there.
  *
- * A SECOND, INDEPENDENT STATEMENT from what the channel's Shorts turn out to be.
- * The niche says which slice of the operation a channel belongs to; this says
- * what the team reckons it produces; the Shorts in the table below say what each
- * one actually was. The two content-type readings are allowed to disagree, and
- * the disagreement is usually the finding — "we file this as a Rankings channel
- * and 80% of its hits are Character Moments" is a sentence this pairing exists
- * to make sayable.
+ * THE SOURCE ITS SHORTS READ FROM, not a separate opinion beside them.
+ *
+ * This used to be one of two independent readings — what the team reckons a
+ * channel produces, against what its Shorts were individually filed as — and
+ * the pair were allowed to disagree. Inheritance collapses that: what is set
+ * here IS what every Short on the channel carries, and a Short only differs
+ * where somebody deliberately made it differ. Nothing is copied down, so the set
+ * below stays the live answer — add a tag and four hundred Shorts have it, drop
+ * one and they do not, and a Short imported next week arrives already carrying
+ * whatever is here.
+ *
+ * WHICH IS WHY THE BLOCK HAS TO SAY SO. Tagging a channel used to be a note to
+ * the team; it is now an edit with reach, and the number of Shorts it reaches is
+ * sitting in memory a component away. Making somebody discover that by watching
+ * four hundred rows change is not a reasonable way to learn it.
  *
  * SAVE/CANCEL RATHER THAN LIVE TOGGLES, unlike the per-Short control on the rows
  * below. The natural unit here is the whole set: deciding a channel does
@@ -32,7 +40,21 @@ import { ContentTypePicker } from "@/components/content-types/content-type-picke
  * intermediate states visible to anyone else reading the channel at the time.
  * A Short is the opposite — one row, one judgement, commit on click.
  */
-export function ChannelContentTypes({ channel }: { channel: ChannelDTO }) {
+export function ChannelContentTypes({
+  channel,
+  shortsCount,
+}: {
+  channel: ChannelDTO;
+  /**
+   * Shorts on this channel that these tags reach.
+   *
+   * The channel's WHOLE stored history, not the selected period — the page's
+   * date filter has no bearing on what a tag applies to, and a number that slid
+   * around as somebody changed the window would be describing something other
+   * than the edit they are about to make.
+   */
+  shortsCount: number;
+}) {
   const session = useOptionalSession();
   // Assigning, not managing — see the note in content-type-control.tsx.
   const canManage = session?.can("research.write") ?? false;
@@ -47,8 +69,7 @@ export function ChannelContentTypes({ channel }: { channel: ChannelDTO }) {
           <div className="min-w-0">
             <CardTitle>Content types</CardTitle>
             <CardDescription>
-              What this channel makes, as the team reads it. Separate from what its
-              individual Shorts are filed under — the two are allowed to disagree.
+              What this channel makes, as the team reads it.
             </CardDescription>
           </div>
 
@@ -61,7 +82,7 @@ export function ChannelContentTypes({ channel }: { channel: ChannelDTO }) {
         </div>
       </CardHeader>
 
-      <CardContent>
+      <CardContent className="flex flex-col gap-3">
         {editing ? (
           /*
            * Remounted per edit session via `key`, so the draft initialises from
@@ -78,13 +99,38 @@ export function ChannelContentTypes({ channel }: { channel: ChannelDTO }) {
         ) : (
           <p className="text-[12px] leading-relaxed text-muted-foreground">
             {canManage
-              ? "Not tagged yet. Say what this channel makes and it becomes comparable with every other channel making the same thing."
+              ? "Not tagged yet. Say what this channel makes and every Short below inherits it."
               : "Not tagged yet."}
           </p>
         )}
+
+        {/*
+         * Shown in every state, including mid-edit and to a viewer who cannot
+         * edit at all. While editing it is the plainest statement of what Save
+         * is about to do; read-only, it is the explanation of why a Short in the
+         * table below carries a tag nobody put there.
+         */}
+        <p className="text-[11px] leading-relaxed text-subtle-foreground">
+          Types set here apply to {shortsReached(shortsCount)}, including any that
+          arrive later. A Short can add its own on top, or drop one it inherits.
+        </p>
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * "all 412 of this channel's Shorts", and the two ways that phrasing falls over.
+ *
+ * A channel with one Short reads badly as "all 1", and a channel with none — a
+ * freshly added one, or a long-form account — has no number worth printing at
+ * all, but the sentence is still true and still worth saying: the tags will
+ * reach whatever it publishes next.
+ */
+function shortsReached(count: number): string {
+  if (count === 0) return "every Short on this channel";
+  if (count === 1) return "this channel's one Short";
+  return `all ${count.toLocaleString()} of this channel's Shorts`;
 }
 
 function ChannelContentTypesEditor({

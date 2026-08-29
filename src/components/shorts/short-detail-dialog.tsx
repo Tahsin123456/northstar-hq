@@ -14,9 +14,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { NicheChips } from "@/components/niches/niche-chip";
-import { ContentTypeControl } from "@/components/content-types/content-type-control";
+import { ShortContentTypePanel } from "@/components/content-types/short-content-type-panel";
 import { NotesPanel } from "@/components/notes/notes-panel";
-import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
+import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
+import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
 import { youtubeShortsUrl, youtubeThumbnailUrl } from "@/lib/format";
 
 /**
@@ -29,17 +30,24 @@ import { youtubeShortsUrl, youtubeThumbnailUrl } from "@/lib/format";
  * Short would have made "open the notes" and "open the Short" two different
  * gestures with two different answers to what a Short is.
  *
- * THE TWO TAXONOMIES SIT SIDE BY SIDE, LABELLED. On a table row they are two
- * runs of chips in a metadata line and the distinction is carried entirely by
- * the dot shape — round for a niche, squared for a content type. That is enough
- * when you are scanning and already know the convention; it is not enough when
- * you have stopped on one Short to decide what it is. So here they get headings,
- * and the shapes go on doing their job underneath.
+ * THE TWO TAXONOMIES ARE BOTH LABELLED. On a table row they are two runs of
+ * chips in a metadata line and the distinction is carried entirely by the dot
+ * shape — round for a niche, squared for a content type. That is enough when you
+ * are scanning and already know the convention; it is not enough when you have
+ * stopped on one Short to decide what it is. So here they get headings, and the
+ * shapes go on doing their job underneath.
+ *
+ * THEY ARE STACKED RATHER THAN SIDE BY SIDE, which they were until content types
+ * grew an inside. A niche is one run of chips and always will be; a Short's
+ * content types are up to three groups and a footnote about a tag that is not
+ * there. Half a dialog is not a fair column for that, and squeezing it in would
+ * have meant collapsing the very distinction the section exists to draw.
  *
  * The niche is READ-ONLY and the content type is not, which is not an oversight:
  * a niche belongs to the CHANNEL, so changing it here would silently refile every
- * other Short the channel ever published. The content type belongs to this Short
- * alone.
+ * other Short the channel ever published. A content type on a channel does reach
+ * every Short beneath it — but this panel never edits the channel's, only what
+ * THIS Short adds to them or refuses of them.
  *
  * The niche is shown as CONTEXT, not as a constraint. It used to decide which
  * content types the picker offered, back when a type belonged to a niche; that
@@ -96,8 +104,8 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
    * dataset in place, so reading the index each render is what keeps the two
    * halves of the same dialog agreeing with each other.
    */
-  const contentTypeIndex = useVideoContentTypeIndex();
-  const contentTypeIds = contentTypeIndex.get(short.videoId) ?? NO_CONTENT_TYPES;
+  const contentTypeIndex = useVideoContentTypeResolutions();
+  const resolution = contentTypeIndex.get(short.videoId) ?? EMPTY_RESOLUTION;
 
   return (
     <>
@@ -143,10 +151,10 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-surface-sunken px-3 py-2.5">
+      <div className="flex flex-col gap-3 rounded-md border border-border bg-surface-sunken px-3 py-2.5">
         <Field label="Niche">
           {/* Not editable here — see the note on this file. `limit` is high
-              because there is room in a two-column panel, and a channel in
+              because the row is the full width of the dialog, and a channel in
               three niches is worth reading in full rather than as "+2". */}
           <NicheChips
             niches={short.niches}
@@ -156,14 +164,12 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
           />
         </Field>
 
-        <Field label="Content type">
-          <ContentTypeControl
-            videoId={short.videoId}
-            contentTypeIds={contentTypeIds}
-            placeholder="Add"
-            emptyLabel="Not classified"
-          />
-        </Field>
+        {/* The two taxonomies are separate claims about the Short and are read
+            separately; without the rule the niche chips and the inherited
+            content types run together into one undifferentiated field. */}
+        <div aria-hidden className="h-px bg-border" />
+
+        <ShortContentTypePanel videoId={short.videoId} resolution={resolution} />
       </div>
 
       <NotesPanel

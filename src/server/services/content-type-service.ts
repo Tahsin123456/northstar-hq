@@ -1,5 +1,6 @@
 import "server-only";
 
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
@@ -11,6 +12,20 @@ import {
 } from "@/server/auth/niche-scope";
 import { toContentTypeDTO } from "@/server/mappers";
 import type { ContentTypeDTO } from "@/lib/dto";
+/*
+ * THE RULE ITSELF LIVES IN `src/lib/`, NOT HERE.
+ *
+ * Imported rather than reimplemented, and imported from a module the browser
+ * also imports, because the client re-slices the dataset in memory without
+ * refetching and therefore has to reach the same answer this file does. Two
+ * implementations of `(channel − exclusions) ∪ manual` is the drift this whole
+ * round exists to prevent.
+ */
+import {
+  effectiveContentTypeIds,
+  planDeviations,
+  type DeviationPlan,
+} from "@/lib/content-types/resolve";
 import { getCurrentOrgId, getScope } from "./user-service";
 
 /**
@@ -40,17 +55,42 @@ import { getCurrentOrgId, getScope } from "./user-service";
  * two teams have to agree on a word, and the owner has decided that is the
  * trade they want.
  *
- * A TAG ATTACHES TO TWO THINGS
+ * A TAG ATTACHES TO A CHANNEL AND IS INHERITED BY ITS SHORTS
  *
- *   • `ChannelContentType` — the team's editorial read on a channel it watches.
- *     Hangs off `TrackedChannel` rather than `Channel` because the same YouTube
- *     channel is one global row that two organizations would describe
- *     differently.
- *   • `VideoContentType` — what one Short actually was.
+ *   • `ChannelContentType` — what this channel makes. Hangs off `TrackedChannel`
+ *     rather than `Channel` because the same YouTube channel is one global row
+ *     that two organizations would describe differently.
+ *   • `VideoContentType` — NOT what one Short was. A DEVIATION from its channel,
+ *     and nothing else.
  *
- * They are independent on purpose. The channel tag says what the team expects;
- * the Short tags record what it delivered, and the gap between them is often
- * the finding.
+ * =========================================================================
+ * THE RULE EVERYTHING IN THIS FILE FOLLOWS FROM
+ * =========================================================================
+ *
+ *     effective(short) = (channel's tags − short's exclusions) ∪ short's manual tags
+ *
+ * INHERITED TAGS ARE NEVER STORED. There is no row for an inherited tag and
+ * there must never be one — see `src/lib/content-types/resolve.ts`, which is
+ * the single implementation of that rule and is imported by the browser too.
+ *
+ * WHY NOT JUST COPY THE CHANNEL'S TAGS ONTO EACH SHORT. Because the copy is a
+ * snapshot and the relationship is not. A channel with 400 Shorts would leave
+ * 400 stale rows the moment a tag was removed, and a tag added next month would
+ * reach nothing already published. The channel stays the live source; a Short
+ * records only where it departs from it, which for the overwhelming majority of
+ * Shorts is nowhere at all.
+ *
+ * What falls out of that, for free, and is pinned by
+ * `src/lib/__tests__/content-type-inheritance.test.ts`:
+ *   • tagging a channel labels every existing Short immediately, no backfill;
+ *   • a Short imported tomorrow inherits, because nothing was written per Short;
+ *   • untagging a channel removes it everywhere, leaving no stale rows;
+ *   • an exclusion is a TOMBSTONE that survives the channel dropping the tag, so
+ *     re-adding it does not silently undo somebody's explicit "no".
+ *
+ * The gap between what a channel is expected to make and what its Shorts turned
+ * out to be is still visible — it is exactly the set of deviations, which is now
+ * the only thing this table stores.
  *
  * NICHE SCOPING STILL EXISTS — IT JUST NO LONGER TOUCHES THE VOCABULARY
  *
@@ -127,7 +167,24 @@ export const updateContentTypeSchema = z
     message: "Nothing to update.",
   });
 
-export const contentTypeIdsSchema = z.array(z.string().min(1)).max(20);
+/**
+ * The whole-set write body: the DESIRED EFFECTIVE SET for one Short.
+ *
+ * The cap is 100 rather than the 20 it was, because the meaning of this list
+ * changed under inheritance. It used to be "the tags somebody put on this
+ * Short" — a handful, by nature. It is now the Short's whole effective set,
+ * which INCLUDES everything its channel provides, so the ceiling is really a
+ * ceiling on the channel's tag count. At 20 an organization that tagged a
+ * channel generously would find every save on its Shorts rejected with a
+ * message about providing a list, which names nothing a person could act on.
+ *
+ * It stays bounded — the list becomes an `IN (...)` clause and an unbounded one
+ * is a way to make the database do arbitrary work from a single request — but
+ * 100 tags on one channel is already far past the point where the vocabulary
+ * has stopped meaning anything, so the limit will be reached as a mistake
+ * rather than as a constraint.
+ */
+export const contentTypeIdsSchema = z.array(z.string().min(1)).max(100);
 
 export const reorderContentTypesSchema = z.object({
   orderedIds: z
@@ -167,30 +224,75 @@ function toSlug(name: string): string {
 }
 
 /**
- * The two filtered relation counts every catalogue read reports.
+ * The channel count, as a filtered relation count.
  *
- * `VideoContentType` carries a tenant column precisely because `Video` does
- * not, so its filter is what stops the count including another team's
- * classifications of the same globally-shared Short. `ChannelContentType`
- * reaches the tenant through `TrackedChannel`, so its filter is a join —
- * different mechanism, same requirement.
+ * `ChannelContentType` reaches the tenant through `TrackedChannel`, so its
+ * filter is a join. This is the count that describes REACH: a tag on six
+ * channels labels every Short those channels have published, and there is no
+ * row per Short to count anywhere.
  */
-function usageCountSelect(organizationId: string) {
+function channelCountSelect(organizationId: string) {
   return {
     select: {
-      videos: { where: { organizationId } },
       channels: { where: { trackedChannel: { organizationId } } },
     },
   } as const;
 }
 
+/**
+ * The two DEVIATION counts, for as many types as the caller asks about.
+ *
+ * NOT a `_count` relation like the channels above, and it cannot be: `_count`
+ * takes one filter per relation, and the same relation has to be counted twice
+ * here under opposite conditions. One `groupBy` answers for the whole catalogue
+ * in a single query rather than turning a catalogue listing into two round trips
+ * per row.
+ *
+ * `organizationId` is in the `where` for the reason it is in every query in this
+ * file: `Video` is a global row shared between organizations, so an unfiltered
+ * read here would count another team's judgements about the same Short.
+ *
+ * A row whose `state` is neither known value is counted as neither — the column
+ * is a plain String for SQLite/PostgreSQL portability, and inventing a meaning
+ * for an unrecognised one would put a wrong number in a delete warning.
+ */
+async function videoDeviationCounts(
+  organizationId: string,
+  contentTypeIds?: readonly string[],
+): Promise<Map<string, { manual: number; excluded: number }>> {
+  const rows = await prisma.videoContentType.groupBy({
+    by: ["contentTypeId", "state"],
+    where: {
+      organizationId,
+      ...(contentTypeIds ? { contentTypeId: { in: [...contentTypeIds] } } : {}),
+    },
+    _count: { _all: true },
+  });
+
+  const counts = new Map<string, { manual: number; excluded: number }>();
+  for (const row of rows) {
+    const entry = counts.get(row.contentTypeId) ?? { manual: 0, excluded: 0 };
+    if (row.state === "manual") entry.manual += row._count._all;
+    else if (row.state === "excluded") entry.excluded += row._count._all;
+    counts.set(row.contentTypeId, entry);
+  }
+  return counts;
+}
+
+const NO_DEVIATIONS = { manual: 0, excluded: 0 } as const;
+
 type CountedContentType = Parameters<typeof toContentTypeDTO>[0] & {
-  _count: { videos: number; channels: number };
+  _count: { channels: number };
 };
 
-function toDTO(row: CountedContentType): ContentTypeDTO {
+function toDTO(
+  row: CountedContentType,
+  deviations: ReadonlyMap<string, { manual: number; excluded: number }>,
+): ContentTypeDTO {
+  const counts = deviations.get(row.id) ?? NO_DEVIATIONS;
   return toContentTypeDTO(row, {
-    videoCount: row._count.videos,
+    manualVideoCount: counts.manual,
+    excludedVideoCount: counts.excluded,
     channelCount: row._count.channels,
   });
 }
@@ -200,11 +302,14 @@ async function loadContentType(
   organizationId: string,
   contentTypeId: string,
 ): Promise<ContentTypeDTO> {
-  const row = await prisma.contentType.findFirstOrThrow({
-    where: { id: contentTypeId, organizationId },
-    include: { _count: usageCountSelect(organizationId) },
-  });
-  return toDTO(row);
+  const [row, deviations] = await Promise.all([
+    prisma.contentType.findFirstOrThrow({
+      where: { id: contentTypeId, organizationId },
+      include: { _count: channelCountSelect(organizationId) },
+    }),
+    videoDeviationCounts(organizationId, [contentTypeId]),
+  ]);
+  return toDTO(row, deviations);
 }
 
 /**
@@ -308,19 +413,26 @@ export async function listContentTypes(
   // "", which would be indistinguishable but would read as deliberate.
   const search = options.search ? toSlug(options.search) : "";
 
-  const rows = await prisma.contentType.findMany({
-    // The whole team shares one vocabulary, so this lists the organization's
-    // types rather than the ones the signed-in user created.
-    where: {
-      organizationId,
-      ...(options.includeInactive ? {} : { isActive: true }),
-      ...(search ? { slug: { contains: search } } : {}),
-    },
-    orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-    include: { _count: usageCountSelect(organizationId) },
-  });
+  const [rows, deviations] = await Promise.all([
+    prisma.contentType.findMany({
+      // The whole team shares one vocabulary, so this lists the organization's
+      // types rather than the ones the signed-in user created.
+      where: {
+        organizationId,
+        ...(options.includeInactive ? {} : { isActive: true }),
+        ...(search ? { slug: { contains: search } } : {}),
+      },
+      orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
+      include: { _count: channelCountSelect(organizationId) },
+    }),
+    // One grouped read for the whole catalogue, unnarrowed by the filters
+    // above: an extra entry in this map for a type the listing excluded costs
+    // nothing, whereas threading the same `where` through a second query would
+    // be a second place for the two to disagree.
+    videoDeviationCounts(organizationId),
+  ]);
 
-  return rows.map(toDTO);
+  return rows.map((row) => toDTO(row, deviations));
 }
 
 // There is no separate `listContentTypeCatalogue` any more. It existed because
@@ -380,7 +492,11 @@ export async function createContentType(
     targetLabel: created.name,
   });
 
-  return toContentTypeDTO(created, { videoCount: 0, channelCount: 0 });
+  return toContentTypeDTO(created, {
+    manualVideoCount: 0,
+    excludedVideoCount: 0,
+    channelCount: 0,
+  });
 }
 
 /**
@@ -430,7 +546,7 @@ export async function renameContentType(
   const updated = await prisma.contentType.update({
     where: { id: contentType.id },
     data,
-    include: { _count: usageCountSelect(organizationId) },
+    include: { _count: channelCountSelect(organizationId) },
   });
 
   // Only a name change is worth an entry. Nudging a colour or a sort position
@@ -447,7 +563,7 @@ export async function renameContentType(
     });
   }
 
-  return toDTO(updated);
+  return toDTO(updated, await videoDeviationCounts(organizationId, [updated.id]));
 }
 
 /**
@@ -476,8 +592,11 @@ export async function setContentTypeActive(
   const updated = await prisma.contentType.update({
     where: { id: contentType.id },
     data: { isActive },
-    include: { _count: usageCountSelect(organizationId) },
+    include: { _count: channelCountSelect(organizationId) },
   });
+
+  const deviations = await videoDeviationCounts(organizationId, [updated.id]);
+  const counts = deviations.get(updated.id) ?? NO_DEVIATIONS;
 
   await auditContentType(request, {
     action: isActive ? "contenttype.reactivated" : "contenttype.deactivated",
@@ -488,15 +607,18 @@ export async function setContentTypeActive(
     targetId: updated.id,
     targetLabel: updated.name,
     // The counts are what make the entry meaningful a year later: archiving a
-    // type nothing uses and archiving one carrying 400 classifications are very
-    // different acts, and the row itself will not remember which this was.
+    // type nothing uses and archiving one that six channels hand to their whole
+    // back catalogue are very different acts, and the row itself will not
+    // remember which this was. The channel count is the one that describes
+    // reach — the two video counts describe only the exceptions.
     metadata: {
-      videoCount: updated._count.videos,
       channelCount: updated._count.channels,
+      manualVideoCount: counts.manual,
+      excludedVideoCount: counts.excluded,
     },
   });
 
-  return toDTO(updated);
+  return toDTO(updated, deviations);
 }
 
 /**
@@ -511,10 +633,17 @@ export async function setContentTypeActive(
  * be lost and pointed at deactivation, which keeps every historical label and
  * achieves what they almost certainly wanted.
  *
- * CHANNEL TAGS COUNT TOO, and are reported separately. A channel tag is a
- * cheaper judgement than a Short's — you can re-derive it by looking at the
- * channel — but it is still somebody's filing, and a delete that silently
- * stripped six channels while calling the type unused would be a lie.
+ * CHANNEL TAGS ARE NOW THE BIGGEST THING A DELETE WOULD DESTROY. A channel tag
+ * is what actually reaches the Shorts — every one the channel has published and
+ * every one it will — so deleting a type that six channels carry silently
+ * unlabels their entire back catalogue. It is reported first for that reason.
+ *
+ * AND EXCLUSIONS COUNT AS MUCH AS ASSIGNMENTS. A tombstone is somebody looking
+ * at a Short their channel had labelled and saying no. Cascading it away would
+ * not merely lose that judgement: re-creating a type of the same name and
+ * re-tagging the channel would put the tag back on precisely the Shorts a person
+ * had refused it for. So the refusal names all three numbers rather than
+ * collapsing the video side into one.
  */
 export async function deleteContentType(
   contentTypeId: string,
@@ -528,19 +657,28 @@ export async function deleteContentType(
   // destroy anything?", and a classification on a channel the team removed from
   // the tracker is still a classification — the channel can be restored, and it
   // would come back stripped of its labels.
-  const [videos, channels] = await Promise.all([
-    prisma.videoContentType.count({ where: { contentTypeId: contentType.id } }),
+  const [manual, excluded, channels] = await Promise.all([
+    prisma.videoContentType.count({
+      where: { contentTypeId: contentType.id, state: "manual" },
+    }),
+    prisma.videoContentType.count({
+      where: { contentTypeId: contentType.id, state: "excluded" },
+    }),
     prisma.channelContentType.count({ where: { contentTypeId: contentType.id } }),
   ]);
 
-  if (videos > 0 || channels > 0) {
-    throw errors.invalidInput(describeInUse(contentType.name, videos, channels), {
-      contentTypeId: contentType.id,
-      videoCount: videos,
-      channelCount: channels,
-      // The client does not have to parse the sentence to offer the button.
-      canDeactivate: contentType.isActive,
-    });
+  if (manual > 0 || excluded > 0 || channels > 0) {
+    throw errors.invalidInput(
+      describeInUse(contentType.name, { manual, excluded, channels }),
+      {
+        contentTypeId: contentType.id,
+        manualVideoCount: manual,
+        excludedVideoCount: excluded,
+        channelCount: channels,
+        // The client does not have to parse the sentence to offer the button.
+        canDeactivate: contentType.isActive,
+      },
+    );
   }
 
   await prisma.contentType.delete({ where: { id: contentType.id } });
@@ -556,14 +694,34 @@ export async function deleteContentType(
   return { deleted: true };
 }
 
-/** The refusal message, written as a sentence a person can act on. */
-function describeInUse(name: string, videos: number, channels: number): string {
+/**
+ * The refusal message, written as a sentence a person can act on.
+ *
+ * The channel clause comes first and says what it implies, because "6 channels"
+ * on its own reads as the smallest of the three numbers when it is by far the
+ * largest consequence: those channels hand the tag to every Short they have.
+ */
+function describeInUse(
+  name: string,
+  counts: { manual: number; excluded: number; channels: number },
+): string {
   const parts: string[] = [];
-  if (videos > 0) parts.push(`${videos} ${videos === 1 ? "Short" : "Shorts"}`);
-  if (channels > 0) {
-    parts.push(`${channels} ${channels === 1 ? "channel" : "channels"}`);
+  if (counts.channels > 0) {
+    parts.push(
+      `${counts.channels} ${counts.channels === 1 ? "channel" : "channels"} (and every Short ${
+        counts.channels === 1 ? "it has" : "they have"
+      } published)`,
+    );
   }
-  return `“${name}” is still filed against ${parts.join(" and ")}. Archive it instead — everything already filed under it keeps its label, and it stops being offered on new work.`;
+  if (counts.manual > 0) {
+    parts.push(`${counts.manual} individually tagged ${counts.manual === 1 ? "Short" : "Shorts"}`);
+  }
+  if (counts.excluded > 0) {
+    parts.push(
+      `${counts.excluded} ${counts.excluded === 1 ? "Short that has" : "Shorts that have"} explicitly refused it`,
+    );
+  }
+  return `“${name}” is still filed against ${parts.join(", ")}. Archive it instead — everything already filed under it keeps its label, every refusal is kept, and it stops being offered on new work.`;
 }
 
 /**
@@ -643,6 +801,24 @@ export async function reorderContentTypes(
 // ---------------------------------------------------------------------------
 
 /**
+ * A Short this caller may classify, WITH the tags it inherits.
+ *
+ * The channel travels with the video because no decision in this file can be
+ * made without it any more: whether a requested tag needs a manual row, whether
+ * removing one needs a tombstone or a delete, and whether an assignment is a
+ * no-op are all questions about what the channel already gives this Short.
+ * Fetching them separately would be two queries and one more chance to answer
+ * from a channel that is not the video's.
+ */
+export interface TaggableVideo {
+  readonly id: string;
+  readonly title: string;
+  readonly channelId: string;
+  /** The channel's tags — the live source this Short deviates from. */
+  readonly channelTypeIds: readonly string[];
+}
+
+/**
  * The Shorts, of the ids given, that this caller may classify.
  *
  * Ids that do not come back are simply absent from the map; the callers decide
@@ -651,7 +827,7 @@ export async function reorderContentTypes(
 async function loadTaggableVideos(
   organizationId: string,
   videoIds: readonly string[],
-): Promise<Map<string, { id: string; title: string }>> {
+): Promise<Map<string, TaggableVideo>> {
   if (videoIds.length === 0) return new Map();
 
   const visibleNiches = await getVisibleNicheIds();
@@ -669,17 +845,57 @@ async function loadTaggableVideos(
         },
       },
     },
-    select: { id: true, title: true },
+    select: {
+      id: true,
+      title: true,
+      channelId: true,
+      channel: {
+        select: {
+          /*
+           * OUR tracking row for this channel, and only ours.
+           *
+           * `Channel` is global and several organizations may track it, so this
+           * `where` is not an optimisation — without it a Short would inherit
+           * another team's editorial read of the same channel, which is the
+           * exact cross-tenant leak `ChannelContentType` hangs off
+           * `TrackedChannel` to prevent.
+           *
+           * `isActive` is deliberately not required, matching
+           * `requireVisibleTrackedChannel`: removing a channel from the tracker
+           * is a soft delete that keeps its history, and its Shorts should not
+           * silently shed their inherited labels while it is parked.
+           */
+          trackedBy: {
+            where: { organizationId },
+            select: { contentTypes: { select: { contentTypeId: true } } },
+          },
+        },
+      },
+    },
   });
 
-  return new Map(rows.map((row) => [row.id, row]));
+  return new Map(
+    rows.map((row) => [
+      row.id,
+      {
+        id: row.id,
+        title: row.title,
+        channelId: row.channelId,
+        // At most one tracking row per (organization, channel), so the flatten
+        // is a formality — but it is the honest way to read a list.
+        channelTypeIds: row.channel.trackedBy.flatMap((tracked) =>
+          tracked.contentTypes.map((assignment) => assignment.contentTypeId),
+        ),
+      },
+    ]),
+  );
 }
 
 /** One Short's row or a 404, so the endpoints never confirm an id. */
 async function requireTaggableVideo(
   organizationId: string,
   videoId: string,
-): Promise<{ id: string; title: string }> {
+): Promise<TaggableVideo> {
   const found = await loadTaggableVideos(organizationId, [videoId]);
   const video = found.get(videoId);
   if (!video) throw errors.notFound("video");
@@ -772,14 +988,268 @@ async function requireOwnContentTypes(
 
 // ---------------------------------------------------------------------------
 // Assignment — Shorts
+//
+// EVERY WRITE BELOW GOES THROUGH ONE RECONCILER, and that is the point of this
+// section. "Set this Short's types", "exclude this one tag" and "file 400
+// Shorts under Rankings" are three gestures that must agree about what a row
+// means, and the way they agree is by all expressing themselves as a DESIRED
+// EFFECTIVE SET and letting one function work out which deviations that implies.
+// A second place that decided when to write a "manual" row would be a second
+// definition of the rule.
 // ---------------------------------------------------------------------------
 
+/** One Short's stored deviations, as read back before reconciling. */
+interface CurrentDeviations {
+  /** What the Short carries right now, channel included. */
+  readonly effectiveIds: readonly string[];
+  readonly manualIds: readonly string[];
+  readonly excludedIds: readonly string[];
+}
+
 /**
- * Replace one Short's content types wholesale.
+ * What the caller wants this Short to end up carrying.
  *
- * Set semantics: the client sends the complete desired list and the server
- * reconciles, which makes the call idempotent and removes a class of drift
- * bugs. An empty array clears the Short's classification.
+ * A FUNCTION of the current state rather than a fixed list, because two of the
+ * three callers cannot name their target without reading the Short first: "add
+ * Rankings to these 400 Shorts" means "whatever each already has, plus
+ * Rankings". Passing the current state in is what lets that be expressed as a
+ * desired set like everything else, instead of as a second, sneakier write path.
+ */
+type DesiredSet = (current: CurrentDeviations, video: TaggableVideo) => readonly string[];
+
+interface VideoReconcileResult {
+  readonly before: CurrentDeviations;
+  readonly after: DeviationPlan & { readonly effectiveIds: readonly string[] };
+}
+
+interface ReconcileOutcome {
+  readonly byVideo: ReadonlyMap<string, VideoReconcileResult>;
+  /** Rows written, re-stated and removed — the audit metadata, not the caller's report. */
+  readonly created: number;
+  readonly restated: number;
+  readonly deleted: number;
+}
+
+/**
+ * TRANSLATE DESIRED SETS INTO DEVIATIONS, AND WRITE ONLY WHAT MOVED.
+ *
+ * RECONCILED, NOT REWRITTEN. A delete-everything-then-recreate would store the
+ * same final state and would be three lines shorter, and it would also stamp
+ * `assignedById` and `assignedAt` on every surviving row with whoever happened
+ * to press Save. Re-opening a picker and confirming an unchanged selection would
+ * then quietly reassign a colleague's decision — including their refusals — to
+ * the person who merely looked at it. So a row whose meaning has not changed is
+ * not touched at all.
+ *
+ * A row whose STATE has changed is a different matter and is re-stamped
+ * deliberately: flipping "manual" to "excluded" is not an edit of the old
+ * judgement, it is the opposite judgement, and the person making it is its
+ * author.
+ *
+ * AT MOST FOUR STATEMENTS, whatever the size of the run. The rows are grouped by
+ * what is happening to them rather than iterated per Short, so a 500-Short bulk
+ * replace is the same four queries as a one-Short save — and they go in one
+ * transaction, because a half-applied relabelling is worse than a failed one:
+ * the caller cannot tell which half landed.
+ */
+async function reconcileVideoDeviations(
+  organizationId: string,
+  userId: string | null,
+  videos: readonly TaggableVideo[],
+  desired: DesiredSet,
+): Promise<ReconcileOutcome> {
+  const videoIds = videos.map((video) => video.id);
+
+  // Scoped to this organization, like every read in this file: `Video` is a
+  // global row, so an unfiltered read here would reconcile against another
+  // team's deviations and then delete them.
+  const existing =
+    videoIds.length > 0
+      ? await prisma.videoContentType.findMany({
+          where: { organizationId, videoId: { in: videoIds } },
+          select: { id: true, videoId: true, contentTypeId: true, state: true },
+        })
+      : [];
+
+  const rowsByVideo = new Map<string, typeof existing>();
+  for (const row of existing) {
+    const bucket = rowsByVideo.get(row.videoId);
+    if (bucket) bucket.push(row);
+    else rowsByVideo.set(row.videoId, [row]);
+  }
+
+  const toCreate: Array<{
+    organizationId: string;
+    videoId: string;
+    contentTypeId: string;
+    state: string;
+    assignedById: string | null;
+  }> = [];
+  const toExclude: string[] = [];
+  const toManual: string[] = [];
+  const toDelete: string[] = [];
+  const byVideo = new Map<string, VideoReconcileResult>();
+
+  for (const video of videos) {
+    const rows = rowsByVideo.get(video.id) ?? [];
+    const manualIds = rows
+      .filter((row) => row.state === "manual")
+      .map((row) => row.contentTypeId);
+    const excludedIds = rows
+      .filter((row) => row.state === "excluded")
+      .map((row) => row.contentTypeId);
+
+    const before: CurrentDeviations = {
+      effectiveIds: effectiveContentTypeIds({
+        channelTypeIds: video.channelTypeIds,
+        manualIds,
+        excludedIds,
+      }),
+      manualIds,
+      excludedIds,
+    };
+
+    const wanted = planDeviations({
+      channelTypeIds: video.channelTypeIds,
+      desiredIds: [...new Set(desired(before, video))],
+      existingManualIds: manualIds,
+      existingExcludedIds: excludedIds,
+    });
+
+    byVideo.set(video.id, {
+      before,
+      after: {
+        ...wanted,
+        effectiveIds: effectiveContentTypeIds({
+          channelTypeIds: video.channelTypeIds,
+          manualIds: wanted.manualIds,
+          excludedIds: wanted.excludedIds,
+        }),
+      },
+    });
+
+    // What each tag's row SHOULD be after this, consumed as the existing rows
+    // are walked so whatever is left over is exactly what has to be created.
+    const target = new Map<string, "manual" | "excluded">();
+    for (const id of wanted.manualIds) target.set(id, "manual");
+    for (const id of wanted.excludedIds) target.set(id, "excluded");
+
+    for (const row of rows) {
+      const state = target.get(row.contentTypeId);
+      if (state === undefined) {
+        // No longer a deviation: the Short agrees with its channel about this
+        // tag again, so the row is removed rather than kept as a no-op. A row
+        // that says nothing is how the table fills up with rows that say
+        // nothing.
+        toDelete.push(row.id);
+        continue;
+      }
+      target.delete(row.contentTypeId);
+      // Unchanged meaning: left completely alone, attribution and all.
+      if (row.state === state) continue;
+      if (state === "excluded") toExclude.push(row.id);
+      else toManual.push(row.id);
+    }
+
+    for (const [contentTypeId, state] of target) {
+      toCreate.push({
+        organizationId,
+        videoId: video.id,
+        contentTypeId,
+        state,
+        assignedById: userId,
+      });
+    }
+  }
+
+  const writes: Prisma.PrismaPromise<unknown>[] = [];
+
+  // Deletes first. The unique constraint is per (organization, video, content
+  // type) and nothing is ever created for a tag whose row is being deleted, so
+  // this is not load-bearing — but ordering the destructive step ahead of the
+  // creative one is cheap insurance against that stopping being true.
+  if (toDelete.length > 0) {
+    writes.push(
+      prisma.videoContentType.deleteMany({
+        where: { organizationId, id: { in: toDelete } },
+      }),
+    );
+  }
+
+  // One timestamp for the whole run, so a bulk exclusion reads as one act in the
+  // data rather than as several hundred that happened to be milliseconds apart.
+  const stampedAt = new Date();
+  for (const [state, ids] of [
+    ["excluded", toExclude],
+    ["manual", toManual],
+  ] as const) {
+    if (ids.length === 0) continue;
+    writes.push(
+      prisma.videoContentType.updateMany({
+        where: { organizationId, id: { in: ids } },
+        data: { state, assignedById: userId, assignedAt: stampedAt },
+      }),
+    );
+  }
+
+  if (toCreate.length > 0) {
+    writes.push(prisma.videoContentType.createMany({ data: toCreate }));
+  }
+
+  // Nothing moved: no write, and — since the callers key their audit entries off
+  // this — no log entry claiming something did.
+  if (writes.length > 0) await prisma.$transaction(writes);
+
+  return {
+    byVideo,
+    created: toCreate.length,
+    restated: toExclude.length + toManual.length,
+    deleted: toDelete.length,
+  };
+}
+
+/**
+ * What a per-Short write hands back.
+ *
+ * The DEVIATIONS, not the effective set alone, because the client patches its
+ * cached dataset with exactly these two arrays — that is what `VideoDTO` now
+ * carries, and echoing anything else would make the caller derive the storage
+ * shape from a rendering shape. The effective ids come along because the caller
+ * has already been told them and would otherwise resolve them a second time.
+ */
+export interface VideoContentTypeState {
+  readonly videoId: string;
+  readonly manualContentTypeIds: readonly string[];
+  readonly excludedContentTypeIds: readonly string[];
+  readonly effectiveContentTypeIds: readonly string[];
+}
+
+function toState(videoId: string, result: VideoReconcileResult): VideoContentTypeState {
+  return {
+    videoId,
+    manualContentTypeIds: result.after.manualIds,
+    excludedContentTypeIds: result.after.excludedIds,
+    effectiveContentTypeIds: result.after.effectiveIds,
+  };
+}
+
+/**
+ * Set one Short's content types — ITS DESIRED EFFECTIVE SET, not its rows.
+ *
+ * THE MEANING OF THIS FUNCTION CHANGED, and the signature deliberately did not.
+ * The client sends the complete list it wants the Short to carry, which is the
+ * only thing it can honestly send: a person looking at a Short sees its tags,
+ * not which of them arrived from the channel. Translating that into deviations
+ * is this layer's job:
+ *
+ *   • a channel tag missing from the desired set  → an "excluded" row
+ *   • a desired tag the channel does not give     → a "manual" row
+ *   • a desired tag the channel does give         → no row at all
+ *
+ * So `[]` no longer means "delete this Short's rows". It means "this Short
+ * carries nothing", which for a Short on a tagged channel is a set of
+ * exclusions — and getting that wrong would leave the tag showing after somebody
+ * cleared it.
  *
  * `videoId` is the internal `Video` row id (`VideoDTO.id`), not the YouTube id —
  * the client already holds it, and an internal id is not guessable in the way a
@@ -789,50 +1259,196 @@ export async function setVideoContentTypes(
   videoId: string,
   contentTypeIds: readonly string[],
   request?: Request,
-): Promise<void> {
+): Promise<VideoContentTypeState> {
   const { organizationId, userId } = await getScope();
 
   const video = await requireTaggableVideo(organizationId, videoId);
   const unique = [...new Set(contentTypeIds)];
+  // Validated BEFORE anything is written, as it always was: this path can now
+  // create exclusions as well as delete rows, so a throw halfway through would
+  // leave a Short refusing tags to satisfy a set that was rejected.
   const owned = await requireOwnContentTypes(organizationId, unique);
 
-  await prisma.$transaction([
-    // Scoped to this organization, so replacing our labels cannot delete
-    // another team's classification of the same global Video row.
-    prisma.videoContentType.deleteMany({ where: { organizationId, videoId } }),
-    ...(unique.length > 0
-      ? [
-          prisma.videoContentType.createMany({
-            data: unique.map((contentTypeId) => ({
-              organizationId,
-              videoId,
-              contentTypeId,
-              assignedById: userId,
-            })),
-          }),
-        ]
-      : []),
-  ]);
+  const outcome = await reconcileVideoDeviations(organizationId, userId, [video], () => unique);
+  const result = outcome.byVideo.get(video.id);
+  // Unreachable: the map is keyed from the same array. Narrowing beats an
+  // assertion.
+  if (!result) throw errors.notFound("video");
 
-  await auditContentType(request, {
-    action: "contenttype.video_assigned",
-    targetType: "video",
-    summary:
-      owned.length > 0
-        ? `Set content types on “${video.title}” to ${owned.map((t) => t.name).join(", ")}`
-        : `Cleared the content types on “${video.title}”`,
-    targetId: videoId,
-    targetLabel: video.title,
-    metadata: { videoCount: 1, contentTypeCount: owned.length, mode: "replace" },
-  });
+  if (outcome.created + outcome.restated + outcome.deleted > 0) {
+    await auditContentType(request, {
+      action: "contenttype.video_assigned",
+      targetType: "video",
+      summary:
+        owned.length > 0
+          ? `Set content types on “${video.title}” to ${owned.map((t) => t.name).join(", ")}`
+          : `Cleared the content types on “${video.title}”`,
+      targetId: videoId,
+      targetLabel: video.title,
+      // The deviation counts, not just the requested set. "Cleared the content
+      // types" on a Short whose channel provides three of them is really three
+      // refusals, and an entry that did not say so would describe a deletion
+      // where a tombstone was written.
+      metadata: {
+        videoCount: 1,
+        contentTypeCount: owned.length,
+        mode: "replace",
+        manualCount: result.after.manualIds.length,
+        excludedCount: result.after.excludedIds.length,
+      },
+    });
+  }
+
+  return toState(video.id, result);
+}
+
+/**
+ * REFUSE ONE TAG ON ONE SHORT — the "remove this label" gesture.
+ *
+ * A ROUTE OF ITS OWN RATHER THAN A WHOLE-SET PUT, and the reason is what the
+ * request would otherwise contain. Removing one inherited chip is a one-click
+ * action; expressing it as "here is this Short's complete new state" would make
+ * that click send everything the client believes about the Short, so a stale tab
+ * would silently revert a colleague's edit to a different tag as a side effect
+ * of touching this one. A single-tag override can only ever change that tag.
+ *
+ * TWO CASES, AND THEY STORE DIFFERENT THINGS:
+ *
+ *   • the channel gives this tag → write a TOMBSTONE. It is kept even if the
+ *     channel later drops the tag, so re-adding it to the channel does not
+ *     silently undo this refusal. That survival is the entire reason exclusions
+ *     are rows rather than an absence.
+ *
+ *   • the channel does not → DELETE the manual row, and write nothing. The
+ *     person is taking back their own earlier "yes", not refusing the channel;
+ *     no row means "agrees with the channel", which is exactly true again. A
+ *     tombstone here would be a claim nobody made — that if this channel ever
+ *     picks the tag up, this Short is to be exempt from it.
+ *
+ * Idempotent in both cases: refusing a tag the Short already refuses, or has
+ * never carried, writes nothing and logs nothing.
+ */
+export async function excludeContentTypeFromVideo(
+  videoId: string,
+  contentTypeId: string,
+  request?: Request,
+): Promise<VideoContentTypeState> {
+  const { organizationId, userId } = await getScope();
+
+  const video = await requireTaggableVideo(organizationId, videoId);
+  const [contentType] = await requireOwnContentTypes(organizationId, [contentTypeId]);
+
+  const outcome = await reconcileVideoDeviations(
+    organizationId,
+    userId,
+    [video],
+    // Everything it carries except this one. Routed through the same reconciler
+    // as the whole-set write so "excluded" cannot come to mean something
+    // slightly different here — the difference between the two paths is which
+    // set is desired, and nothing else.
+    (current) => current.effectiveIds.filter((id) => id !== contentTypeId),
+  );
+
+  const result = outcome.byVideo.get(video.id);
+  if (!result) throw errors.notFound("video");
+
+  const changed = outcome.created + outcome.restated + outcome.deleted > 0;
+  if (changed) {
+    const tombstoned = result.after.excludedIds.includes(contentTypeId);
+    await auditContentType(request, {
+      action: "contenttype.video_excluded",
+      targetType: "video",
+      summary: tombstoned
+        ? `Removed “${contentType.name}” from “${video.title}” — refused despite the channel`
+        : `Removed “${contentType.name}” from “${video.title}”`,
+      targetId: videoId,
+      targetLabel: video.title,
+      metadata: {
+        contentTypeId: contentType.id,
+        contentTypeName: contentType.name,
+        // Which of the two cases above this was — the difference between a
+        // tombstone somebody has to know about and an ordinary un-tagging.
+        inherited: tombstoned,
+      },
+    });
+  }
+
+  return toState(video.id, result);
+}
+
+/**
+ * TAKE THE REFUSAL BACK — the inverse of the above, and its undo.
+ *
+ * Deletes the tombstone so the channel's tag flows through again. Not "re-add
+ * the tag": if the channel has since dropped it, removing the tombstone leaves
+ * the Short carrying nothing, which is the honest outcome — putting it back
+ * manually would be inventing a decision nobody made, and is what
+ * `setVideoContentTypes` is for.
+ *
+ * Idempotent: no tombstone means nothing to undo, so nothing is written and
+ * nothing is logged.
+ */
+export async function restoreInheritedContentType(
+  videoId: string,
+  contentTypeId: string,
+  request?: Request,
+): Promise<VideoContentTypeState> {
+  const { organizationId, userId } = await getScope();
+
+  const video = await requireTaggableVideo(organizationId, videoId);
+  const [contentType] = await requireOwnContentTypes(organizationId, [contentTypeId]);
+
+  const outcome = await reconcileVideoDeviations(
+    organizationId,
+    userId,
+    [video],
+    /*
+     * Everything it carries, plus this one — which for a suppressed inherited
+     * tag resolves to "drop the tombstone" and for anything else resolves to a
+     * manual row.
+     *
+     * That second behaviour is deliberate rather than incidental: the picker
+     * offers this route on a tag the channel provides and the Short refuses,
+     * but a stale client that fires it at a tag the channel has since dropped
+     * gets the tag on the Short, which is what the person asked for, instead of
+     * a silent no-op they would have to diagnose.
+     */
+    (current) => [...current.effectiveIds, contentTypeId],
+  );
+
+  const result = outcome.byVideo.get(video.id);
+  if (!result) throw errors.notFound("video");
+
+  if (outcome.created + outcome.restated + outcome.deleted > 0) {
+    await auditContentType(request, {
+      action: "contenttype.video_restored",
+      targetType: "video",
+      summary: `Restored “${contentType.name}” on “${video.title}”`,
+      targetId: videoId,
+      targetLabel: video.title,
+      metadata: { contentTypeId: contentType.id, contentTypeName: contentType.name },
+    });
+  }
+
+  return toState(video.id, result);
 }
 
 export interface BulkAssignResult {
-  /** Join rows actually written. Zero on a re-run — see the idempotency note. */
+  /** Shorts that did not carry the type and now do. Zero on a re-run. */
   readonly assigned: number;
-  /** Videos that already carried the type and were left alone. */
+  /** Shorts that already carried it — inherited or manual — and were left alone. */
   readonly alreadyAssigned: number;
-  /** Other classifications removed, in "replace" mode only. */
+  /**
+   * Shorts whose REFUSAL of this type was lifted.
+   *
+   * Its own number rather than folded into `assigned` because it is a different
+   * event with a different history: somebody had explicitly said no to this tag
+   * on this Short, and a bulk run has just overridden them. A director who sees
+   * "38 filed, 2 refusals lifted" can go and ask; one who sees "40 filed" cannot
+   * know there was anything to ask about.
+   */
+  readonly restored: number;
+  /** Other classifications the Shorts no longer carry, in "replace" mode only. */
   readonly removed: number;
   readonly videoCount: number;
 }
@@ -842,18 +1458,31 @@ export interface BulkAssignResult {
  *
  * IDEMPOTENT BY CONSTRUCTION. Re-running with the same input writes nothing and
  * reports `assigned: 0`. That is not a nicety: this is the endpoint somebody
- * double-clicks, and the one a retry after a timeout hits twice. The unique
- * constraint `(organizationId, videoId, contentTypeId)` is the backstop, but the
- * existing rows are read and subtracted first rather than relying on it —
- * `createMany({ skipDuplicates })` is unavailable on SQLite, which this schema
- * must still run on, and catching a constraint violation would lose the count
- * the caller is told.
+ * double-clicks, and the one a retry after a timeout hits twice.
  *
- * THE NICHE-MISMATCH REFUSAL IS GONE. A selection spanning channels in different
- * niches is now an ordinary bulk run — that is what an org-wide tag is for, and
- * it is the gesture that makes "Funny Memes across the whole operation" a row on
- * the performance table. What still holds is that every selected Short must be
- * REACHABLE by this caller, checked in one query before anything is written.
+ * WHAT INHERITANCE CHANGES HERE, stated because the brief asks for the choice to
+ * be named:
+ *
+ *   • ASSIGNING A TAG THE CHANNEL ALREADY PROVIDES IS A NO-OP for that Short,
+ *     counted under `alreadyAssigned`. It does NOT write a manual row. Writing
+ *     one would be the exact mistake the whole design avoids — a per-Short copy
+ *     of something the channel already says, which then goes stale the moment
+ *     the channel changes its mind. The Short already carries the tag; there is
+ *     nothing to add.
+ *
+ *   • A SHORT THAT REFUSES THE TAG HAS ITS REFUSAL LIFTED. Somebody is
+ *     explicitly asking for this tag on this selection, and silently skipping
+ *     the Shorts that had a tombstone would produce a bulk run that quietly did
+ *     not do what it said. It is reported separately (`restored`) precisely
+ *     because it overrides an earlier decision.
+ *
+ * "REPLACE" IS EXPRESSED AS A DESIRED SET, like everything else: each Short's
+ * desired set becomes exactly this one tag, so the channel's other tags become
+ * exclusions rather than being ignored. A "replace" that left inherited tags in
+ * place would be the one mode in the product whose name did not describe it.
+ *
+ * What still holds unchanged: every selected Short must be REACHABLE by this
+ * caller, checked in one query before anything is written.
  */
 export async function assignContentTypeToVideos(
   input: { videoIds: readonly string[]; contentTypeId: string; mode: AssignMode },
@@ -867,7 +1496,7 @@ export async function assignContentTypeToVideos(
   });
   if (!contentType) throw errors.notFound("content type");
 
-  // Unlike the replace path above, this one is unambiguously new work: nobody
+  // Unlike the per-Short path, this one is unambiguously new work: nobody
   // bulk-files a back catalogue under a type the team has retired. Refusing is
   // what makes archiving mean something.
   if (!contentType.isActive) {
@@ -890,100 +1519,92 @@ export async function assignContentTypeToVideos(
     );
   }
 
-  const existing = await prisma.videoContentType.findMany({
-    where: { organizationId, contentTypeId: contentType.id, videoId: { in: videoIds } },
-    select: { videoId: true },
-  });
-  const alreadyAssigned = new Set(existing.map((row) => row.videoId));
-  const toCreate = videoIds.filter((id) => !alreadyAssigned.has(id));
+  const videos = videoIds.map((id) => reachable.get(id)).filter((v) => v !== undefined);
 
-  // "replace" clears every OTHER type off these Shorts. Scoped to this
-  // organization and to these videos, and deliberately excluding the type being
-  // assigned so a re-run does not delete and rewrite the rows it just made —
-  // which would churn `assignedAt` and lose the original attribution.
-  const removals =
-    input.mode === "replace"
-      ? [
-          prisma.videoContentType.deleteMany({
-            where: {
-              organizationId,
-              videoId: { in: videoIds },
-              contentTypeId: { not: contentType.id },
-            },
-          }),
-        ]
-      : [];
+  const outcome = await reconcileVideoDeviations(
+    organizationId,
+    userId,
+    videos,
+    (current) =>
+      input.mode === "replace"
+        ? [contentType.id]
+        : [...current.effectiveIds, contentType.id],
+  );
 
-  const writes =
-    toCreate.length > 0
-      ? [
-          prisma.videoContentType.createMany({
-            data: toCreate.map((videoId) => ({
-              organizationId,
-              videoId,
-              contentTypeId: contentType.id,
-              // Attribution, so a 400-Short relabelling can be traced to
-              // whoever ran it long after the audit entry scrolls away.
-              assignedById: userId,
-            })),
-          }),
-        ]
-      : [];
+  let assigned = 0;
+  let alreadyAssigned = 0;
+  let restored = 0;
+  let removed = 0;
 
-  // One transaction: a partial bulk assignment is worse than a failed one,
-  // because the caller cannot tell which half landed.
-  const results = await prisma.$transaction([...removals, ...writes]);
-  const removed = input.mode === "replace" ? (results[0]?.count ?? 0) : 0;
+  for (const result of outcome.byVideo.values()) {
+    const had = result.before.effectiveIds.includes(contentType.id);
+    if (had) alreadyAssigned += 1;
+    else assigned += 1;
+    // A tombstone that was doing work and no longer exists. Read off the stored
+    // deviations rather than inferred from `had`, because a dormant tombstone
+    // for a tag the channel does not provide is also lifted here and is also
+    // somebody's decision being overridden.
+    if (
+      result.before.excludedIds.includes(contentType.id) &&
+      !result.after.excludedIds.includes(contentType.id)
+    ) {
+      restored += 1;
+    }
+    for (const id of result.before.effectiveIds) {
+      if (!result.after.effectiveIds.includes(id)) removed += 1;
+    }
+  }
 
-  await auditContentType(request, {
-    action: "contenttype.video_assigned",
-    // The type, not the videos: a bulk run has no single video to point at, and
-    // "everything ever filed under Character Moments" is the useful thread.
-    targetType: "contentType",
-    /*
-     * The summary counts what CHANGED, not what was asked for.
-     *
-     * Filing the same fifteen Shorts twice is a normal thing to do — the
-     * control is fast and repeatable by design — and the second run writes
-     * nothing. Reporting it as "Filed 15 Shorts" would put an event in the
-     * accountability log describing work that did not happen, and an audit
-     * trail that overstates is worse than one that is merely terse: somebody
-     * reading it later cannot tell the real relabelling from the echo.
-     *
-     * A run that removed other labels is still a change even when it added
-     * nothing, so "replace" is reported on the removals it actually made.
-     */
-    summary: (() => {
-      const suffix = input.mode === "replace" ? " (replacing existing types)" : "";
-      const shorts = (n: number) => `${n} ${n === 1 ? "Short" : "Shorts"}`;
+  const changed = outcome.created + outcome.restated + outcome.deleted > 0;
 
-      if (toCreate.length > 0) {
-        return `Filed ${shorts(toCreate.length)} under “${contentType.name}”${suffix}`;
-      }
-      if (removed > 0) {
-        return `Cleared other content types from ${shorts(videoIds.length)} already filed under “${contentType.name}”`;
-      }
-      return `No change — ${shorts(videoIds.length)} were already filed under “${contentType.name}”`;
-    })(),
-    targetId: contentType.id,
-    targetLabel: contentType.name,
-    // Counts, never the id list. `sanitizeMetadata` truncates arrays at 20
-    // entries, so a 400-video run would record a misleading fragment.
-    metadata: {
-      mode: input.mode,
-      videoCount: videoIds.length,
-      assigned: toCreate.length,
-      alreadyAssigned: alreadyAssigned.size,
-      removed,
-    },
-  });
+  if (changed) {
+    await auditContentType(request, {
+      action: "contenttype.video_assigned",
+      // The type, not the videos: a bulk run has no single video to point at, and
+      // "everything ever filed under Character Moments" is the useful thread.
+      targetType: "contentType",
+      /*
+       * The summary counts what CHANGED, not what was asked for.
+       *
+       * Filing the same fifteen Shorts twice is a normal thing to do — the
+       * control is fast and repeatable by design — and the second run writes
+       * nothing. Reporting it as "Filed 15 Shorts" would put an event in the
+       * accountability log describing work that did not happen, and an audit
+       * trail that overstates is worse than one that is merely terse: somebody
+       * reading it later cannot tell the real relabelling from the echo.
+       *
+       * "Already filed" now includes Shorts that inherit the tag from their
+       * channel and were correctly left alone, which is the common case for a
+       * selection drawn from one tagged channel.
+       */
+      summary: (() => {
+        const suffix = input.mode === "replace" ? " (replacing existing types)" : "";
+        const shorts = (n: number) => `${n} ${n === 1 ? "Short" : "Shorts"}`;
 
-  return {
-    assigned: toCreate.length,
-    alreadyAssigned: alreadyAssigned.size,
-    removed,
-    videoCount: videoIds.length,
-  };
+        if (assigned > 0) {
+          return `Filed ${shorts(assigned)} under “${contentType.name}”${suffix}`;
+        }
+        if (removed > 0) {
+          return `Cleared other content types from ${shorts(videoIds.length)} already filed under “${contentType.name}”`;
+        }
+        return `Lifted ${shorts(restored)} refusal${restored === 1 ? "" : "s"} of “${contentType.name}”`;
+      })(),
+      targetId: contentType.id,
+      targetLabel: contentType.name,
+      // Counts, never the id list. `sanitizeMetadata` truncates arrays at 20
+      // entries, so a 400-video run would record a misleading fragment.
+      metadata: {
+        mode: input.mode,
+        videoCount: videoIds.length,
+        assigned,
+        alreadyAssigned,
+        restored,
+        removed,
+      },
+    });
+  }
+
+  return { assigned, alreadyAssigned, restored, removed, videoCount: videoIds.length };
 }
 
 // ---------------------------------------------------------------------------
