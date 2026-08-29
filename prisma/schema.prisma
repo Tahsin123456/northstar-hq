@@ -594,6 +594,37 @@ model Note {
 
   body String
 
+  /// A YouTube Short from outside the tracker.
+  ///
+  /// Deliberately NOT the `videoId` relation above. That one points at a `Video`
+  /// row, which exists only for channels this organization tracks — and the
+  /// whole point of this field is the competitor's Short somebody just watched,
+  /// which by definition is not in the database and should not be added to it.
+  /// Tracking a channel is a decision with a sync cost; quoting one Short in a
+  /// note is not, and conflating them would make every pasted link quietly
+  /// enlarge the tracker.
+  ///
+  /// The two coexist: a note may be filed against a tracked channel AND quote an
+  /// outside Short as the comparison that prompted it.
+  externalVideoId String?
+
+  /// The canonical URL, rebuilt from the id rather than stored as pasted.
+  ///
+  /// A safety property, not tidiness. This value is rendered as a link, so
+  /// storing whatever arrived in the request body would put an attacker-chosen
+  /// string into an href — `javascript:` and friends. Parsing out the video id
+  /// and composing the URL here means the column can only ever hold a
+  /// youtube.com address, whatever was pasted.
+  externalUrl String?
+
+  /// Best-effort metadata, allowed to stay null.
+  ///
+  /// Fetching this must never block saving the link, so a note whose lookup
+  /// failed — no API key, quota spent, video private — keeps its URL and shows
+  /// the thumbnail, which derives from the id alone and needs no request.
+  externalTitle        String?
+  externalChannelTitle String?
+
   /// "personal" | "shared".
   ///
   /// A personal note is working memory — visible to its author, and to an admin

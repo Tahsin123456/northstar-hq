@@ -51,8 +51,15 @@ export type CreateNotePayload =
       targetId: string;
       body: string;
       visibility?: NoteVisibility;
+      /** A pasted YouTube link; the server turns it into the stored URL. */
+      externalShortUrl?: string | null;
     }
-  | { targetType: "general"; body: string; visibility?: NoteVisibility };
+  | {
+      targetType: "general";
+      body: string;
+      visibility?: NoteVisibility;
+      externalShortUrl?: string | null;
+    };
 
 export function useCreateNote() {
   const invalidate = useInvalidateNotes();
@@ -63,12 +70,16 @@ export function useCreateNote() {
 }
 
 /**
- * Edit a note's text, its visibility, or both.
+ * Edit a note's text, its visibility, the Short it quotes, or any of them.
  *
- * One mutation for both because they are one row and one endpoint — and
+ * One mutation for all of them because they are one row and one endpoint — and
  * because sharing a note changes who its list is for, so it has to invalidate
- * exactly what an edit does. A patch with neither field is refused server-side
- * rather than silently touching `updatedAt`.
+ * exactly what an edit does. A patch with no fields at all is refused
+ * server-side rather than silently touching `updatedAt`.
+ *
+ * `externalShortUrl: null` is how a link is REMOVED. It has to be sent
+ * explicitly, because leaving the key out is already how a caller says "I am
+ * not touching the link" — the two cannot share a spelling.
  */
 export function useUpdateNote() {
   const invalidate = useInvalidateNotes();
@@ -80,6 +91,7 @@ export function useUpdateNote() {
       id: string;
       body?: string;
       visibility?: NoteVisibility;
+      externalShortUrl?: string | null;
     }) => api.updateNote(id, patch),
     onSuccess: () => invalidate(),
   });

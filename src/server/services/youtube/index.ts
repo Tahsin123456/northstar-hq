@@ -35,6 +35,12 @@ export type {
 
 export { parseIsoDuration, formatDurationSeconds } from "./parse-duration";
 
+export {
+  fetchExternalVideoMetadata,
+  canFetchExternalVideoMetadata,
+} from "./external-video";
+export type { ExternalVideoMetadata } from "./external-video";
+
 export type {
   YouTubeChannel,
   YouTubeVideo,

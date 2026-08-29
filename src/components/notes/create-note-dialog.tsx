@@ -16,6 +16,10 @@ import {
 } from "@/components/ui/dialog";
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import { nicheColor } from "@/components/niches/niche-chip";
+import {
+  ExternalShortField,
+  useExternalShortField,
+} from "@/components/notes/external-short";
 import { VisibilityChoice } from "@/components/notes/note-visibility";
 import { useDataset } from "@/hooks/use-dataset";
 import { useCreateNote, type CreateNotePayload } from "@/hooks/use-research";
@@ -97,6 +101,10 @@ function CreateNoteForm({ onOpenChange }: { onOpenChange: (open: boolean) => voi
   // open, so this genuinely starts fresh every time — there is no previous
   // answer waiting to share the next note.
   const [visibility, setVisibility] = React.useState<NoteVisibility>("personal");
+  // A Short from OUTSIDE the tracker, which is a different question from the
+  // "Attach to → Short" picker below: that one names a Short this workspace
+  // already tracks, this one quotes a competitor's. A note may carry both.
+  const link = useExternalShortField(null);
 
   const channels = React.useMemo(() => dataset?.channels ?? [], [dataset]);
   const niches = React.useMemo(() => dataset?.niches ?? [], [dataset]);
@@ -112,17 +120,31 @@ function CreateNoteForm({ onOpenChange }: { onOpenChange: (open: boolean) => voi
     const trimmed = body.trim();
     if (!trimmed || incomplete) return;
 
+    // A bad link stops the save and SAYS SO. The error is normally held back
+    // until blur, so a Cmd+Enter straight out of the URL field would otherwise
+    // hit a disabled-looking form with no explanation — marking it touched here
+    // is what turns "nothing happened" into the message. It must never save as
+    // a note with the link quietly dropped.
+    if (link.isInvalid) {
+      link.markTouched();
+      return;
+    }
+
+    // `null` when the field is empty, which is simply "no Short attached".
+    const externalShortUrl = link.payloadValue();
+
     // The payload is a union, not an object with an optional id, so "general"
     // cannot accidentally travel with a stale target from a picker the writer
     // opened and then backed out of.
     const payload: CreateNotePayload =
       association.kind === "general"
-        ? { targetType: "general", body: trimmed, visibility }
+        ? { targetType: "general", body: trimmed, visibility, externalShortUrl }
         : {
             targetType: association.kind,
             targetId: association.id,
             body: trimmed,
             visibility,
+            externalShortUrl,
           };
 
     create.mutate(payload, {
@@ -173,6 +195,14 @@ function CreateNoteForm({ onOpenChange }: { onOpenChange: (open: boolean) => voi
             "focus:border-accent focus:outline-none focus:ring-2 focus:ring-[var(--accent-ring)]",
           )}
         />
+
+        {/* Directly under the body, not inside the "Attach to" disclosure.
+            Quoting a Short is part of writing the note — it is usually the
+            thing that prompted it — where the disclosure below is about filing
+            the note against something this workspace already tracks. Folding
+            the two together would put a competitor's link and our own channel
+            behind the same control and imply they are alternatives. */}
+        <ExternalShortField state={link} id="create-note-external-short" />
 
         {/* Above the association picker, not below it: who may read this is a
             decision about the note itself, and it applies just as much to a
@@ -295,7 +325,7 @@ function CreateNoteForm({ onOpenChange }: { onOpenChange: (open: boolean) => voi
           type="submit"
           variant="primary"
           loading={create.isPending}
-          disabled={!body.trim() || incomplete}
+          disabled={!body.trim() || incomplete || link.isInvalid}
         >
           Add note
         </Button>

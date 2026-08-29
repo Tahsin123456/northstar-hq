@@ -62,6 +62,15 @@ import {
   type VisibleNiches,
 } from "@/server/auth/niche-scope";
 import { AUTHOR_ME, GENERAL_NOTE_LABEL } from "@/lib/dto";
+import {
+  canonicalShortUrl,
+  parseYouTubeVideoId,
+  EXTERNAL_SHORT_URL_HINT,
+} from "@/lib/youtube-url";
+import {
+  canFetchExternalVideoMetadata,
+  fetchExternalVideoMetadata,
+} from "./youtube";
 import type {
   CollectionDTO,
   NoteDTO,
@@ -280,6 +289,28 @@ export const noteKindSchema = z.enum(["channel", "niche", "video", "general"]);
 const noteBodySchema = z.string().trim().min(1, "Write something first.").max(4000);
 
 /**
+ * A pasted link to a Short from outside the tracker.
+ *
+ * Validated here so the caller gets `EXTERNAL_SHORT_URL_HINT` back as the
+ * message — the same sentence the field in the composer shows — rather than a
+ * generic parse failure. It deliberately does NOT transform to the id: the
+ * service parses again on the way to the database, so the "never persist what
+ * was pasted" rule holds for any caller, not only for one that came through
+ * this schema. See `externalShortColumns`.
+ *
+ * The length cap is a lower bound on absurdity, not a real constraint — a valid
+ * YouTube link is under a hundred characters, and the point is that a megabyte
+ * of text is refused before the regex ever runs on it.
+ */
+const externalShortUrlSchema = z
+  .string()
+  .trim()
+  .max(2048, EXTERNAL_SHORT_URL_HINT)
+  .refine((value) => parseYouTubeVideoId(value) !== null, {
+    message: EXTERNAL_SHORT_URL_HINT,
+  });
+
+/**
  * Personal or shared — the column is a plain String, this is what constrains it.
  *
  * Typed against the DTO union so the two cannot drift: adding a third value to
@@ -310,31 +341,48 @@ export const createNoteSchema = z.discriminatedUnion("targetType", [
     // Optional, and absent means personal — see `createNote`. Sharing is a
     // decision somebody takes; it must never be what happens by default.
     visibility: noteVisibilitySchema.optional(),
+    // `nullish` rather than `optional`: on a create, "absent" and "explicitly
+    // nothing" are the same request, and a composer that clears its field
+    // should not have to remember to omit the key.
+    externalShortUrl: externalShortUrlSchema.nullish(),
   }),
   z.object({
     targetType: z.literal("general"),
     body: noteBodySchema,
     visibility: noteVisibilitySchema.optional(),
+    externalShortUrl: externalShortUrlSchema.nullish(),
   }),
 ]);
 
 export type CreateNoteInput = z.infer<typeof createNoteSchema>;
 
 /**
- * Editing a note: its text, who it is for, or both.
+ * Editing a note: its text, who it is for, the Short it quotes, or any of them.
  *
- * Both fields optional, with a refinement rejecting the empty patch — a PATCH
+ * Every field optional, with a refinement rejecting the empty patch — a PATCH
  * that says nothing would otherwise touch `updatedAt` and make the log claim
  * the note was edited when nothing about it changed.
+ *
+ * `externalShortUrl` is `nullable().optional()`, and the difference between the
+ * two carries meaning that `nullish()` would erase. Absent means "leave the
+ * attached Short alone"; an explicit `null` means REMOVE it. The brief asks for
+ * the link to be removable, so "remove" has to be a thing the request can say —
+ * and it cannot be said by omission, because omission already means the
+ * opposite in a PATCH.
  */
 export const updateNoteSchema = z
   .object({
     body: noteBodySchema.optional(),
     visibility: noteVisibilitySchema.optional(),
+    externalShortUrl: externalShortUrlSchema.nullable().optional(),
   })
-  .refine((patch) => patch.body !== undefined || patch.visibility !== undefined, {
-    message: "Nothing to change.",
-  });
+  .refine(
+    (patch) =>
+      patch.body !== undefined ||
+      patch.visibility !== undefined ||
+      patch.externalShortUrl !== undefined,
+    { message: "Nothing to change." },
+  );
 
 export type UpdateNoteInput = z.infer<typeof updateNoteSchema>;
 
@@ -352,6 +400,109 @@ function noteWhereForTarget(targetType: NoteTargetType, targetId: string) {
 /** The author join every note read carries, so no DTO is built anonymously. */
 const noteAuthorInclude = { createdBy: authorSelect } as const;
 
+/** The four external-Short columns, always written and cleared as one group. */
+interface ExternalShortColumns {
+  externalVideoId: string | null;
+  externalUrl: string | null;
+  externalTitle: string | null;
+  externalChannelTitle: string | null;
+}
+
+/**
+ * Turns a pasted link into the columns to write — or into the four nulls that
+ * remove one.
+ *
+ * ==========================================================================
+ * THIS IS WHERE THE PASTED STRING STOPS
+ * ==========================================================================
+ * The input is parsed to an eleven-character video id and the stored URL is
+ * COMPOSED from that id. The string somebody typed is never assigned to
+ * `externalUrl`, and there is no branch here in which it could be. That is the
+ * reason `Note.externalUrl` exists as its own column in that shape: the value
+ * is rendered as an `href`, so a stored value that came from the request body
+ * would be an attacker-chosen scheme (`javascript:`, `data:`) one hop away from
+ * a click. Composing `https://www.youtube.com/shorts/<id>` makes that
+ * impossible by construction rather than by remembering to escape.
+ *
+ * The re-parse is deliberate belt-and-braces. `externalShortUrlSchema` already
+ * rejected anything unparseable at the route, but this function is the one that
+ * touches the database, so it does not depend on a caller having validated
+ * first — a future server action calling `createNote` directly inherits the
+ * property rather than having to know about it.
+ *
+ * `undefined` in, `undefined` out: an update patch that says nothing about the
+ * link leaves all four columns untouched.
+ */
+async function externalShortColumns(
+  input: string | null | undefined,
+): Promise<ExternalShortColumns | undefined> {
+  if (input === undefined) return undefined;
+
+  // Explicit removal. All four together, because a title left behind after its
+  // URL is gone is a note claiming to quote a Short it no longer links to.
+  if (input === null || input.trim() === "") {
+    return {
+      externalVideoId: null,
+      externalUrl: null,
+      externalTitle: null,
+      externalChannelTitle: null,
+    };
+  }
+
+  const videoId = parseYouTubeVideoId(input);
+  if (!videoId) throw errors.invalidInput(EXTERNAL_SHORT_URL_HINT);
+
+  return {
+    externalVideoId: videoId,
+    externalUrl: canonicalShortUrl(videoId),
+    ...(await lookupExternalShortMetadata(videoId)),
+  };
+}
+
+/**
+ * Title and channel, if they are cheap and if they are there.
+ *
+ * ==========================================================================
+ * WHY A NETWORK CALL IS ACCEPTABLE ON THIS PARTICULAR WRITE
+ * ==========================================================================
+ * The objection to fetching inside `createNote` is latency on the most common
+ * write in the app — and it would be decisive if this ran on every note. It
+ * does not. It runs only when a link was actually attached, which is the
+ * minority case by a wide margin, and it is skipped outright when no Data API
+ * key is configured, which is the default deployment. A note with no link is
+ * exactly as fast as it was yesterday.
+ *
+ * What remains is bounded by `fetchExternalVideoMetadata`: one attempt, a
+ * 2.5-second hard timeout, no retry ladder, and `null` for every failure. The
+ * shared `youtubeClient` was deliberately not used for this — see the header of
+ * `external-video.ts`; its three-attempt backoff is right for a sync job and
+ * would be a forty-five-second worst case here.
+ *
+ * The alternative — write first, enrich after — needs a second UPDATE and a
+ * second render, and buys nothing: the thumbnail, which is the part that makes
+ * an attached Short look attached, is derived from the id and needs no request
+ * at all.
+ */
+async function lookupExternalShortMetadata(
+  videoId: string,
+): Promise<Pick<ExternalShortColumns, "externalTitle" | "externalChannelTitle">> {
+  // Checked rather than awaited-and-discarded: with no key the answer is
+  // already known, and this keeps the no-key deployment free of an async hop.
+  if (!canFetchExternalVideoMetadata()) {
+    return { externalTitle: null, externalChannelTitle: null };
+  }
+
+  // `fetchExternalVideoMetadata` swallows its own failures and resolves to
+  // null; there is no rejection to catch. That is a property of that function
+  // rather than something enforced here, and it is the property that lets the
+  // note save whatever YouTube does.
+  const metadata = await fetchExternalVideoMetadata(videoId);
+  return {
+    externalTitle: metadata?.title ?? null,
+    externalChannelTitle: metadata?.channelTitle ?? null,
+  };
+}
+
 function toNoteDTO(note: {
   id: string;
   targetType: string;
@@ -360,6 +511,10 @@ function toNoteDTO(note: {
   videoId: string | null;
   body: string;
   visibility: string;
+  externalVideoId: string | null;
+  externalUrl: string | null;
+  externalTitle: string | null;
+  externalChannelTitle: string | null;
   createdById: string | null;
   createdBy: AuthorRow;
   createdAt: Date;
@@ -379,6 +534,15 @@ function toNoteDTO(note: {
     // else in the column would be a row this application did not write, and
     // reading it as-is is more honest than silently relabelling it "personal".
     visibility: note.visibility as NoteVisibility,
+    // Passed through as stored, with no composition happening here. `externalUrl`
+    // was built from the id by `externalShortColumns` on the way IN, which is
+    // the single place that decision is made — rebuilding it on the way out
+    // would be a second place for it to be got wrong, and reading the column
+    // is what proves the stored value is the safe one.
+    externalVideoId: note.externalVideoId,
+    externalUrl: note.externalUrl,
+    externalTitle: note.externalTitle,
+    externalChannelTitle: note.externalChannelTitle,
     // Read off the row, never from the session. Who wrote a note is a fact
     // recorded when it was written; deriving it from whoever happens to be
     // looking would relabel every note in the log as the reader's own.
@@ -425,6 +589,12 @@ export async function createNote(input: CreateNoteInput): Promise<NoteDTO> {
     targetColumns = noteWhereForTarget(input.targetType, input.targetId);
   }
 
+  // Resolved before the insert so the note is written once and the response
+  // already carries the title. Absent or empty gives the four nulls, which is
+  // what an unattached note stores — `createNote` has no "leave alone" case,
+  // because there is nothing yet to leave alone.
+  const externalColumns = await externalShortColumns(input.externalShortUrl ?? null);
+
   const note = await prisma.note.create({
     data: {
       organizationId,
@@ -440,6 +610,12 @@ export async function createNote(input: CreateNoteInput): Promise<NoteDTO> {
       // implementation detail of the schema.
       visibility: input.visibility ?? "personal",
       ...targetColumns,
+      // A DIFFERENT THING FROM `targetColumns` ABOVE, and they can both be
+      // present. `targetColumns` may set `videoId`, the relation to a Short
+      // this organization tracks; these four describe a Short that is not in
+      // the database and must not be added to it. A note comparing ours to
+      // theirs carries both.
+      ...externalColumns,
     },
     include: noteAuthorInclude,
   });
@@ -513,6 +689,17 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
   });
   if (!existing) throw errors.notFound("note");
 
+  // AFTER the ownership check, never before. This is the only step in the patch
+  // that can reach the network, and doing it first would let anybody holding a
+  // note id make this server fetch from YouTube on their behalf regardless of
+  // whether they may edit that note. The 404 above costs one indexed lookup;
+  // the lookup below is the expensive half, and it happens only for a caller
+  // who has already been established as the author or an admin.
+  //
+  // `undefined` when the patch said nothing about the link, which is what keeps
+  // a body-only edit from clearing an attached Short.
+  const externalColumns = await externalShortColumns(patch.externalShortUrl);
+
   const note = await prisma.note.update({
     where: { id: existing.id },
     // Built from what the patch actually carried, so a body-only edit leaves
@@ -522,6 +709,9 @@ export async function updateNote(noteId: string, patch: UpdateNoteInput): Promis
     data: {
       ...(patch.body !== undefined ? { body: patch.body.trim() } : {}),
       ...(patch.visibility !== undefined ? { visibility: patch.visibility } : {}),
+      // Spread, so `undefined` contributes no keys at all rather than writing
+      // four nulls. Removal is the explicit `null` case inside the helper.
+      ...externalColumns,
     },
     include: noteAuthorInclude,
   });

@@ -109,6 +109,24 @@ const SORT_QUERY: Record<SortChoice, Pick<SavedShortsQuery, "sort" | "direction"
   saver: { sort: "saver", direction: "asc" },
 };
 
+/**
+ * THE GRID.
+ *
+ * Identical to the notes log's, deliberately — the two screens are the two ends
+ * of the same loop and a reader moving between them should not have to re-learn
+ * where things are. Columns come off Tailwind's own scale, and they are counted
+ * against the MAIN COLUMN rather than the window, since the shell holds a 212px
+ * sidebar from `lg` up.
+ *
+ * `grid-cols-1` at the bottom end is what makes the no-horizontal-scrolling
+ * promise structural rather than hopeful.
+ *
+ * One string, shared by the cards and by the skeleton that stands in for them,
+ * so the loading state cannot settle into a different shape than the thing it
+ * was predicting.
+ */
+const CARD_GRID = "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4";
+
 export default function SavedPage() {
   // The dataset still supplies the FURNITURE around the board — the
   // collections the chips are drawn from, the note counts behind each row's
@@ -284,7 +302,21 @@ export default function SavedPage() {
       />
 
       {isLoading ? (
-        <Skeleton className="h-64 w-full rounded-lg" />
+        // Shaped like the card it replaces — thumbnail, title, a line of
+        // channel, a byline — and on the same grid, so nothing reflows when the
+        // board arrives.
+        <div className={CARD_GRID}>
+          {Array.from({ length: 8 }, (_, i) => (
+            <Card key={i} className="flex flex-col overflow-hidden">
+              <Skeleton className="aspect-video w-full rounded-none" />
+              <div className="flex flex-col gap-2 p-3">
+                <Skeleton className="h-3.5 w-full" />
+                <Skeleton className="h-3 w-2/3" />
+                <Skeleton className="mt-2 h-3 w-1/2" />
+              </div>
+            </Card>
+          ))}
+        </div>
       ) : saved.length === 0 && !hasServerFilters ? (
         // Only when the board is GENUINELY empty. With a saver or date filter
         // on, an empty answer has to keep the filter bar on screen — otherwise
@@ -420,36 +452,25 @@ export default function SavedPage() {
             // Dimmed rather than replaced while the next answer is in flight:
             // the rows on screen are still true, they are simply about to be
             // asked again with a slightly different question.
-            <Card
+            <div
               className={cn(
-                "overflow-hidden transition-opacity duration-150",
+                CARD_GRID,
+                "transition-opacity duration-150",
                 isFetching && "opacity-60",
               )}
             >
-              <div className="flex items-center gap-3 border-b border-border bg-surface-sunken px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
-                <span className="w-10 shrink-0" />
-                <span className="min-w-0 flex-1">Short</span>
-                <span className="hidden w-[140px] shrink-0 text-right sm:block">
-                  Views since saved
-                </span>
-                <span className="hidden w-[80px] shrink-0 text-right md:block">Saved</span>
-                <span className="w-[64px] shrink-0" />
-              </div>
-
-              <div className="flex flex-col">
-                {filtered.map((item) => (
-                  <SavedRow
-                    key={item.id}
-                    item={item}
-                    collections={collections}
-                    noteCount={noteCounts[item.videoId] ?? 0}
-                    resolution={contentTypeIndex.get(item.videoId) ?? EMPTY_RESOLUTION}
-                    isMine={item.savedById === viewerId}
-                    onOpenShort={() => setOpenShort(item)}
-                  />
-                ))}
-              </div>
-            </Card>
+              {filtered.map((item) => (
+                <SavedCard
+                  key={item.id}
+                  item={item}
+                  collections={collections}
+                  noteCount={noteCounts[item.videoId] ?? 0}
+                  resolution={contentTypeIndex.get(item.videoId) ?? EMPTY_RESOLUTION}
+                  isMine={item.savedById === viewerId}
+                  onOpenShort={() => setOpenShort(item)}
+                />
+              ))}
+            </div>
           )}
         </>
       )}
@@ -625,7 +646,7 @@ function CollectionChip({
   );
 }
 
-function SavedRow({
+function SavedCard({
   item,
   collections,
   noteCount,
@@ -638,11 +659,11 @@ function SavedRow({
   noteCount: number;
   resolution: ContentTypeResolution;
   /**
-   * Whether this row is the viewer's own save.
+   * Whether this card is the viewer's own save.
    *
    * False only on an admin's board, where the server hands back the whole
    * team's. Un-saving is "remove mine" server-side, so offering that button on
-   * a colleague's row would be a control that silently does nothing.
+   * a colleague's card would be a control that silently does nothing.
    *
    * False is not the same as "somebody else's", though — see `isOrphaned`
    * below. A save whose owner has been deleted is nobody's, and it gets a
@@ -655,12 +676,25 @@ function SavedRow({
   const clearOrphan = useRemoveOrphanedSave();
 
   // A THIRD CASE, not a variant of "not mine". `savedById` is `SetNull`, so a
-  // save whose owner's account has gone arrives with no id and no name: the
-  // byline test below found nothing to print and the ownership test below that
-  // found nobody to offer the button to, which left a row with no label and no
-  // control — one nobody could read and nobody could clear.
+  // save whose owner's account has gone arrives with no id and no name — which
+  // is a card nobody could read and nobody could clear until both this label
+  // and the button below stopped keying off ownership.
   const isOrphaned = item.savedById === null;
-  const savedBy = isMine ? null : (item.savedByName ?? UNKNOWN_AUTHOR_LABEL);
+
+  /**
+   * WHO SAVED IT — on every card, including your own.
+   *
+   * This used to print only on somebody else's, on the reasoning that your own
+   * name is noise on your own shortlist. In a table that was merely awkward; in
+   * a grid it is wrong. A blank line in a fixed byline slot reads as missing
+   * data rather than as "mine", and an admin scanning a board that mixes their
+   * saves with the team's has to infer ownership from an absence — which is the
+   * same mistake the notes log fixed a round earlier.
+   *
+   * `isMine` still decides what you may DO with the card; it no longer decides
+   * whether the card says whose it is.
+   */
+  const savedBy = item.savedByName ?? UNKNOWN_AUTHOR_LABEL;
 
   const growth = item.currentViews - item.viewsAtSave;
   const growthPct =
@@ -668,52 +702,156 @@ function SavedRow({
 
   const itemCollections = collections.filter((c) => item.collectionIds.includes(c.id));
 
-  return (
-    <div className="group flex items-center gap-3 border-b border-border px-4 py-3 transition-colors last:border-b-0 hover:bg-surface-hover/40">
-      <a
-        href={youtubeShortsUrl(item.youtubeVideoId)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="shrink-0"
-        tabIndex={-1}
-        aria-hidden
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={youtubeThumbnailUrl(item.youtubeVideoId)}
-          alt=""
-          width={40}
-          height={54}
-          loading="lazy"
-          decoding="async"
-          referrerPolicy="no-referrer"
-          className="h-[54px] w-10 rounded object-cover ring-1 ring-border"
-        />
-      </a>
+  const removing = unsave.isPending || clearOrphan.isPending;
 
-      <div className="min-w-0 flex-1">
+  return (
+    <Card className="group flex min-w-0 flex-col overflow-hidden transition-colors duration-150 hover:border-border-strong">
+      {/* THE THUMBNAIL LEADS, and that is the argument for this card existing at
+          all. A saved Short is recognised by its frame long before its title —
+          you remember the face, the caption, the colour of the hook — so a grid
+          of frames is scannable in a way a grid of sentences is not. It takes
+          the full width and the actions ride on top of it instead of claiming a
+          column beside it.
+
+          16:9 is what `youtubeThumbnailUrl` actually returns, so `object-cover`
+          never crops in practice: the frame is shown exactly as YouTube
+          generated it, and the ratio is declared so the card reserves its space
+          before the image loads rather than jumping when it arrives. */}
+      <div className="relative">
         <a
           href={youtubeShortsUrl(item.youtubeVideoId)}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex max-w-full items-center gap-1.5 text-[13px] font-medium text-foreground transition-colors hover:text-accent"
-          title={item.title}
+          className="block"
+          // The title below is the same link and is the accessible one. Two tab
+          // stops onto one destination is noise for anybody on a keyboard.
+          tabIndex={-1}
+          aria-hidden
         >
-          <span className="truncate">{item.title}</span>
-          <ExternalLink className="size-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-50" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={youtubeThumbnailUrl(item.youtubeVideoId)}
+            alt=""
+            width={320}
+            height={180}
+            loading="lazy"
+            decoding="async"
+            referrerPolicy="no-referrer"
+            className="aspect-video w-full bg-surface-sunken object-cover"
+          />
         </a>
 
-        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-subtle-foreground">
+        {/* Says where the frame goes, since a bare image gives no clue that it
+            leaves the app. Decorative — the real affordance is the title link
+            and the whole thumbnail beneath it. */}
+        <span className="pointer-events-none absolute bottom-1.5 left-1.5 inline-flex items-center gap-1 rounded border border-border bg-surface/90 px-1.5 py-0.5 text-[10px] text-muted-foreground opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
+          <ExternalLink className="size-2.5" />
+          YouTube
+        </span>
+
+        {/* The actions sit on a token-coloured plate rather than bare on the
+            image: a ghost icon over an arbitrary video frame is legible on some
+            Shorts and invisible on others, and it has to work in both themes.
+
+            The plate reveals on hover, EXCEPT when the Short carries notes —
+            that is information about the row rather than an affordance, and it
+            has always been visible without hovering. The remove button keeps
+            its own hover gate inside, so a Short with notes shows the note
+            marker at rest and the destructive control only on approach. */}
+        <div
+          className={cn(
+            "absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/90 p-0.5 backdrop-blur-sm transition-opacity",
+            noteCount > 0
+              ? "opacity-100"
+              : "opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100",
+          )}
+        >
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={onOpenShort}
+                // Opens the single-Short view — notes, niche and content type.
+                aria-label="Open this Short: notes, niche and content type"
+                className={cn(noteCount > 0 && "text-accent")}
+              >
+                <StickyNote />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {noteCount > 0
+                ? `${noteCount} ${noteCount === 1 ? "note" : "notes"} — open the Short`
+                : "Open this Short — notes, niche and content type"}
+            </TooltipContent>
+          </Tooltip>
+
+          {isMine || isOrphaned ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              // Two removals behind one button, because they are two different
+              // acts. Un-saving takes a Short off the CALLER's own board and is
+              // addressed by video. Clearing an orphan deletes a row that belongs
+              // to nobody, so it is addressed by its own id: a deleted account can
+              // leave several saves of the same Short and `videoId` would name
+              // them all. Offering it to an admin is what stops a departed
+              // colleague's shortlist sitting on the board for good — the whole
+              // reason the card is labelled rather than merely unlabelled.
+              aria-label={isOrphaned ? "Clear this save" : "Remove from saved"}
+              loading={removing}
+              onClick={() => {
+                const done = {
+                  onSuccess: () => toast.success("Removed from saved"),
+                  onError: (e: unknown) =>
+                    toast.error("Could not remove", {
+                      description: e instanceof Error ? e.message : undefined,
+                    }),
+                };
+                if (isOrphaned) clearOrphan.mutate(item.id, done);
+                else unsave.mutate(item.videoId, done);
+              }}
+              className={cn(
+                "text-subtle-foreground transition-opacity hover:text-danger focus-visible:opacity-100 group-hover:opacity-100",
+                // Kept visible while the removal is in flight, or the spinner
+                // vanishes the instant the pointer leaves the card and the
+                // click looks like it did nothing.
+                removing ? "opacity-100" : "opacity-0",
+              )}
+            >
+              {removing ? null : <Trash2 />}
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col p-3">
+        <a
+          href={youtubeShortsUrl(item.youtubeVideoId)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="min-w-0 text-[13px] font-medium leading-snug text-foreground transition-colors hover:text-accent"
+          title={item.title}
+        >
+          {/* Two lines, then trailing off. A title is the second thing read
+              here, after the frame, and clamping it is what keeps every card in
+              a row the same shape — the full text is one hover or one click
+              away. `break-words` is what stops a pasted title with no spaces in
+              it from widening the grid track. */}
+          <span className="line-clamp-2 break-words">{item.title}</span>
+        </a>
+
+        <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-subtle-foreground">
           <Link
             href={`/channels/${item.channelId}`}
-            className="inline-flex items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
+            className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
           >
             <Avatar src={item.channelAvatarUrl} name={item.channelName} size={14} />
-            <span className="max-w-[150px] truncate">{item.channelName}</span>
+            <span className="truncate">{item.channelName}</span>
           </Link>
 
           {item.ownershipType === "own" ? (
-            <Badge variant="accent" size="sm" className="tracking-wider">
+            <Badge variant="accent" size="sm" className="shrink-0 tracking-wider">
               Own
             </Badge>
           ) : null}
@@ -727,150 +865,102 @@ function SavedRow({
             className="-ml-1"
           />
 
-          <span aria-hidden className="text-border-strong">
+          {/* Everything between the channel and here is optional — the "Own"
+              badge, the niche, the content type — so the separator is placed
+              last rather than in front of any of them. The channel always
+              renders, so there is always something to its left; a "·" with
+              nothing before it reads as a link that failed to load. */}
+          <span aria-hidden className="shrink-0 text-border-strong">
             ·
           </span>
-          <span>{formatDate(item.publishedAt)}</span>
+          {/* When the Short was PUBLISHED — not when it was saved. Two different
+              questions, and the second one is answered on the byline below. */}
+          <span className="shrink-0">{formatDate(item.publishedAt)}</span>
+        </div>
 
-          {item.outlierMultipleAtSave !== null ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="tnum cursor-default text-muted-foreground">
-                  {item.outlierMultipleAtSave >= 10
-                    ? Math.round(item.outlierMultipleAtSave)
-                    : item.outlierMultipleAtSave.toFixed(1)}
-                  × at save
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                Its multiple of the channel median at the moment you saved it
-                {item.channelMedianAtSave !== null
-                  ? ` (median was ${formatCompactNumber(item.channelMedianAtSave)})`
-                  : ""}
-                . Kept as a historical fact rather than recomputed.
-              </TooltipContent>
-            </Tooltip>
-          ) : null}
+        {/* THE JOURNEY — what it was worth when it was found, and what it became.
+            The most important thing on this screen: a Short saved at 1.2M now
+            sitting at 4.8M is the feedback that tells a director their instinct
+            was right, which is what makes the whole save-and-revisit loop worth
+            maintaining. It kept its own column in the old table and it keeps its
+            own rule here. */}
+        <div className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 border-t border-border pt-2.5">
+          <span className="tnum text-[13px] text-foreground">
+            {formatCompactNumber(item.viewsAtSave)}
+            <span className="mx-1 text-subtle-foreground">→</span>
+            <span className="font-medium">{formatCompactNumber(item.currentViews)}</span>
+          </span>
+          <span
+            className={cn(
+              "tnum text-[10px]",
+              growth > 0 ? "text-success" : "text-subtle-foreground",
+            )}
+          >
+            {growth > 0
+              ? `+${formatCompactNumber(growth)}${growthPct !== null ? ` (+${growthPct}%)` : ""}`
+              : "no change yet"}
+          </span>
+        </div>
 
+        {item.outlierMultipleAtSave !== null ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="tnum mt-1 w-fit cursor-default text-[11px] text-muted-foreground">
+                {item.outlierMultipleAtSave >= 10
+                  ? Math.round(item.outlierMultipleAtSave)
+                  : item.outlierMultipleAtSave.toFixed(1)}
+                × at save
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              Its multiple of the channel median at the moment you saved it
+              {item.channelMedianAtSave !== null
+                ? ` (median was ${formatCompactNumber(item.channelMedianAtSave)})`
+                : ""}
+              . Kept as a historical fact rather than recomputed.
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
+
+        {/* The floor of the card. `mt-auto` is what makes the grid readable:
+            every card in a row ends on the same line, so the byline is always
+            the last line and always in the same place, whatever varies above
+            it. The collections line goes ABOVE the byline for the same reason —
+            it is the optional one, so putting it last would let the byline
+            float up and down from card to card. */}
+        <div className="mt-auto flex flex-col gap-1 pt-2.5 text-[11px] text-subtle-foreground">
           {itemCollections.length > 0 ? (
-            <span className="inline-flex items-center gap-1 text-subtle-foreground">
-              <FolderOpen className="size-3" />
-              {itemCollections.map((c) => c.name).join(", ")}
-            </span>
-          ) : null}
-
-          {/* Named, never anonymous: an admin's board mixes their own saves
-              with the team's, and an unlabelled row invites them to read a
-              colleague's shortlist as their own judgement.
-
-              Which is why this is driven by `savedBy` rather than by a name
-              that might not exist. The old test was `!isMine && savedByName`,
-              and an orphan fails its second half — so the row that most needed
-              a label was the one row that got none.
-
-              It sits on this wrapping line rather than in the fixed 80px
-              timestamp column, because "Saved by" plus a name does not fit
-              there — and truncating it takes the half that carries the
-              information, leaving "Saved b…". */}
-          {savedBy ? (
             <span
-              className="inline-flex max-w-[200px] items-center gap-1 truncate text-subtle-foreground"
-              title={`Saved by ${savedBy}`}
+              className="flex min-w-0 items-center gap-1"
+              title={itemCollections.map((c) => c.name).join(", ")}
             >
-              <Bookmark className="size-3 shrink-0" />
-              <span className="truncate">Saved by {savedBy}</span>
+              <FolderOpen className="size-3 shrink-0" />
+              <span className="truncate">
+                {itemCollections.map((c) => c.name).join(", ")}
+              </span>
             </span>
           ) : null}
+
+          {/* The name truncates and the date does not: "Saved by Alexandra
+              Konst…" still answers whose card this is, whereas a truncated
+              "12 Aug…" answers nothing. The absolute date is the visible one
+              and the relative form stays in the tooltip — a saved Short is
+              placed against what the channel was doing at the time, and "1 year
+              ago" cannot do that. */}
+          <span
+            className="flex min-w-0 items-center gap-1"
+            title={`Saved by ${savedBy} ${formatRelativeTime(item.savedAt)}`}
+          >
+            <Bookmark className="size-3 shrink-0" />
+            <span className="truncate">Saved by {savedBy}</span>
+            <span aria-hidden className="shrink-0 text-border-strong">
+              ·
+            </span>
+            <span className="tnum shrink-0">{formatDate(item.savedAt)}</span>
+          </span>
         </div>
       </div>
-
-      {/* The journey: what it was worth when found, and what it became. */}
-      <div className="hidden w-[140px] shrink-0 flex-col items-end gap-0.5 sm:flex">
-        <span className="tnum text-[13px] text-foreground">
-          {formatCompactNumber(item.viewsAtSave)}
-          <span className="mx-1 text-subtle-foreground">→</span>
-          <span className="font-medium">{formatCompactNumber(item.currentViews)}</span>
-        </span>
-        <span
-          className={cn(
-            "tnum text-[10px]",
-            growth > 0 ? "text-success" : "text-subtle-foreground",
-          )}
-        >
-          {growth > 0
-            ? `+${formatCompactNumber(growth)}${growthPct !== null ? ` (+${growthPct}%)` : ""}`
-            : "no change yet"}
-        </span>
-      </div>
-
-      <div className="hidden w-[80px] shrink-0 flex-col items-end md:flex">
-        <span className="text-[11px] text-subtle-foreground">
-          {formatRelativeTime(item.savedAt)}
-        </span>
-      </div>
-
-      <div className="flex shrink-0 items-center gap-0.5">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={onOpenShort}
-              // Opens the single-Short view — notes, niche and content type.
-              aria-label="Open this Short: notes, niche and content type"
-              className={cn(
-                "transition-opacity",
-                noteCount > 0
-                  ? "text-accent opacity-100"
-                  : "opacity-0 focus-visible:opacity-100 group-hover:opacity-100",
-              )}
-            >
-              <StickyNote />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>
-            {noteCount > 0
-              ? `${noteCount} ${noteCount === 1 ? "note" : "notes"} — open the Short`
-              : "Open this Short — notes, niche and content type"}
-          </TooltipContent>
-        </Tooltip>
-
-        {isMine || isOrphaned ? (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            // Two removals behind one button, because they are two different
-            // acts. Un-saving takes a Short off the CALLER's own board and is
-            // addressed by video. Clearing an orphan deletes a row that belongs
-            // to nobody, so it is addressed by its own id: a deleted account can
-            // leave several saves of the same Short and `videoId` would name
-            // them all. Offering it to an admin is what stops a departed
-            // colleague's shortlist sitting on the board for good — the whole
-            // reason the row is labelled rather than merely unlabelled.
-            aria-label={isOrphaned ? "Clear this save" : "Remove from saved"}
-            loading={unsave.isPending || clearOrphan.isPending}
-            onClick={() => {
-              const done = {
-                onSuccess: () => toast.success("Removed from saved"),
-                onError: (e: unknown) =>
-                  toast.error("Could not remove", {
-                    description: e instanceof Error ? e.message : undefined,
-                  }),
-              };
-              if (isOrphaned) clearOrphan.mutate(item.id, done);
-              else unsave.mutate(item.videoId, done);
-            }}
-            className="text-subtle-foreground opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
-          >
-            {unsave.isPending || clearOrphan.isPending ? null : <Trash2 />}
-          </Button>
-        ) : (
-          // Keeps the column the same width as a row with the button, so a
-          // mixed board does not comb its rightmost edge.
-          <span className="size-7 shrink-0" aria-hidden />
-        )}
-      </div>
-    </div>
+    </Card>
   );
 }
 

@@ -31,8 +31,14 @@ import {
   type ResolvedDateFilter,
 } from "@/components/common/filter-menu";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton, SkeletonText } from "@/components/ui/skeleton";
 import { CreateNoteDialog } from "@/components/notes/create-note-dialog";
+import {
+  buildNotePatch,
+  ExternalShortField,
+  ExternalShortPreview,
+  useExternalShortField,
+} from "@/components/notes/external-short";
 import {
   NoteVisibilityToggle,
   VisibilityBadge,
@@ -92,6 +98,28 @@ const SORT_QUERY: Record<SortChoice, Pick<NoteLogQuery, "sort" | "direction">> =
   oldest: { sort: "created", direction: "asc" },
   author: { sort: "author", direction: "asc" },
 };
+
+/**
+ * THE GRID.
+ *
+ * A note is a paragraph, not a row of numbers, so the wide horizontal strip
+ * this log used to draw spent most of a desktop screen on whitespace to the
+ * right of a sentence and fit five notes in a viewport. Compact cards read the
+ * same and fit twenty.
+ *
+ * The columns come off Tailwind's own scale rather than invented breakpoints,
+ * and they are counted against the MAIN COLUMN, not the window: the shell keeps
+ * a 212px sidebar from `lg` up, so at `xl` the cards share roughly 1000px and
+ * three of them are ~325px each — wide enough for two-thirds of a sentence per
+ * line, which is where a clamped paragraph stops reading like a stack of
+ * fragments. `grid-cols-1` at the bottom end is what guarantees the promise
+ * that nothing ever scrolls sideways.
+ *
+ * One string, shared by the rows and by the skeleton that stands in for them,
+ * so the loading state cannot settle into a different shape than the thing it
+ * was predicting.
+ */
+const CARD_GRID = "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4";
 
 export default function NotesPage() {
   const { data: dataset } = useDataset();
@@ -224,9 +252,16 @@ export default function NotesPage() {
       />
 
       {isLoading ? (
-        <div className="flex flex-col gap-3">
-          {Array.from({ length: 4 }, (_, i) => (
-            <Skeleton key={i} className="h-24 w-full rounded-lg" />
+        // Shaped like the card it replaces — badge, three lines of body, a
+        // byline — and laid out on the same grid, so the page does not reflow
+        // when the answer arrives.
+        <div className={CARD_GRID}>
+          {Array.from({ length: 6 }, (_, i) => (
+            <Card key={i} className="flex flex-col gap-3 p-4">
+              <Skeleton className="h-4 w-20" />
+              <SkeletonText lines={3} />
+              <Skeleton className="mt-1 h-3 w-2/3" />
+            </Card>
           ))}
         </div>
       ) : notes.length === 0 && !hasFilters && !query ? (
@@ -384,7 +419,8 @@ export default function NotesPage() {
             // answered again.
             <div
               className={cn(
-                "flex flex-col gap-3 transition-opacity duration-150",
+                CARD_GRID,
+                "transition-opacity duration-150",
                 isFetching && "opacity-60",
               )}
             >
@@ -469,6 +505,10 @@ function NoteCard({
 }) {
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(note.body);
+  // Seeded from the note so opening the editor shows the Short it already
+  // quotes. This card TOGGLES its form rather than unmounting it, so — like
+  // `draft` above — it is re-seeded on the way in rather than on mount.
+  const link = useExternalShortField(note.externalUrl);
   const update = useUpdateNote();
   const remove = useDeleteNote();
 
@@ -503,17 +543,39 @@ function NoteCard({
 
   const Icon = TYPE_ICON[note.targetType];
 
-  // A general note is attached to nothing, so the context row holds only its
-  // byline and date. The separator below is drawn from this rather than
-  // rendered unconditionally, or every general note would open with a dangling
-  // "·" that reads like a link failed to load.
+  // A general note is attached to nothing, so its footer holds only the byline
+  // and date. Tested rather than left to render as an empty line: on a wide
+  // strip an absent context row cost nothing, but on a card it is a visible
+  // band of dead space between the body and the byline.
   const hasContext =
     note.targetType !== "general" &&
     Boolean(note.channelId || note.youtubeVideoId || note.niches.length > 0);
 
+  /**
+   * EQUAL HEIGHT, AND HERE IS WHY.
+   *
+   * `flex flex-col` with the body claiming the slack (`flex-1`) puts the footer
+   * on the floor of the card, and grid tracks stretch, so every card in a row
+   * ends at the same line and every byline in that row sits on it. That is the
+   * whole reason for the choice: this screen is scanned down the author and
+   * date column, and a byline that lands at a different height on each card is
+   * precisely the thing the brief calls a broken grid.
+   *
+   * The waste that usually comes with equal height is bounded rather than
+   * unbounded, because the body is clamped: a card can only ever be about five
+   * lines taller than its neighbour, so a row of one-line notes is a row of
+   * short cards, not a row of tall cards with holes in them. Nothing is padded
+   * to a minimum. Rows differ in height from each other; cards within a row do
+   * not, which is the alignment a reader can actually see.
+   *
+   * `min-w-0` is not cosmetic: a grid item defaults to `min-width: auto`, so a
+   * 300-character unbroken word would widen the track past its share and push
+   * the page into horizontal scroll. That, plus `break-words` on the body, is
+   * what makes the no-sideways-scrolling promise hold for real input.
+   */
   return (
-    <Card className="group p-4">
-      <div className="flex items-start justify-between gap-3">
+    <Card className="group flex min-w-0 flex-col p-4">
+      <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <Badge variant="outline" size="md" className="shrink-0 gap-1.5">
             <Icon className="size-3" />
@@ -531,6 +593,10 @@ function NoteCard({
               aria-label="Edit note"
               onClick={() => {
                 setDraft(note.body);
+                // Beside `setDraft`, for the same reason: an edit that was
+                // opened, typed into and abandoned must not still be sitting
+                // there — with its error message — the next time it is opened.
+                link.reset(note.externalUrl);
                 setEditing(true);
               }}
             >
@@ -560,13 +626,23 @@ function NoteCard({
 
       {editing ? (
         <form
-          className="mt-3 flex flex-col gap-2"
+          className="mt-3 flex flex-1 flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             const body = draft.trim();
             if (!body) return;
+            // A bad link stops the save and says why, rather than saving the
+            // note with the link silently dropped.
+            if (link.isInvalid) {
+              link.markTouched();
+              return;
+            }
             update.mutate(
-              { id: note.id, body },
+              // `buildNotePatch` decides whether the link is even mentioned:
+              // it compares parsed video ids, so re-pasting the same Short in
+              // another of its URL forms is correctly seen as no change and
+              // costs neither a PATCH field nor a metadata lookup.
+              { id: note.id, ...buildNotePatch(note, body, link.videoId) },
               {
                 onSuccess: () => {
                   setEditing(false);
@@ -588,6 +664,15 @@ function NoteCard({
             onChange={(event) => setDraft(event.target.value)}
             className="w-full resize-y rounded-md border border-border bg-surface-sunken px-3 py-2 text-[13px] text-foreground focus:border-accent focus:outline-none focus:ring-2 focus:ring-[var(--accent-ring)]"
           />
+          {/* Changing the attached Short and REMOVING it are the same control:
+              clearing the field is what removes the link, which is why the
+              field carries its own clear button rather than leaving somebody to
+              select a URL and delete it. */}
+          <ExternalShortField
+            state={link}
+            id={`note-log-external-short-${note.id}`}
+            compact
+          />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" onClick={() => setEditing(false)}>
               Cancel
@@ -597,89 +682,127 @@ function NoteCard({
               variant="primary"
               size="sm"
               loading={update.isPending}
-              disabled={!draft.trim()}
+              disabled={!draft.trim() || link.isInvalid}
             >
               Save
             </Button>
           </div>
         </form>
       ) : (
-        <p className="mt-2.5 whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">
-          {note.body}
-        </p>
+        // The body claims the card's slack, which is what pins the footer to
+        // the floor. Clamped to five lines — enough that most notes are read in
+        // full on the card, and the ones that are not say so by trailing off
+        // rather than by being cut mid-glyph. The whole text stays available on
+        // hover, since there is nowhere else in this app to send a reader for
+        // it: a note has no page of its own.
+        <div className="mt-2.5 min-w-0 flex-1">
+          <p
+            className="line-clamp-5 break-words whitespace-pre-wrap text-[13px] leading-relaxed text-foreground"
+            title={note.body}
+          >
+            {note.body}
+          </p>
+        </div>
       )}
 
-      {/* Context row: what this was about, and a way back to it. */}
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-border pt-3 text-[11px]">
-        {note.targetType === "video" && note.youtubeVideoId ? (
-          <a
-            href={youtubeShortsUrl(note.youtubeVideoId)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex max-w-[280px] items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
-            title={note.targetLabel}
-          >
-            <Video className="size-3 shrink-0" />
-            <span className="truncate">{note.targetLabel}</span>
-            <ExternalLink className="size-2.5 shrink-0 opacity-50" />
-          </a>
-        ) : null}
+      {/* The Short this note quotes from outside the tracker, when it quotes
+          one. The shared preview, not a card-sized copy of it: the composer,
+          the panel on a channel page and this log all draw the same attachment,
+          and it already renders nothing — no box, no divider, no gap — for the
+          overwhelming majority of notes that have none.
 
-        {note.channelId ? (
-          <Link
-            href={`/channels/${note.channelId}`}
-            className="inline-flex items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
-          >
-            <Avatar
-              src={note.channelAvatarUrl}
-              name={note.channelName ?? "?"}
-              size={14}
-            />
-            <span className="max-w-[160px] truncate">{note.channelName}</span>
-          </Link>
-        ) : null}
+          It sits above the footer rather than inside it because it is part of
+          what the note SAYS, not part of who wrote it.
 
-        {note.targetType === "niche" && note.niches[0] ? (
-          <Link
-            href={`/?niche=${encodeURIComponent(note.niches[0].id)}`}
-            className="inline-flex items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
-          >
-            <span
-              aria-hidden
-              className="size-[6px] shrink-0 rounded-full"
-              style={{ background: nicheColor(note.niches[0].colorIndex) }}
-            />
-            {note.niches[0].name}
-          </Link>
-        ) : note.niches.length > 0 ? (
-          <NicheChips niches={note.niches} limit={2} size="sm" />
-        ) : null}
+          HIDDEN WHILE EDITING, and that is the whole point of the guard.
+          Clearing the field is how a link is removed, and with the stored
+          attachment still drawn underneath, the clear looked like it had done
+          nothing — the thumbnail was right there, unchanged, until save. Two
+          views of one value, one of them stale, is not a preview. */}
+      {editing ? null : <ExternalShortPreview note={note} className="mt-3" />}
 
+      {/* The floor of the card: what this was about, then who wrote it and
+          when. Two stacked lines rather than one wrapping one, so the byline is
+          always the last line of the card and the date is never the half that
+          gets truncated away. */}
+      <div className="mt-3 flex flex-col gap-1.5 border-t border-border pt-3 text-[11px]">
         {hasContext ? (
-          <span aria-hidden className="text-border-strong">
-            ·
-          </span>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            {note.targetType === "video" && note.youtubeVideoId ? (
+              <a
+                href={youtubeShortsUrl(note.youtubeVideoId)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
+                title={note.targetLabel}
+              >
+                <Video className="size-3 shrink-0" />
+                <span className="truncate">{note.targetLabel}</span>
+                <ExternalLink className="size-2.5 shrink-0 opacity-50" />
+              </a>
+            ) : null}
+
+            {note.channelId ? (
+              <Link
+                href={`/channels/${note.channelId}`}
+                className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
+              >
+                <Avatar
+                  src={note.channelAvatarUrl}
+                  name={note.channelName ?? "?"}
+                  size={14}
+                />
+                <span className="truncate">{note.channelName}</span>
+              </Link>
+            ) : null}
+
+            {note.targetType === "niche" && note.niches[0] ? (
+              <Link
+                href={`/?niche=${encodeURIComponent(note.niches[0].id)}`}
+                className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
+              >
+                <span
+                  aria-hidden
+                  className="size-[6px] shrink-0 rounded-full"
+                  style={{ background: nicheColor(note.niches[0].colorIndex) }}
+                />
+                <span className="truncate">{note.niches[0].name}</span>
+              </Link>
+            ) : note.niches.length > 0 ? (
+              // One chip rather than two: the card is a third of the width the
+              // strip was, and a second chip pushes the "+n" onto its own line.
+              <NicheChips niches={note.niches} limit={1} size="sm" />
+            ) : null}
+          </div>
         ) : null}
-        <span
-          className="text-subtle-foreground"
+
+        {/* "Created by" in full, not a bare name. Next to a date a lone name
+            reads as ambiguously as it looks — it could as easily be who the
+            note is *about* as who wrote it.
+
+            UNCONDITIONAL, INCLUDING ON YOUR OWN NOTES. This was fixed in an
+            earlier round and the grid makes it matter more, not less: a blank
+            where a byline goes is even harder to read as "mine" when it is a
+            gap in a card than when it was a gap in a column.
+
+            THE DATE IS ABSOLUTE, and the relative form stays in the tooltip.
+            `formatRelativeTime` has no upper bound: a note from last spring
+            reads "1 year ago", which is useless for the thing a research log is
+            actually for — placing an observation against what the channel was
+            doing at the time. A hover is not an answer either; it is invisible
+            in a screenshot and to anybody navigating by keyboard. */}
+        <div
+          className="flex min-w-0 flex-col gap-0.5 text-subtle-foreground"
           title={`Created by ${byline} ${formatRelativeTime(note.createdAt)}`}
         >
-          {/* "Created by" in full, not a bare name. Next to a date a lone name
-              reads as ambiguously as it looks — it could as easily be who the
-              note is *about* as who wrote it.
-
-              THE DATE IS ABSOLUTE, and the relative form moved to the tooltip.
-              `formatRelativeTime` has no upper bound: a note from last spring
-              reads "1 year ago", which is useless for the thing a research log
-              is actually for — placing an observation against what the channel
-              was doing at the time. A hover is not an answer either; it is
-              invisible in a screenshot and to anybody navigating by keyboard. */}
-          {`Created by ${byline} · `}
-          {formatDate(note.createdAt)}
-          {note.updatedAt !== note.createdAt
-            ? ` · edited ${formatRelativeTime(note.updatedAt)}`
-            : ""}
-        </span>
+          <span className="min-w-0 truncate">{`Created by ${byline}`}</span>
+          <span className="tnum truncate">
+            {formatDate(note.createdAt)}
+            {note.updatedAt !== note.createdAt
+              ? ` · edited ${formatRelativeTime(note.updatedAt)}`
+              : ""}
+          </span>
+        </div>
       </div>
     </Card>
   );

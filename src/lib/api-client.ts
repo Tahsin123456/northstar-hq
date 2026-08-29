@@ -627,16 +627,35 @@ export const api = {
           targetId: string;
           body: string;
           visibility?: NoteVisibility;
+          /**
+           * A pasted YouTube link. Sent as typed — the SERVER parses it to a
+           * video id and composes the URL it stores, so this string is never
+           * what ends up in an `href`. The composer validates with the same
+           * parser first, so an invalid link fails in the field rather than at
+           * the request.
+           */
+          externalShortUrl?: string | null;
         }
-      | { targetType: "general"; body: string; visibility?: NoteVisibility },
+      | {
+          targetType: "general";
+          body: string;
+          visibility?: NoteVisibility;
+          externalShortUrl?: string | null;
+        },
   ): Promise<{ note: NoteDTO }> =>
     request("/api/notes", { method: "POST", body: JSON.stringify(payload) }),
 
   /**
-   * Edits the text, the visibility, or both — whatever the patch carries.
+   * Edits the text, the visibility, the attached Short, or any of them —
+   * whatever the patch carries.
    *
    * The server refuses an empty patch rather than touching `updatedAt` for a
    * request that changed nothing, so callers pass what actually changed.
+   *
+   * `externalShortUrl` has three meanings and they are all needed: absent
+   * leaves the attached Short alone, a string replaces it, and an explicit
+   * `null` removes it. Omitting it cannot mean "remove" — omission already
+   * means "leave alone" for every other field in a PATCH.
    */
   updateNote: (id: string, patch: UpdateNoteInput): Promise<{ note: NoteDTO }> =>
     request(`/api/notes/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),

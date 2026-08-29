@@ -14,6 +14,13 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  buildNotePatch,
+  ExternalShortField,
+  ExternalShortPreview,
+  useExternalShortField,
+  type NoteEditPatch,
+} from "@/components/notes/external-short";
+import {
   NoteVisibilityToggle,
   VisibilityBadge,
   VisibilityChoice,
@@ -60,19 +67,33 @@ export function NotesPanel({
   // save: a sticky "shared" would quietly share the next note, which is the one
   // decision this control must never make on somebody's behalf.
   const [visibility, setVisibility] = React.useState<NoteVisibility>("personal");
+  // The competitor's Short this observation is about, if there is one. Same
+  // field as the composer on the Notes page — most notes written here are
+  // written while looking at somebody else's Short, which is precisely the case
+  // the feature exists for.
+  const link = useExternalShortField(null);
   const create = useCreateNote();
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     const body = draft.trim();
     if (!body) return;
+    // Refuses rather than dropping the link silently — see the composer.
+    if (link.isInvalid) {
+      link.markTouched();
+      return;
+    }
 
     create.mutate(
-      { targetType, targetId, body, visibility },
+      { targetType, targetId, body, visibility, externalShortUrl: link.payloadValue() },
       {
         onSuccess: () => {
           setDraft("");
           setVisibility("personal");
+          // Cleared with the draft, for the same reason visibility is reset:
+          // the next note is a different note, and a link left in the field
+          // would attach somebody else's Short to it without being asked.
+          link.setValue("");
           toast.success(visibility === "shared" ? "Note shared" : "Note added");
         },
         onError: (error) =>
@@ -122,6 +143,16 @@ export function NotesPanel({
             "focus:border-accent focus:outline-none focus:ring-2 focus:ring-[var(--accent-ring)]",
           )}
         />
+        {/* Compact here, unlike the composer dialog: the panel sits in a column
+            beside a chart, and a full label plus hint over a one-line input
+            would take more vertical space than the note field it belongs to.
+            The placeholder carries the label's job instead. */}
+        <ExternalShortField
+          state={link}
+          id={`notes-panel-external-short-${targetType}-${targetId}`}
+          compact
+        />
+
         {/* The choice sits with the draft, not behind a menu on the saved row:
             who can read a note is part of writing it, and a control you find
             afterwards is one people find after the note is already shared. */}
@@ -136,7 +167,7 @@ export function NotesPanel({
             variant="primary"
             size="sm"
             loading={create.isPending}
-            disabled={!draft.trim()}
+            disabled={!draft.trim() || link.isInvalid}
           >
             <Plus />
             Add note
@@ -200,9 +231,9 @@ function NoteRow({ note }: { note: NoteDTO }) {
           note={note}
           saving={update.isPending}
           onCancel={() => setEditing(false)}
-          onSave={(body) =>
+          onSave={(patch) =>
             update.mutate(
-              { id: note.id, body },
+              { id: note.id, ...patch },
               {
                 onSuccess: () => {
                   setEditing(false);
@@ -226,6 +257,10 @@ function NoteRow({ note }: { note: NoteDTO }) {
         <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">
           {note.body}
         </p>
+        {/* Under the words, above the byline: the Short is what the note is
+            about, so it belongs with the content rather than in the metadata
+            line. Renders nothing at all when there is none. */}
+        <ExternalShortPreview note={note} className="mt-2" />
         <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-subtle-foreground">
           {/* Spelled out rather than a bare name: this line sits under a note
               about a channel or a Short, where an unlabelled name is as easily
@@ -287,17 +322,26 @@ function EditNoteForm({
 }: {
   note: NoteDTO;
   saving: boolean;
-  onSave: (body: string) => void;
+  onSave: (patch: NoteEditPatch) => void;
   onCancel: () => void;
 }) {
   const [body, setBody] = React.useState(note.body);
+  // Seeded with what is stored, so opening the editor on a note that quotes a
+  // Short shows the link rather than an empty box the writer has to notice is
+  // not the same as "no link".
+  const link = useExternalShortField(note.externalUrl);
 
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
         const trimmed = body.trim();
-        if (trimmed) onSave(trimmed);
+        if (!trimmed) return;
+        if (link.isInvalid) {
+          link.markTouched();
+          return;
+        }
+        onSave(buildNotePatch(note, trimmed, link.videoId));
       }}
       className="flex flex-col gap-2"
     >
@@ -309,11 +353,18 @@ function EditNoteForm({
         onChange={(event) => setBody(event.target.value)}
         className="w-full resize-y rounded-md border border-border bg-surface-sunken px-3 py-2 text-[13px] text-foreground focus:border-accent focus:outline-none focus:ring-2 focus:ring-[var(--accent-ring)]"
       />
+      <ExternalShortField state={link} id={`edit-note-external-short-${note.id}`} compact />
       <div className="flex justify-end gap-2">
         <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
           Cancel
         </Button>
-        <Button type="submit" variant="primary" size="sm" loading={saving} disabled={!body.trim()}>
+        <Button
+          type="submit"
+          variant="primary"
+          size="sm"
+          loading={saving}
+          disabled={!body.trim() || link.isInvalid}
+        >
           Save
         </Button>
       </div>

@@ -536,6 +536,31 @@ export interface NoteDTO {
    * candid needs to see which.
    */
   readonly visibility: NoteVisibility;
+
+  /**
+   * A YouTube Short quoted by this note, from OUTSIDE the tracker.
+   *
+   * Not `targetId` and not the `video` context on `NoteWithContextDTO`: those
+   * name a `Video` row this organization tracks, and this names a competitor's
+   * Short that is deliberately not in the database. A note can carry both — a
+   * note filed against our channel, quoting theirs, is the comparison that
+   * prompted it.
+   *
+   * `externalVideoId` is the fact; `externalUrl` is a rendering of it that the
+   * server composed from the id (see `lib/youtube-url.ts` for why it is stored
+   * rather than derived here, and why the pasted string is never kept). Both
+   * are null together — a half-attached Short is not a state that exists.
+   */
+  readonly externalVideoId: string | null;
+  readonly externalUrl: string | null;
+  /**
+   * Best-effort metadata, and null is ordinary rather than exceptional: no Data
+   * API key configured, quota spent, or a private video. The thumbnail needs no
+   * lookup at all, so a titleless Short still renders as one.
+   */
+  readonly externalTitle: string | null;
+  readonly externalChannelTitle: string | null;
+
   readonly createdById: string | null;
   readonly createdByName: string | null;
   /** Epoch ms. The log prints it: the owner asked for the created date. */
