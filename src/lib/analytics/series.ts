@@ -1,10 +1,10 @@
-import { calculateHitRate } from "./hit-rate";
 import { getShortsInDateRange } from "./filters";
-import { median, sum } from "./stats";
+import { calculateHitRate, EMPTY_HIT_TALLY, tallyShorts } from "./hit-rate";
+import { median, roundTo, sum } from "./stats";
 import type {
-  AnalyticsVideo,
   DateRange,
   HitRateSeriesPoint,
+  JudgedVideo,
   SeriesGranularity,
 } from "./types";
 
@@ -58,23 +58,41 @@ function formatBucketLabel(ms: number, granularity: SeriesGranularity): string {
 }
 
 /**
- * Hit rate over time.
+ * =========================================================================
+ * HIT RATE OVER TIME
+ * =========================================================================
  *
- * Buckets are emitted even when empty, and an empty bucket carries
- * `hitRate: null` rather than `0`. That is what lets the chart draw a *gap*
- * for a week with no uploads instead of a plunge to zero — the difference
+ * Buckets are emitted even when empty, and an empty bucket carries a summary
+ * whose `rate` is `null` rather than `0`. That is what lets the chart draw a
+ * GAP for a week with no uploads instead of a plunge to zero — the difference
  * between "this channel paused" and "this channel published and missed", which
  * is exactly the signal someone judging consistency needs to see.
+ *
+ * THE RIGHT-HAND END OF THIS CHART USED TO BE A LIE, and fixing it is most of
+ * the reason the rule changed. Buckets are keyed on UPLOAD DATE, so the last
+ * few always held the youngest Shorts — and under a lifetime comparison the
+ * youngest Shorts had had the least time to reach the bar. The line therefore
+ * sagged on the right on every channel, always, whatever the work was like: on
+ * this corpus 5.9% under seven days old against 18.8% at 30–90 days. Somebody
+ * reading it saw a decline they had not caused and could not fix.
+ *
+ * Now a Short inside its window is `pending` and sits in NEITHER half of its
+ * bucket's ratio. A bucket of Shorts that are all still in flight reports
+ * `rate: null` and draws as a gap — the honest statement, "not decided yet" —
+ * and it fills in as the windows shut. The line stops sloping down because time
+ * ran out on the right-hand side.
+ *
+ * `totalShorts` is still every Short uploaded in the bucket, so the tooltip can
+ * say how much of a bucket is waiting rather than making the gap mysterious.
  */
 export function calculateHitRateSeries(
-  videos: readonly AnalyticsVideo[],
+  videos: readonly JudgedVideo[],
   range: DateRange,
-  threshold: number,
   granularity: SeriesGranularity = pickGranularity(range),
 ): HitRateSeriesPoint[] {
   const shorts = getShortsInDateRange(videos, range);
 
-  const byBucket = new Map<number, AnalyticsVideo[]>();
+  const byBucket = new Map<number, JudgedVideo[]>();
   for (const short of shorts) {
     const key = bucketStart(short.publishedAt, granularity);
     const existing = byBucket.get(key);
@@ -92,15 +110,15 @@ export function calculateHitRateSeries(
     const end = nextBucket(cursor, granularity);
     const bucketVideos = byBucket.get(cursor) ?? [];
     const views = bucketVideos.map((v) => v.views);
-    const hitCount = bucketVideos.filter((v) => v.views >= threshold).length;
 
     points.push({
       bucketStartMs: cursor,
       bucketEndMs: end,
       label: formatBucketLabel(cursor, granularity),
       totalShorts: bucketVideos.length,
-      hitCount,
-      hitRate: calculateHitRate(hitCount, bucketVideos.length),
+      hits: calculateHitRate(
+        bucketVideos.length === 0 ? EMPTY_HIT_TALLY : tallyShorts(bucketVideos),
+      ),
       totalViews: sum(views),
       medianViews: median(views),
     });
@@ -118,32 +136,45 @@ export function calculateHitRateSeries(
  * Halves rather than a regression line because the audience question is blunt
  * — "is this channel getting better or worse lately?" — and a slope in
  * percent-per-week is harder to read than "+6.2 pts vs the first half".
- * `null` when either half has no Shorts to compare.
+ *
+ * `null` when either half has no JUDGED Shorts to compare, which is a stricter
+ * condition than it used to be and deliberately so. The second half of any
+ * window is the recent one, so under the old lifetime rule this number was
+ * biased downward by construction and reported a decline on healthy channels.
+ * With in-flight Shorts excluded, a second half that is entirely pending has no
+ * rate at all and the answer is "nothing to say yet" rather than a fabricated
+ * fall.
+ *
+ * The two halves' EXCLUSIONS come back with it. A trend computed over 4 judged
+ * Shorts against 90 is not the same statement as one over 200 against 210, and
+ * the caller needs to be able to tell.
  */
 export function calculateHitRateTrend(
-  videos: readonly AnalyticsVideo[],
+  videos: readonly JudgedVideo[],
   range: DateRange,
-  threshold: number,
-): { delta: number; firstHalf: number; secondHalf: number } | null {
+): {
+  delta: number;
+  firstHalf: number;
+  secondHalf: number;
+  firstJudged: number;
+  secondJudged: number;
+} | null {
   const midpoint = range.startMs + (range.endMs - range.startMs) / 2;
 
   const first = getShortsInDateRange(videos, { startMs: range.startMs, endMs: midpoint });
   const second = getShortsInDateRange(videos, { startMs: midpoint, endMs: range.endMs });
 
-  const firstRate = calculateHitRate(
-    first.filter((v) => v.views >= threshold).length,
-    first.length,
-  );
-  const secondRate = calculateHitRate(
-    second.filter((v) => v.views >= threshold).length,
-    second.length,
-  );
+  const firstSummary = calculateHitRate(tallyShorts(first));
+  const secondSummary = calculateHitRate(tallyShorts(second));
 
-  if (firstRate === null || secondRate === null) return null;
+  if (firstSummary.rate === null || secondSummary.rate === null) return null;
 
   return {
-    delta: Math.round((secondRate - firstRate) * 100) / 100,
-    firstHalf: firstRate,
-    secondHalf: secondRate,
+    delta: roundTo(secondSummary.rate - firstSummary.rate, 2),
+    firstHalf: firstSummary.rate,
+    secondHalf: secondSummary.rate,
+    firstJudged: firstSummary.judged,
+    secondJudged: secondSummary.judged,
   };
 }
+

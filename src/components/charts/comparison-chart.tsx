@@ -27,7 +27,19 @@ export interface ComparisonDatum {
   readonly name: string;
   readonly hitRate: number | null;
   readonly hitCount: number;
+  /**
+   * Shorts with a decided outcome. THE DENOMINATOR OF `hitRate`.
+   *
+   * Separate from `totalShorts` because the two diverge, often widely: a bar
+   * showing 60% where three of five decided Shorts hit, out of forty published,
+   * is a real and useful number attached to a very thin base. Pairing the rate
+   * with the upload count would misstate it by an order of magnitude.
+   */
+  readonly judged: number;
+  /** Shorts uploaded in the period, decided or not. */
   readonly totalShorts: number;
+  /** Uploaded but in neither half: pending, unrecorded, or with no rule. */
+  readonly excluded: number;
   readonly medianViews: number | null;
   readonly colorIndex: number;
 }
@@ -166,9 +178,21 @@ function ComparisonTooltip({
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">Hits</span>
           <span className="tnum text-foreground">
-            {formatFraction(datum.hitCount, datum.totalShorts)}
+            {formatFraction(datum.hitCount, datum.judged)} decided
           </span>
         </div>
+        {/* The bar's height is a rate over decided Shorts. Two bars of equal
+            height built on 50 decided Shorts and on 3 are not equally
+            convincing, and this line is the only thing on the chart that can
+            say so. */}
+        {datum.excluded > 0 ? (
+          <div className="flex items-center justify-between gap-4">
+            <span className="text-muted-foreground">Not decided</span>
+            <span className="tnum text-subtle-foreground">
+              {datum.excluded} of {datum.totalShorts} uploaded
+            </span>
+          </div>
+        ) : null}
         <div className="flex items-center justify-between gap-4">
           <span className="text-muted-foreground">Median views</span>
           <span className="tnum text-foreground">

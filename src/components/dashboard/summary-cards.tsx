@@ -6,8 +6,8 @@ import {
   HIT_RATE_DEFINITION,
   TOTAL_VIEWS_DEFINITION,
   TOTAL_VIEWS_VS_STUDIO,
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_EXPLANATION,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import type { PortfolioSummary } from "@/lib/analytics";
 import { calculateTrend } from "@/lib/analytics/trends";
@@ -15,6 +15,7 @@ import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib
 import { Card } from "@/components/ui/card";
 import { InfoTip } from "@/components/ui/tooltip";
 import { Stat, StatSkeleton } from "@/components/metrics/stat";
+import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { TrendIndicator } from "@/components/metrics/trend-indicator";
 
 /**
@@ -33,21 +34,30 @@ export function SummaryCards({
   summary,
   previousSummary,
   loading,
-  thresholdConfigured = true,
 }: {
   summary: PortfolioSummary;
   previousSummary?: PortfolioSummary;
   loading?: boolean;
-  /**
-   * False when the selected niche has no hit threshold.
-   *
-   * The hit-rate tile then reads "Not configured" instead of an em dash. Both
-   * are absences, but they are different ones: the dash on this strip means "no
-   * Shorts in this period", and reusing it here would answer a question about
-   * configuration with a statement about output.
-   */
-  thresholdConfigured?: boolean;
 }) {
+  /*
+   * "Not configured" is read off the POOLED VERDICTS, not off the threshold
+   * control.
+   *
+   * Nothing in this strip is judged by that control any more — it shades rows
+   * and scales a ratio column. What makes this tile read "Not configured" is
+   * that every Short in scope came back unscoreable: no niche with both halves
+   * of a rule reached any of them. That is a statement about configuration and
+   * it is different again from the em dash, which means "no Shorts in this
+   * period", and from "nothing decided yet", which means the rules are fine and
+   * the windows have not shut.
+   */
+  const pooled = summary.pooled;
+  const nothingScoreable =
+    summary.totalShorts > 0 &&
+    pooled.judged === 0 &&
+    pooled.tally.pending === 0 &&
+    pooled.tally.unknown === 0;
+  const ruleConfigured = !nothingScoreable;
   const trends = React.useMemo(() => {
     const prev = previousSummary;
     return {
@@ -131,31 +141,51 @@ export function SummaryCards({
           label="Average hit rate"
           emphasis="strong"
           value={
-            thresholdConfigured
+            ruleConfigured
               ? formatPercent(summary.averageHitRate)
-              : UNCONFIGURED_THRESHOLD_SHORT
+              : UNCONFIGURED_RULE_SHORT
           }
           hint={
             <InfoTip>
-              {thresholdConfigured ? (
+              {ruleConfigured ? (
                 <>
                   The mean of each channel&rsquo;s own hit rate, counting only
-                  channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}
+                  channels with at least one DECIDED Short this period.{" "}
+                  {HIT_RATE_DEFINITION}
                 </>
               ) : (
-                UNCONFIGURED_THRESHOLD_EXPLANATION
+                UNCONFIGURED_RULE_EXPLANATION
               )}
             </InfoTip>
           }
           caption={
             // No trend either. A movement indicator against a metric that does
             // not exist would be two fabrications rather than one.
-            !thresholdConfigured ? (
-              "No threshold set for this niche"
+            !ruleConfigured ? (
+              "No hit rule set for these niches"
             ) : previousSummary ? (
               <TrendIndicator trend={trends.hitRate} valueFormat="percent" />
-            ) : summary.pooledHitRate !== null ? (
-              `${formatNumber(summary.totalHits)} hits · ${formatPercent(summary.pooledHitRate)} pooled`
+            ) : pooled.rate !== null ? (
+              /*
+                THE POOLED FIGURE CARRIES ITS RANGE; THE HEADLINE ABOVE CANNOT.
+                The value in this tile is the mean of per-channel rates, and
+                there is no honest interval to print beside an average of
+                averages — the bounds are computed over the pooled tally and
+                bound the pooled rate, which is the number in this caption.
+                Attaching them upstairs would be a range for a different
+                statistic, which is a worse fault than the bare figure.
+
+                The prose truncates before the range does: what a reader can
+                reconstruct from the tile is the wording, not the interval.
+              */
+              <span className="flex items-baseline gap-1.5">
+                <span className="min-w-0 truncate">
+                  {`${formatNumber(pooled.hits)} hits · ${formatPercent(pooled.rate)} pooled over ${formatNumber(pooled.judged)} decided`}
+                </span>
+                <HitRateBounds summary={pooled} compact />
+              </span>
+            ) : pooled.excluded > 0 ? (
+              `Nothing decided yet · ${formatNumber(pooled.excluded)} excluded`
             ) : (
               "No Shorts in period"
             )
@@ -183,8 +213,8 @@ export function SummaryCards({
             // "Top channel" is ranked *by* hit rate, so with no threshold there
             // is no ranking and `topChannel` is already null — this caption just
             // has to say why, rather than blaming an empty period.
-            !thresholdConfigured
-              ? "Ranked by hit rate, which needs a threshold"
+            !ruleConfigured
+              ? "Ranked by hit rate, which needs a configured hit rule"
               : summary.topChannel
                 ? `${formatPercent(summary.topChannel.hitRate)} hit rate`
                 : "No channel has Shorts this period"

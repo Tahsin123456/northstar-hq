@@ -3,7 +3,14 @@ import { buildReport } from "../build-report";
 import { calculateChannelMetrics } from "@/lib/analytics/channel-metrics";
 import { calculateMarketShare } from "@/lib/analytics/market-share";
 import type { DatasetDTO, VideoDTO } from "@/lib/dto";
-import { DAY_MS, daysAgo, makeLongform, makeShort } from "@/lib/analytics/__tests__/factories";
+import {
+  DAY_MS,
+  daysAgo,
+  makeHit,
+  makeLongform,
+  makeMiss,
+  makeShort,
+} from "@/lib/analytics/__tests__/factories";
 
 /**
  * The report must never disagree with the screens.
@@ -29,11 +36,26 @@ function asVideoDTO(video: ReturnType<typeof makeShort>): VideoDTO {
     isAvailable: true,
     // No deviations from the channel — which, with the untagged channel below,
     // makes these Shorts genuinely unclassified. The report is built from view
-    // counts and hit thresholds and must not start depending on a label an
+    // counts and stored verdicts and must not start depending on a label an
     // organization may never apply.
     manualContentTypeIds: [],
     excludedContentTypeIds: [],
   };
+}
+
+/**
+ * Decided Shorts, hit where they cleared a million.
+ *
+ * The report's job is to agree with the screens, and it now has a verdict to
+ * agree about: the hit rate on the cover is counted from these, not derived
+ * from the view counts beside them. Long-form and the deliberately-unjudged
+ * fixtures keep `hit: null`, which is what an unevaluated Short really looks
+ * like on the wire.
+ */
+function judged(views: number, daysBack: number) {
+  return views >= 1_000_000
+    ? makeHit({ views, publishedAt: daysAgo(daysBack, NOW) })
+    : makeMiss({ views, publishedAt: daysAgo(daysBack, NOW) });
 }
 const range = (days: number) => ({ startMs: NOW - days * DAY_MS, endMs: NOW });
 
@@ -72,7 +94,7 @@ function channel(
       contentTypeIds: [],
     },
     videos: [
-      ...views.map((v, i) => asVideoDTO(makeShort({ views: v, publishedAt: daysAgo(i + 1, NOW) }))),
+      ...views.map((v, i) => asVideoDTO(judged(v, i + 1))),
       ...extraVideos.map(asVideoDTO),
     ],
     excludedCount: 0,
@@ -90,6 +112,7 @@ function dataset(channels: DatasetDTO["channels"]): DatasetDTO {
         colorIndex: 0,
         slug: "gta",
         hitThreshold: null,
+        hitWindowHours: null,
         sortOrder: 0,
         channelCount: channels.length,
         createdById: "u1",
@@ -145,7 +168,7 @@ describe("buildReport — data accuracy", () => {
     const medianViews = report.summary.find((m) => m.key === "medianViews");
 
     expect(views?.value).toBe(expected.totalViews);
-    expect(hitRate?.value).toBe(expected.hitRate);
+    expect(hitRate?.value).toBe(expected.hits.rate);
     expect(shorts?.value).toBe(expected.totalShorts);
     expect(medianViews?.value).toBe(expected.medianViews);
   });
@@ -252,5 +275,66 @@ describe("buildReport — data accuracy", () => {
     });
     // No Shorts on either side means nothing truthful can be said.
     expect(empty.insights.length).toBe(0);
+  });
+});
+
+/**
+ * The exclusions have to reach the PDF, not just the screens.
+ *
+ * A report is the artefact that outlives every dashboard: it gets forwarded,
+ * quoted and read six months later by somebody who cannot hover a tooltip. A
+ * hit rate printed on a cover without what it left out is the most durable
+ * version of the claim this product exists not to make.
+ */
+describe("buildReport — what the rate left out travels with it", () => {
+  it("carries the tally onto the report data", () => {
+    const ds = dataset([
+      channel("ours", "own", [2_000_000, 100_000]),
+      channel("theirs", "competitor", [500_000]),
+    ]);
+
+    const report = buildReport({
+      dataset: ds,
+      range: range(30),
+      threshold: 1_000_000,
+      nicheId: null,
+      periodLabel: "Last 30 days",
+      now: NOW,
+    });
+
+    const expected = calculateChannelMetrics({
+      videos: ds.channels.flatMap((c) => [...c.videos]),
+      range: range(30),
+      threshold: 1_000_000,
+    });
+
+    expect(report.hits.judged).toBe(expected.hits.judged);
+    expect(report.hits.tally).toEqual(expected.hits.tally);
+    expect(report.hits.rate).toBe(expected.hits.rate);
+  });
+
+  it("says so in the insights when the excluded population is material", () => {
+    const ds = dataset([
+      channel("ours", "own", [2_000_000, 100_000], [
+        // Four Shorts with no verdict at all — the state of a library the
+        // evaluator has not reached, or one whose niches have no rule.
+        makeShort({ views: 800_000, publishedAt: daysAgo(3, NOW) }),
+        makeShort({ views: 900_000, publishedAt: daysAgo(4, NOW) }),
+        makeShort({ views: 700_000, publishedAt: daysAgo(5, NOW) }),
+        makeShort({ views: 600_000, publishedAt: daysAgo(6, NOW) }),
+      ]),
+    ]);
+
+    const report = buildReport({
+      dataset: ds,
+      range: range(30),
+      threshold: 1_000_000,
+      nicheId: null,
+      periodLabel: "Last 30 days",
+      now: NOW,
+    });
+
+    expect(report.hits.tally.unscoreable).toBe(4);
+    expect(report.insights.some((line) => line.includes("could not be judged"))).toBe(true);
   });
 });

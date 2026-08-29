@@ -90,6 +90,36 @@ function videoSelect(organizationId: string) {
       where: { organizationId },
       select: { contentTypeId: true, state: true },
     },
+    /*
+     * THIS ORGANIZATION'S VERDICT ON THIS SHORT, and the tenant filter is as
+     * load-bearing here as it is above.
+     *
+     * A hit is a bar reached inside a window, and both halves are one team's
+     * niche setting. `Video` is a global deduplicated row, so an unfiltered
+     * select would ship another organization's judgement of a shared Short and
+     * the dashboard would render somebody else's definition of success.
+     *
+     * At most one row survives the filter —
+     * `@@unique([organizationId, videoId])` — so `take: 1` is a statement of
+     * that rather than a limit, and it keeps the query planner from fetching a
+     * list it will always find one of.
+     *
+     * SELECTED FOR EVERY VIDEO, including long-form, because filtering by
+     * `isShort` here would save nothing: long-form has no evaluation row, so
+     * the join returns empty for it either way, and a second condition would
+     * only be one more thing that could disagree with the evaluator.
+     */
+    hitEvaluations: {
+      where: { organizationId },
+      take: 1,
+      select: {
+        outcome: true,
+        thresholdApplied: true,
+        windowHoursApplied: true,
+        viewsAtWindow: true,
+        observedAtHours: true,
+      },
+    },
   } as const;
 }
 

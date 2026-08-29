@@ -3,7 +3,7 @@
 import * as React from "react";
 import { ArrowDown, ArrowRight, ArrowUp } from "lucide-react";
 import type { Trend } from "@/lib/analytics/trends";
-import { formatTrendDelta, TREND_MATURATION_CAVEAT } from "@/lib/analytics/trends";
+import { formatTrendDelta, trendCaveatFor } from "@/lib/analytics/trends";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -93,7 +93,13 @@ export function TrendIndicator({
             Shown without a verdict: higher is not inherently better for this metric.
           </span>
         ) : null}
-        <span className="mt-1 block text-subtle-foreground">{TREND_MATURATION_CAVEAT}</span>
+        {/* The caveat follows the UNIT. A views trend is a comparison of two
+            lifetime totals and the older period has had longer to grow one; a
+            rate trend is windowed and carries no age bias, and saying so is
+            what stops a reader discounting a real improvement out of habit. */}
+        <span className="mt-1 block text-subtle-foreground">
+          {trendCaveatFor(trend.unit)}
+        </span>
       </TooltipContent>
     </Tooltip>
   );

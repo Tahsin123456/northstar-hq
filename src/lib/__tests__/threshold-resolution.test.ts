@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { calculateChannelMetrics } from "@/lib/analytics/channel-metrics";
-import { DAY_MS, daysAgo, makeShort } from "@/lib/analytics/__tests__/factories";
+import {
+  DAY_MS,
+  daysAgo,
+  makeHit,
+  makeMiss,
+  makeShort,
+  makeUnscoreable,
+} from "@/lib/analytics/__tests__/factories";
 
 /**
  * Niche-specific hit thresholds.
@@ -97,14 +104,22 @@ describe("threshold resolution order", () => {
 /**
  * The engine's own half of the contract.
  *
- * The resolution above decides there is no threshold; this is what the metrics
- * do about it. Both halves matter: a `null` that reached
+ * The resolution above decides there is no rule; this is what the metrics do
+ * about it. Both halves matter: a niche nobody has configured that reached
  * `calculateChannelMetrics` and came back as 0% would be the same bug wearing a
  * different hat.
+ *
+ * WHAT CHANGED HERE. These used to pass `threshold: null` and assert that the
+ * rate came back null — which conflated two things that have since come apart.
+ * "This niche has no rule" is now a property of the SHORTS' STORED VERDICTS
+ * (unscoreable, with null rule columns), and the `threshold` argument is a
+ * display bar that suppresses nothing. So the fixtures say it where it is now
+ * true, and a separate test pins that the bar cannot suppress a rate that
+ * exists.
  */
-describe("metrics with no configured threshold", () => {
+describe("metrics for Shorts no niche rule reaches", () => {
   const videos = [900_000, 1_400_000, 300_000].map((views, i) =>
-    makeShort({ views, publishedAt: daysAgo(i + 1, NOW) }),
+    makeUnscoreable({ views, publishedAt: daysAgo(i + 1, NOW) }),
   );
 
   it("reports no hit rate at all rather than 0%", () => {
@@ -114,15 +129,18 @@ describe("metrics with no configured threshold", () => {
       threshold: null,
     });
 
-    // 0% would assert "three Shorts were published and none of them hit",
-    // which is a claim about performance. Nothing was measured.
-    expect(metrics.hitRate).toBeNull();
-    expect(metrics.hitRate).not.toBe(0);
-    expect(metrics.hitCount).toBe(0);
+    // 0% would assert "three Shorts were judged and none of them hit", which is
+    // a claim about performance. Nothing was judged.
+    expect(metrics.hits.rate).toBeNull();
+    expect(metrics.hits.rate).not.toBe(0);
+    expect(metrics.hits.hits).toBe(0);
+    expect(metrics.hits.tally.unscoreable).toBe(3);
+    // And never as misses, which would drag a real rate down elsewhere.
+    expect(metrics.hits.tally.misses).toBe(0);
     expect(metrics.threshold).toBeNull();
   });
 
-  it("still reports everything that does not depend on a threshold", () => {
+  it("still reports everything that never depended on a rule", () => {
     const metrics = calculateChannelMetrics({
       videos,
       range: range(30),
@@ -136,7 +154,7 @@ describe("metrics with no configured threshold", () => {
     expect(metrics.medianViews).toBe(900_000);
   });
 
-  it("marks no Short as a hit and gives none of them a threshold ratio", () => {
+  it("gives no Short a lifetime ratio when there is no bar to be a ratio of", () => {
     const metrics = calculateChannelMetrics({
       videos,
       range: range(30),
@@ -145,8 +163,9 @@ describe("metrics with no configured threshold", () => {
 
     // A ratio of 0 would sort every Short as an equal, maximal miss; `null`
     // says there is nothing to be a ratio of.
-    expect(metrics.bestShort?.isHit).toBe(false);
-    expect(metrics.bestShort?.thresholdRatio).toBeNull();
+    expect(metrics.bestShort?.clearsThreshold).toBe(false);
+    expect(metrics.bestShort?.lifetimeRatio).toBeNull();
+    expect(metrics.bestShort?.windowRatio).toBeNull();
   });
 });
 
@@ -209,51 +228,66 @@ describe("channel-scoped threshold", () => {
   });
 });
 
-describe("per-niche thresholds change the reported hit rate", () => {
-  // One channel, five Shorts, spread across the interesting range.
-  const videos = [900_000, 800_000, 600_000, 300_000, 1_200_000].map((views, i) =>
-    makeShort({ views, publishedAt: daysAgo(i + 1, NOW) }),
-  );
+/**
+ * =========================================================================
+ * THE TEST THIS FILE USED TO CONTAIN ENCODED THE BUG
+ * =========================================================================
+ * It was called "per-niche thresholds change the reported hit rate", and it
+ * asserted that handing `calculateChannelMetrics` the same five Shorts with a
+ * different `threshold` produced 20%, 60% and 100%. That is a precise
+ * description of the old rule — a hit rate that is a pure function of a view
+ * count and a number typed into a control — and it is exactly what had to stop.
+ * A hit is a bar reached inside a WINDOW; the verdict comes from the snapshot
+ * series and is decided once, server-side, per Short.
+ *
+ * So the invariant inverts. Changing the display bar must change what is
+ * highlighted and NOTHING about the rate. Changing a niche's actual rule still
+ * changes the rate — via re-evaluation, which produces different stored
+ * verdicts, which is what the second test here stands in for.
+ */
+describe("the display bar cannot move a hit rate", () => {
+  // One channel, five Shorts, spread across the interesting range. Two of them
+  // reached their niche's bar inside its window; three did not.
+  const videos = [
+    makeHit({ views: 900_000, publishedAt: daysAgo(1, NOW) }),
+    makeMiss({ views: 800_000, publishedAt: daysAgo(2, NOW) }),
+    makeMiss({ views: 600_000, publishedAt: daysAgo(3, NOW) }),
+    makeMiss({ views: 300_000, publishedAt: daysAgo(4, NOW) }),
+    makeHit({ views: 1_200_000, publishedAt: daysAgo(5, NOW) }),
+  ];
 
-  it("reports a different hit rate for the same Shorts at different thresholds", () => {
-    const atOneMillion = calculateChannelMetrics({
-      videos,
-      range: range(30),
-      threshold: 1_000_000,
-    });
-    const atSevenFifty = calculateChannelMetrics({
+  it("reports the same hit rate at every bar, including none at all", () => {
+    const rates = [1_000_000, 750_000, 250_000, null].map(
+      (threshold) =>
+        calculateChannelMetrics({ videos, range: range(30), threshold }).hits.rate,
+    );
+
+    // 2 hits of 5 decided, whatever the control says.
+    expect(rates).toEqual([40, 40, 40, 40]);
+  });
+
+  it("a Short over the bar today can still be a stored miss", () => {
+    // The 900K Short is a HIT and the 800K one is a MISS, which no comparison
+    // of views to a bar can produce. That inversion is the point: one got there
+    // in time and the other did not.
+    const metrics = calculateChannelMetrics({
       videos,
       range: range(30),
       threshold: 750_000,
     });
-    const atTwoFifty = calculateChannelMetrics({
-      videos,
-      range: range(30),
-      threshold: 250_000,
-    });
 
-    // Only the 1.2M Short clears 1M.
-    expect(atOneMillion.hitCount).toBe(1);
-    expect(atOneMillion.hitRate).toBe(20);
-
-    // 1.2M, 900K and 800K clear 750K.
-    expect(atSevenFifty.hitCount).toBe(3);
-    expect(atSevenFifty.hitRate).toBe(60);
-
-    // Everything clears 250K.
-    expect(atTwoFifty.hitCount).toBe(5);
-    expect(atTwoFifty.hitRate).toBe(100);
-
-    // The denominator never moves — only the definition of a hit does.
-    expect(atOneMillion.totalShorts).toBe(atSevenFifty.totalShorts);
-    expect(atSevenFifty.totalShorts).toBe(atTwoFifty.totalShorts);
+    expect(metrics.hits.hits).toBe(2);
+    // Three Shorts clear a 750K bar on lifetime views; only two are hits.
+    expect(
+      [900_000, 800_000, 1_200_000].filter((v) => v >= 750_000),
+    ).toHaveLength(3);
   });
 
-  it("leaves threshold-independent metrics untouched", () => {
+  it("leaves bar-independent metrics untouched", () => {
     const a = calculateChannelMetrics({ videos, range: range(30), threshold: 1_000_000 });
     const b = calculateChannelMetrics({ videos, range: range(30), threshold: 250_000 });
 
-    // Views, median and volume describe the output, not the bar it is judged
+    // Views, median and volume describe the output, not the bar it is displayed
     // against, so they must be identical.
     expect(a.totalViews).toBe(b.totalViews);
     expect(a.medianViews).toBe(b.medianViews);
@@ -261,16 +295,25 @@ describe("per-niche thresholds change the reported hit rate", () => {
     expect(a.bestShort?.views).toBe(b.bestShort?.views);
   });
 
-  it("keeps the boundary inclusive at any threshold", () => {
-    const exact = [makeShort({ views: 750_000, publishedAt: daysAgo(1, NOW) })];
-    const justUnder = [makeShort({ views: 749_999, publishedAt: daysAgo(1, NOW) })];
+  it("keeps the bar comparison itself inclusive, for the display annotation", () => {
+    // `clearsThreshold` is still exactly-inclusive — 750,000 clears a 750K bar
+    // and 749,999 does not — and it still shades the table. It is no longer a
+    // verdict, which is why this assertion moved off `hitCount`.
+    const exact = calculateChannelMetrics({
+      videos: [makeShort({ views: 750_000, publishedAt: daysAgo(1, NOW) })],
+      range: range(30),
+      threshold: 750_000,
+    });
+    const justUnder = calculateChannelMetrics({
+      videos: [makeShort({ views: 749_999, publishedAt: daysAgo(1, NOW) })],
+      range: range(30),
+      threshold: 750_000,
+    });
 
-    expect(
-      calculateChannelMetrics({ videos: exact, range: range(30), threshold: 750_000 }).hitCount,
-    ).toBe(1);
-    expect(
-      calculateChannelMetrics({ videos: justUnder, range: range(30), threshold: 750_000 })
-        .hitCount,
-    ).toBe(0);
+    expect(exact.bestShort?.clearsThreshold).toBe(true);
+    expect(justUnder.bestShort?.clearsThreshold).toBe(false);
+    // And neither is a hit: nothing here has a verdict.
+    expect(exact.hits.hits).toBe(0);
+    expect(justUnder.hits.hits).toBe(0);
   });
 });

@@ -15,6 +15,7 @@ import { FinalizeDialog } from "@/components/admin/payroll/finalize-dialog";
 import { PeriodStatusBadge } from "@/components/admin/payroll/period-status-badge";
 import { PayrollTable } from "@/components/admin/payroll/payroll-table";
 import { SkippedNichesNotice } from "@/components/admin/payroll/skipped-niches-notice";
+import { UnresolvedShortsNotice } from "@/components/admin/payroll/unresolved-shorts-notice";
 import { TelegramCard } from "@/components/admin/payroll/telegram-card";
 import {
   formatRunTotalWithRecords,
@@ -154,6 +155,13 @@ function PayrollScreen() {
               the header above, reachable without scrolling. The dialog is the
               gate; it shows the same niches over its confirm button. */}
           <SkippedNichesNotice skippedNiches={data.period.skippedNiches} />
+          {/* Second, because a half-written rule is a mistake and this is not.
+              A pending Short is the system working — the window has not closed
+              — and an unknown one is a consequence of history nobody can go
+              back and change. Both still have to be visible before the month is
+              frozen: one is a reason to wait, and the other is the cost of not
+              having been recording. */}
+          <UnresolvedShortsNotice unresolved={data.period.unresolved} />
           <PayrollTable period={data.period} mayManage={mayManage} />
           {data.previous ? (
             <PreviousPeriodStrip previous={data.previous} mayManage={mayManage} />

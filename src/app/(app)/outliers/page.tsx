@@ -103,9 +103,12 @@ export default function OutliersPage() {
           <>
             {" "}
             {excludedForSample}{" "}
-            {excludedForSample === 1 ? "Short is" : "Shorts are"} hidden here because
-            their channel has fewer than {MIN_SHORTS_FOR_BASELINE} Shorts in the
-            baseline window — they appear in Winners marked as insufficient data.
+            {excludedForSample === 1 ? "Short is" : "Shorts are"} hidden here
+            because there is nothing honest to compare them against yet: either
+            their channel has fewer than {MIN_SHORTS_FOR_BASELINE} settled Shorts
+            in the baseline window, or the Short itself is still inside its hit
+            window and would be measured against siblings that have had months.
+            They appear in Winners with the reason stated.
           </>
         ) : null}
       </p>

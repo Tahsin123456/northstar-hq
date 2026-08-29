@@ -67,7 +67,7 @@ export function NichePicker({
           setCreating(false);
           toast.success(`Niche “${niche.name}” created`, {
             description:
-              "No hit rate threshold yet — an Admin can set one on the Niches page.",
+              "No complete hit rule yet — a hit needs a view threshold and a window. An Admin can set both on the Niches page.",
           });
         },
         onError: (error) =>

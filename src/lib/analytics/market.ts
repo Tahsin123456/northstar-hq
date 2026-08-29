@@ -1,8 +1,8 @@
 import { calculateChannelMetrics } from "./channel-metrics";
-import { calculateHitRate } from "./hit-rate";
 import { getShortsInDateRange } from "./filters";
+import { calculateHitRate, tallyShorts } from "./hit-rate";
 import { mean, median, roundTo, sum, topFractionAverage } from "./stats";
-import type { AnalyticsVideo, ChannelMetrics, DateRange } from "./types";
+import type { ChannelMetrics, DateRange, JudgedVideo } from "./types";
 
 /**
  * =========================================================================
@@ -17,6 +17,16 @@ import type { AnalyticsVideo, ChannelMetrics, DateRange } from "./types";
  * averaging per-channel figures. Averaging channel averages would let a
  * channel that posted twice count as heavily as one that posted eighty times,
  * which is the wrong answer to "how does our output compare to the market".
+ *
+ * WHAT A HIT MEANS ON BOTH SIDES OF THIS TABLE
+ * The same thing, and that is not automatic. Each side's hit rate is counted
+ * from the stored verdicts on its own Shorts, and a verdict was reached against
+ * the niche rule of the channel that published it. Our channels and the
+ * competitors we track in a niche sit in the SAME niche, so both sides are
+ * judged by the same bar and the same clock — which is what makes the
+ * comparison a comparison. Where a competitor sits in no configured niche its
+ * Shorts are `unscoreable`, drop out of both halves, and are reported in the
+ * exclusions rather than counted as failures.
  *
  * DIRECTIONALITY
  * Every metric declares whether higher is better — and upload frequency
@@ -49,7 +59,7 @@ export interface MarketMetric {
 
 export interface MarketPool {
   readonly channelCount: number;
-  readonly shorts: readonly AnalyticsVideo[];
+  readonly shorts: readonly JudgedVideo[];
   readonly metrics: ChannelMetrics;
 }
 
@@ -68,7 +78,7 @@ export interface MarketComparison {
 const MS_PER_WEEK = 604_800_000;
 
 function poolFor(
-  channels: readonly { videos: readonly AnalyticsVideo[] }[],
+  channels: readonly { videos: readonly JudgedVideo[] }[],
   range: DateRange,
   threshold: number | null,
 ): MarketPool {
@@ -106,22 +116,21 @@ function absDelta(ours: number | null, market: number | null): number | null {
  * Growth: hit rate in the second half of the window minus the first half, in
  * percentage points. Same construction as the channel-level trend, so the two
  * numbers always agree.
+ *
+ * COUNTED FROM VERDICTS, which is what makes it worth reporting at all. Under
+ * the old lifetime comparison the second half was always the younger cohort and
+ * therefore always flattered downward — this metric reported a decline on every
+ * channel that had not stopped publishing. With in-flight Shorts excluded from
+ * both halves, a second half with nothing judged in it yields `null` and the
+ * row reads as "no comparison" instead of as a fall.
  */
-function growth(
-  shorts: readonly AnalyticsVideo[],
-  range: DateRange,
-  threshold: number | null,
-): number | null {
-  // Growth *of the hit rate*, so with no configured threshold there is nothing
-  // to have grown. Every other metric on the comparison survives; this one does
-  // not exist rather than reading as flat.
-  if (threshold === null) return null;
+function growth(shorts: readonly JudgedVideo[], range: DateRange): number | null {
   const mid = range.startMs + (range.endMs - range.startMs) / 2;
   const first = shorts.filter((s) => s.publishedAt >= range.startMs && s.publishedAt < mid);
   const second = shorts.filter((s) => s.publishedAt >= mid && s.publishedAt < range.endMs);
 
-  const a = calculateHitRate(first.filter((s) => s.views >= threshold).length, first.length);
-  const b = calculateHitRate(second.filter((s) => s.views >= threshold).length, second.length);
+  const a = calculateHitRate(tallyShorts(first)).rate;
+  const b = calculateHitRate(tallyShorts(second)).rate;
   if (a === null || b === null) return null;
   return roundTo(b - a, 2);
 }
@@ -131,10 +140,16 @@ function nullRound(value: number | null): number | null {
 }
 
 export function compareToMarket(
-  ourChannels: readonly { videos: readonly AnalyticsVideo[] }[],
-  competitorChannels: readonly { videos: readonly AnalyticsVideo[] }[],
+  ourChannels: readonly { videos: readonly JudgedVideo[] }[],
+  competitorChannels: readonly { videos: readonly JudgedVideo[] }[],
   range: DateRange,
-  /** `null` when the selected niche has no configured hit threshold. */
+  /**
+   * The display bar, or `null` when the selected niche has none configured.
+   *
+   * Carried through to the pooled `ChannelMetrics` for shading and ratios only.
+   * It decides no hit on either side; both sides' rates come from the verdicts
+   * their own Shorts carry.
+   */
   threshold: number | null,
 ): MarketComparison {
   const ours = poolFor(ourChannels, range, threshold);
@@ -169,9 +184,10 @@ export function compareToMarket(
       "hitRate",
       "Hit rate",
       "higherIsBetter",
-      ours.metrics.hitRate,
-      market.metrics.hitRate,
+      ours.metrics.hits.rate,
+      market.metrics.hits.rate,
       "percent",
+      "Share of JUDGED Shorts that reached their niche's bar inside its window. Shorts still inside their window, and those nobody was recording during it, are in neither half — see the exclusions beside each side.",
     ),
     build(
       "medianViews",
@@ -211,8 +227,8 @@ export function compareToMarket(
       "growth",
       "Growth",
       "higherIsBetter",
-      growth(ours.shorts, range, threshold),
-      growth(market.shorts, range, threshold),
+      growth(ours.shorts, range),
+      growth(market.shorts, range),
       "percent",
       "Change in hit rate between the first and second half of the period, in percentage points.",
     ),

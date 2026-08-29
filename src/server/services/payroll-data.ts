@@ -1,8 +1,10 @@
 import "server-only";
 
 import { prisma } from "@/server/db";
+import { HOUR_MS, type HitOutcome } from "@/lib/analytics/hit-rate";
 import type {
   PayrollEmployee,
+  PayrollHitEvidence,
   PayrollNiche,
   PayrollPeriodWindow,
   PayrollShort,
@@ -80,8 +82,10 @@ export interface PayrollInputOptions {
 /**
  * Everything the payroll engine needs for one organization and one period.
  *
- * Three reads that do not depend on each other run together; the Shorts query
- * waits only because it needs the set of owned channels first.
+ * Three reads that do not depend on each other run together. The second pair
+ * waits on them: the Shorts query needs the set of owned channels AND the
+ * widest window any niche has configured, and the frozen-credit query needs
+ * that same window and the people to look credits up for.
  */
 export async function loadPayrollInputs(
   organizationId: string,
@@ -94,9 +98,36 @@ export async function loadPayrollInputs(
     loadOwnedChannels(organizationId),
   ]);
 
-  const shorts = await loadShorts(ownedChannels, period);
+  /*
+   * Serialised on purpose: the ledger is keyed on the Shorts this run can
+   * actually credit, so it has to know them first.
+   *
+   * It used to bound by `publishedAt` and run in parallel, which was faster and
+   * subtly wrong. `PayrollHit.publishedAt` is a copy frozen at finalize;
+   * `Video.publishedAt` is rewritten by `buildVideoData` on every sync. Let
+   * YouTube correct a publish date and the two disagree — at which point the
+   * bounded query stops finding an earlier credit for a Short this run is
+   * loading, and the guard against paying twice quietly stops guarding.
+   *
+   * A video id cannot drift. One extra round trip on a monthly job is the
+   * cheapest correctness in this file.
+   */
+  const shorts = await loadShorts(organizationId, ownedChannels, period, niches);
+  const paidVideoIdsByUserId = await loadFinalizedCredits(
+    organizationId,
+    members.map((member) => member.userId),
+    shorts.map((short) => short.videoId),
+  );
 
-  return { employees: members, shorts, niches };
+  // Attached here rather than inside `loadEmployeeMembers` because the ledger
+  // query needs the widest configured window, which is loaded alongside the
+  // members rather than before them.
+  const employees: PayrollEmployee[] = members.map((member) => ({
+    ...member,
+    alreadyPaidVideoIds: paidVideoIdsByUserId.get(member.userId) ?? [],
+  }));
+
+  return { employees, shorts, niches };
 }
 
 // ---------------------------------------------------------------------------
@@ -122,10 +153,21 @@ export async function loadPayrollInputs(
  * applies — not by whether their login still works. Someone who left on the
  * 20th is paid for August and cannot sign in; those are different facts.
  */
+/**
+ * An employee before their frozen credits are attached.
+ *
+ * The ledger is loaded in a second wave — it needs the niches, which load
+ * beside the members rather than before them — so the two halves of a
+ * `PayrollEmployee` are assembled in two steps. Spelled as an `Omit` rather
+ * than a hand-written twin so a future column on the engine's type cannot be
+ * quietly dropped here.
+ */
+type PayrollMember = Omit<PayrollEmployee, "alreadyPaidVideoIds">;
+
 async function loadEmployeeMembers(
   organizationId: string,
   onlyUserId?: string,
-): Promise<PayrollEmployee[]> {
+): Promise<PayrollMember[]> {
   const members = await prisma.organizationMember.findMany({
     where: {
       organizationId,
@@ -161,7 +203,7 @@ async function loadEmployeeMembers(
     },
   });
 
-  const employees: PayrollEmployee[] = [];
+  const employees: PayrollMember[] = [];
 
   for (const member of members) {
     const profile = member.user.employeeProfile;
@@ -193,25 +235,159 @@ async function loadEmployeeMembers(
 // ---------------------------------------------------------------------------
 
 /**
- * Every niche in the organization, with its canonical threshold.
+ * Every niche in the organization, with both halves of its hit rule.
  *
  * All of them, not only those attached to owned channels: the engine looks
  * niches up by id from two directions — the employee's assignments and the
  * channel's — and a missing entry would silently drop a hit that should have
- * paid. `hitThreshold` stays nullable all the way through, and the engine reads
- * a null as "nothing here can be a hit" rather than resolving it to anything —
- * so the column is carried, never coerced.
+ * paid.
+ *
+ * `hitThreshold` and `hitWindowHours` both stay nullable all the way through,
+ * and the engine reads either null as "nothing here can be scored" rather than
+ * resolving it to anything. The columns are carried, never coerced — there is
+ * no organization default for the window any more than there is for the bar,
+ * and adding one would recreate the bug that paid bonuses against numbers
+ * nobody had chosen.
  */
 async function loadNiches(organizationId: string): Promise<PayrollNiche[]> {
   return prisma.niche.findMany({
     where: { organizationId },
-    select: { id: true, name: true, hitThreshold: true },
+    select: { id: true, name: true, hitThreshold: true, hitWindowHours: true },
   });
+}
+
+/**
+ * The longest window any niche here has, in hours.
+ *
+ * Decides how far BEFORE the period the Shorts query has to reach. A hit is
+ * paid in the period its window closed in, so a run for February has to see
+ * January's Shorts — a Short published on 28 January under a seven-day rule
+ * resolves on 4 February and is February's to pay. Reaching back by the widest
+ * configured window is the smallest range that provably contains every Short
+ * that could resolve inside the period.
+ *
+ * Zero when nothing is configured, which collapses the range to the period
+ * itself — the same query this module ran before windows existed, and the right
+ * one, because with no rule anywhere nothing can resolve at all.
+ */
+function widestWindowHours(niches: readonly PayrollNiche[]): number {
+  let widest = 0;
+  for (const niche of niches) {
+    if (niche.hitWindowHours !== null && niche.hitWindowHours > widest) {
+      widest = niche.hitWindowHours;
+    }
+  }
+  return widest;
+}
+
+/**
+ * Publish dates that could possibly resolve inside the period, as a `where`.
+ *
+ * ONE DEFINITION, USED TWICE, ON PURPOSE. `loadShorts` selects the Shorts a run
+ * may credit; `loadFinalizedCredits` selects the credits that could collide
+ * with them. If those two ranges could drift apart, a Short would arrive
+ * creditable with its own payment history missing, which is precisely the
+ * double payment the ledger exists to stop.
+ *
+ * Half-open [start, end), like every other date range in this codebase.
+ */
+function publishedRangeFor(period: PayrollPeriodWindow, niches: readonly PayrollNiche[]) {
+  return {
+    gte: new Date(period.startsAtMs - widestWindowHours(niches) * HOUR_MS),
+    lt: new Date(period.endsAtMs),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WHAT HAS ALREADY BEEN PAID
+// ---------------------------------------------------------------------------
+
+/**
+ * The period statuses that mean the figures are stored rather than derived.
+ *
+ * The same pair `payroll-service` calls frozen, restated rather than imported
+ * because that module imports this one and a cycle to share two strings would
+ * be a poor trade. "paid" is a finalized period that has additionally been paid
+ * out, so it is the stronger case of the same fact, never a weaker one.
+ */
+const FINALIZED_STATUSES = ["finalized", "paid"] as const;
+
+/**
+ * Every Short already credited to these people in a period that is frozen.
+ *
+ * THIS IS THE LEDGER, AND IT IS WHY THE GUARD IS NOT A DATE. A hit is paid in
+ * the period its window closed in — and that date is not stable, because
+ * `reevaluateHitsForNiche` rewrites the recorded rule whenever an admin edits a
+ * niche. A Short that closed on 4 February under a 168-hour GTA rule closes on
+ * 6 March once GTA is 900 hours. February is finalized and its `PayrollHit`
+ * rows correctly survive, so March would credit the same videoId to the same
+ * person a second time; `@@unique([recordId, videoId])` spans one record and
+ * cannot see it. `PayrollHit` rows under a frozen `PayrollRecord` are the only
+ * statement of what has actually been paid, so they are what gets checked.
+ *
+ * DRAFTS ARE DELIBERATELY EXCLUDED. An open period is recalculated on every
+ * read by design, so the same Short legitimately moves between two DRAFT
+ * periods as its rule changes and neither of them has paid anybody. Including
+ * drafts would let whichever month happened to be read first claim it forever.
+ *
+ * KEYED BY USER, because the bonus is. Two people assigned to the same niche
+ * are each credited for one hit, so paying Alex in February must not stop John
+ * being paid in March — see `PayrollEmployee.alreadyPaidVideoIds`.
+ *
+ * BOUNDED BY THE SAME PUBLISH RANGE AS `loadShorts`, which is what keeps this
+ * from growing without limit as the years of finalized payroll accumulate. A
+ * credit for a Short published outside that range cannot collide with anything
+ * this run can credit, because no such Short was loaded. `PayrollHit` carries
+ * its own `publishedAt` snapshot, so the filter costs no join.
+ */
+async function loadFinalizedCredits(
+  organizationId: string,
+  userIds: readonly string[],
+  candidateVideoIds: readonly string[],
+): Promise<Map<string, string[]>> {
+  const byUserId = new Map<string, string[]>();
+  if (userIds.length === 0 || candidateVideoIds.length === 0) return byUserId;
+
+  const hits = await prisma.payrollHit.findMany({
+    where: {
+      // The exact Shorts this run could credit, so the answer cannot be
+      // narrower than the question. `PayrollHit` already indexes videoId.
+      videoId: { in: [...candidateVideoIds] },
+      record: {
+        userId: { in: [...userIds] },
+        // `PayrollRecord` carries no organizationId of its own; it hangs off the
+        // period, which does. Filtering through the relation is the entire
+        // tenancy check, exactly as `loadRecordScoped` does it in the service.
+        period: { organizationId, status: { in: [...FINALIZED_STATUSES] } },
+      },
+    },
+    select: { videoId: true, record: { select: { userId: true } } },
+  });
+
+  for (const hit of hits) {
+    const existing = byUserId.get(hit.record.userId);
+    if (existing) existing.push(hit.videoId);
+    else byUserId.set(hit.record.userId, [hit.videoId]);
+  }
+
+  return byUserId;
 }
 
 // ---------------------------------------------------------------------------
 // SHORTS
 // ---------------------------------------------------------------------------
+
+/**
+ * The stored outcome column, narrowed to the four values that exist.
+ *
+ * Anything else reads as "unknown" — the outcome that earns nothing and that
+ * the evaluator re-decides on every run. A stale or hand-edited string must
+ * never be mistaken for a frozen "hit" or "miss", because those are the two the
+ * engine now takes at their word rather than re-deriving.
+ */
+function toHitOutcome(stored: string): HitOutcome {
+  return stored === "hit" || stored === "miss" || stored === "pending" ? stored : "unknown";
+}
 
 interface OwnedChannel {
   readonly channelId: string;
@@ -250,44 +426,105 @@ async function loadOwnedChannels(organizationId: string): Promise<OwnedChannel[]
 }
 
 /**
- * Shorts published inside the period on an owned channel.
+ * Shorts on an owned channel that could resolve inside the period.
  *
- * THE WINDOW IS HALF-OPEN, [startsAt, endsAt), matching every other date range
- * in this codebase. A Short published at exactly midnight on the 1st of
- * September belongs to September, once, rather than to both months or to
- * neither.
+ * THE RANGE IS NOT THE PERIOD, AND THAT IS THE WHOLE CHANGE. A hit is paid in
+ * the period its window CLOSED in, not the one it was published in, so a
+ * February run has to see January's Shorts: one published on 28 January under a
+ * seven-day rule resolves on 4 February and February owes the bonus. The query
+ * therefore starts `widestWindowHours` before the period and ends at the
+ * period's end — the smallest range that provably contains every Short whose
+ * window can shut inside it, plus every Short published in the month, which is
+ * the population the skipped-niche report is drawn from.
  *
- * `isAvailable` is deliberately not filtered on. A Short that hit a million
- * views in August and was taken down in September was still a hit in August,
+ * BOTH ENDS ARE STILL HALF-OPEN, [start, end), matching every other date range
+ * in this codebase. The engine does the precise selection: it computes each
+ * Short's `windowClosesAt` per niche and keeps the ones landing inside the
+ * period, so this query only has to be a superset and never has to be exact.
+ *
+ * `isAvailable` is deliberately not filtered on. A Short that cleared its
+ * window in August and was taken down in September was still a hit in August,
  * and the person who made it is still owed for it.
  *
- * Views are the *current* stored counter, which is exactly what makes an open
- * period a live figure and a finalized one a frozen snapshot: `PayrollHit`
- * records the count as it stood at finalization precisely because this number
- * keeps moving.
+ * Views are the *current* stored counter. Under a windowed rule that number can
+ * only ever rule a hit OUT — a Short still under the bar today cannot have
+ * cleared it inside a window that shut months ago. It is never enough on its own
+ * to call a window a hit; that is what the evaluation below is for.
  */
 async function loadShorts(
+  organizationId: string,
   ownedChannels: readonly OwnedChannel[],
   period: PayrollPeriodWindow,
+  niches: readonly PayrollNiche[],
 ): Promise<PayrollShort[]> {
   if (ownedChannels.length === 0) return [];
 
   const channelById = new Map(ownedChannels.map((channel) => [channel.channelId, channel]));
+  const channelIds = [...channelById.keys()];
 
-  const videos = await prisma.video.findMany({
-    where: {
-      channelId: { in: [...channelById.keys()] },
-      isShort: true,
-      publishedAt: { gte: new Date(period.startsAtMs), lt: new Date(period.endsAtMs) },
-    },
-    select: {
-      id: true,
-      title: true,
-      channelId: true,
-      viewCount: true,
-      publishedAt: true,
-    },
-  });
+  const publishedAt = publishedRangeFor(period, niches);
+
+  const [videos, evaluations] = await Promise.all([
+    prisma.video.findMany({
+      where: { channelId: { in: channelIds }, isShort: true, publishedAt },
+      select: {
+        id: true,
+        title: true,
+        channelId: true,
+        viewCount: true,
+        publishedAt: true,
+      },
+    }),
+    // Scoped by organization first, then narrowed through the relation with the
+    // same predicate as the query above rather than by a list of ids. Same rows,
+    // one round trip, and no multi-thousand-element `IN` clause to build.
+    //
+    // `organizationId` is not decoration here: `Video` is a globally
+    // deduplicated row and the verdict belongs to the team whose niche rule
+    // produced it. Reading another organization's evaluation would judge these
+    // Shorts by somebody else's bar.
+    prisma.videoHitEvaluation.findMany({
+      where: {
+        organizationId,
+        video: { channelId: { in: channelIds }, isShort: true, publishedAt },
+      },
+      select: {
+        videoId: true,
+        // THE VERDICT ITSELF, not only the evidence under it. Payroll reads a
+        // settled outcome rather than re-deriving one — a miss inferred from
+        // "lifetime is still under the bar" carries no `viewsAtWindow` at all,
+        // and re-evaluating it against today's total is how that certain miss
+        // decayed into an "unknown". See `storedVerdictFor` in the engine.
+        outcome: true,
+        nicheId: true,
+        thresholdApplied: true,
+        windowHoursApplied: true,
+        windowClosesAt: true,
+        viewsAtWindow: true,
+        observedAtHours: true,
+      },
+    }),
+  ]);
+
+  const evidenceByVideoId = new Map<string, PayrollHitEvidence>(
+    evaluations.map((evaluation) => [
+      evaluation.videoId,
+      {
+        // The column is a plain string; the engine takes the four-value union.
+        // Anything unrecognised reads as "unknown", which earns nothing and is
+        // never frozen — the safe direction for a value nobody wrote on purpose.
+        outcome: toHitOutcome(evaluation.outcome),
+        nicheId: evaluation.nicheId,
+        thresholdApplied: evaluation.thresholdApplied,
+        windowHoursApplied: evaluation.windowHoursApplied,
+        windowClosesAtMs: evaluation.windowClosesAt?.getTime() ?? null,
+        // BigInt again, converted once at the edge.
+        viewsAtWindow:
+          evaluation.viewsAtWindow === null ? null : Number(evaluation.viewsAtWindow),
+        observedAtHours: evaluation.observedAtHours,
+      },
+    ]),
+  );
 
   const shorts: PayrollShort[] = [];
 
@@ -315,6 +552,11 @@ async function loadShorts(
       // widens the query fails safe rather than silently paying for a
       // competitor's viral Short.
       isOwnChannel: true,
+      // Null is ordinary, not an error: on this account only 59 Shorts have any
+      // snapshot inside seven days of publishing, and nothing has been
+      // evaluated for the rest. The engine turns that absence into "miss" or
+      // "unknown" by inference rather than into a hit.
+      evaluation: evidenceByVideoId.get(video.id) ?? null,
     });
   }
 

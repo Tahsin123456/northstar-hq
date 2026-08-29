@@ -111,3 +111,22 @@ export function roundTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round((value + Number.EPSILON) * factor) / factor;
 }
+
+/**
+ * `numerator / denominator` as a percentage, rounded to two places.
+ *
+ * `null` — never `0` — for an empty or nonsensical denominator. Zero out of
+ * zero is not zero percent, it is the absence of a measurement, and every rate
+ * in this product renders that absence as an em dash rather than as a bad
+ * score. Negative or non-finite inputs are treated the same way: there is no
+ * meaningful percentage to report, so none is reported.
+ *
+ * Lives with the statistics rather than with the hit rule because it is
+ * ordinary arithmetic. `calculateHitRate` is the one that knows what a hit is;
+ * this is the one that knows how to divide.
+ */
+export function ratePercent(numerator: number, denominator: number): number | null {
+  if (!Number.isFinite(denominator) || denominator <= 0) return null;
+  if (!Number.isFinite(numerator) || numerator < 0) return null;
+  return roundTo((numerator / denominator) * 100, 2);
+}

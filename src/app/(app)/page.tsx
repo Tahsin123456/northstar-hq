@@ -33,13 +33,12 @@ import { useFilters } from "@/components/providers/filters-provider";
 import { DEFAULT_SORT, type SortState } from "@/lib/sorting";
 import { previousRange } from "@/lib/analytics/trends";
 import { GenerateReportDialog } from "@/components/report/generate-report-dialog";
-import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
+import { HitRuleNotConfiguredNotice } from "@/components/metrics/hit-rule-not-configured";
 import { SetNicheThresholdButton } from "@/components/niches/niche-threshold-dialog";
 import {
   HIT_RATE_DEFINITION,
-  UNCONFIGURED_THRESHOLD_LABEL,
+  UNCONFIGURED_RULE_LABEL,
 } from "@/lib/analytics/constants";
-import { formatCompactNumber } from "@/lib/format";
 import { BRAND } from "@/lib/brand";
 
 /**
@@ -147,11 +146,18 @@ export default function OverviewPage() {
         description={
           !hasChannels
             ? "Track the Shorts channels you care about."
-            : threshold === null
-              ? // The page's headline question needs a number to be a question.
-                // Without one it states the situation instead of pretending to ask.
-                `${UNCONFIGURED_THRESHOLD_LABEL} for ${nicheName ?? "this niche"}, so no hit rate is shown below.`
-              : `Out of every 100 Shorts these channels publish, how many pass ${formatCompactNumber(threshold)} views?`
+            : summary.pooled.judged === 0 && summary.totalShorts > 0
+              ? /*
+                 * Read off the pooled verdicts, not off the threshold control.
+                 *
+                 * The headline question needs a rule to be a question, and the
+                 * rule is now per niche and has two halves. When nothing in
+                 * scope could be judged the page states the situation instead
+                 * of pretending to ask; when things are judged, the question is
+                 * the one the product actually answers, with the clock in it.
+                 */
+                `${UNCONFIGURED_RULE_LABEL} for ${nicheName ?? "these niches"}, so no hit rate is shown below.`
+              : "Out of every 100 Shorts these channels publish, how many reach their niche's view threshold inside its hit window?"
         }
         actions={
           <>
@@ -216,7 +222,7 @@ export default function OverviewPage() {
               unconfigured niche changes how the entire screen should be read,
               not just one cell. */}
           {threshold === null ? (
-            <ThresholdNotConfiguredNotice
+            <HitRuleNotConfiguredNotice
               nicheName={nicheName}
               action={
                 unconfiguredNiche ? (
@@ -230,7 +236,6 @@ export default function OverviewPage() {
             summary={summary}
             previousSummary={previousSummary}
             loading={isLoading}
-            thresholdConfigured={threshold !== null}
           />
 
           {/*

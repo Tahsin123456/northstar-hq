@@ -3,6 +3,7 @@
 import * as React from "react";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { formatMoney } from "@/lib/finance/money";
 import {
   EM_DASH,
@@ -77,13 +78,30 @@ export function RecordBreakdown({
                         {pluralize(line.hitCount, "hit")} ×{" "}
                         {formatMoney(line.hitPaymentMinor, currency)}
                       </span>
+                      {/*
+                        THE WHOLE RULE, OR AN HONEST HALF OF IT.
+                        "500K" stopped being a standard the moment a clock was
+                        added: a Short can reach 500,000 views and not be a hit.
+                        The window is appended when it is known. When it is not —
+                        a period finalized before windows existed, or one whose
+                        stored evaluations have gone — the badge shows the bar
+                        alone rather than inventing a window, and the title says
+                        which of the two this is.
+                      */}
                       <Badge
                         variant="neutral"
                         size="sm"
                         className="normal-case tracking-normal"
-                        title={`Threshold applied: ${formatNumber(line.thresholdApplied)} views`}
+                        title={
+                          line.windowHoursApplied === null
+                            ? `Threshold applied: ${formatNumber(line.thresholdApplied)} views. The window this run used was not recorded.`
+                            : `Threshold applied: ${formatNumber(line.thresholdApplied)} views within ${formatHitWindow(line.windowHoursApplied)} of publishing`
+                        }
                       >
                         {formatThreshold(line.thresholdApplied)}
+                        {line.windowHoursApplied === null
+                          ? null
+                          : ` in ${formatHitWindow(line.windowHoursApplied)}`}
                       </Badge>
                     </span>
                   }
@@ -184,14 +202,22 @@ function HitList({ record }: { record: PayrollRecordDTO }) {
         Qualifying Shorts ({formatNumber(record.hits.length)})
       </SectionLabel>
 
+      {/*
+        "PUBLISHED INSIDE THE PERIOD" USED TO BE TRUE AND IS NOW WRONG.
+        A hit is paid in the period its WINDOW CLOSED in, so this list can
+        contain a Short published in December on a January run. Without saying
+        so, the Published column below reads as a bug to the one person most
+        likely to check it — and the two columns together are the explanation.
+      */}
       <p className="text-[11px] leading-relaxed text-subtle-foreground">
-        Own channels only, published inside the period, in a niche{" "}
-        {record.employeeName} is assigned to. View counts and thresholds are as
-        they stood when the hit was counted — not today&rsquo;s.
+        Own channels only, in a niche {record.employeeName} is assigned to, and
+        counted in the period their window CLOSED in — which is not always the
+        period they were published in. View counts and rules are as they stood
+        when the hit was counted, not today&rsquo;s.
       </p>
 
       <div className="overflow-x-auto rounded-md border border-border">
-        <table className="w-full min-w-[520px] border-collapse text-left">
+        <table className="w-full min-w-[600px] border-collapse text-left">
           <thead>
             <tr className="border-b border-border bg-surface-sunken">
               <th className={HIT_HEAD}>Short</th>
@@ -199,6 +225,7 @@ function HitList({ record }: { record: PayrollRecordDTO }) {
               <th className={cn(HIT_HEAD, "text-right")}>Views</th>
               <th className={cn(HIT_HEAD, "text-right")}>Threshold</th>
               <th className={cn(HIT_HEAD, "text-right")}>Published</th>
+              <th className={cn(HIT_HEAD, "text-right")}>Resolved</th>
             </tr>
           </thead>
           <tbody>
@@ -227,11 +254,29 @@ function HitList({ record }: { record: PayrollRecordDTO }) {
                 <td className="tnum px-3 py-2 text-right text-[12px] text-foreground">
                   {formatNumber(hit.viewCountAtRun)}
                 </td>
-                <td className="tnum px-3 py-2 text-right text-[12px] text-subtle-foreground">
+                <td
+                  className="tnum px-3 py-2 text-right text-[12px] text-subtle-foreground"
+                  title={
+                    hit.windowHoursApplied === null
+                      ? "The window this hit was judged under was not recorded."
+                      : `${formatNumber(hit.thresholdAtRun)} views within ${formatHitWindow(hit.windowHoursApplied)} of publishing`
+                  }
+                >
                   {formatCompactNumber(hit.thresholdAtRun)}
+                  {hit.windowHoursApplied === null
+                    ? null
+                    : ` / ${formatHitWindow(hit.windowHoursApplied)}`}
                 </td>
                 <td className="tnum px-3 py-2 text-right text-[12px] text-subtle-foreground">
                   {formatDate(hit.publishedAt)}
+                </td>
+                {/*
+                  The date this Short stopped being able to change its own
+                  answer, and therefore the reason it is on THIS run. Read
+                  next to Published, an earlier month stops looking wrong.
+                */}
+                <td className="tnum px-3 py-2 text-right text-[12px] text-subtle-foreground">
+                  {hit.windowClosesAt === null ? EM_DASH : formatDate(hit.windowClosesAt)}
                 </td>
               </tr>
             ))}

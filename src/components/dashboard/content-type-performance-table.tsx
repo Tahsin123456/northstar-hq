@@ -4,11 +4,15 @@ import * as React from "react";
 import { Shapes } from "lucide-react";
 import type { ContentTypePerformance } from "@/lib/analytics/content-type-performance";
 import { contentTypeColor } from "@/components/content-types/content-type-chip";
-import { ThresholdNotConfigured } from "@/components/metrics/threshold-not-configured";
+import { HitRuleNotConfigured } from "@/components/metrics/hit-rule-not-configured";
+import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoTip } from "@/components/ui/tooltip";
-import { HIT_RATE_DEFINITION } from "@/lib/analytics/constants";
+import {
+  HIT_RATE_DEFINITION,
+  NOTHING_DECIDED_SHORT,
+} from "@/lib/analytics/constants";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -41,7 +45,7 @@ export function ContentTypePerformanceTable({
   performance: ContentTypePerformance;
   className?: string;
 }) {
-  const { rows, threshold, totalShorts, taggedAssignments, taggedShorts, hasOverlap } =
+  const { rows, totalShorts, taggedAssignments, taggedShorts, hasOverlap } =
     performance;
 
   return (
@@ -168,19 +172,41 @@ export function ContentTypePerformanceTable({
                   </td>
                   <td className="px-5 py-2.5 text-right">
                     {/*
-                      `null` here is "no threshold configured", never "0%". The
-                      aggregate refuses to produce a rate without a definition of
-                      a hit, and this cell says so in the same words every other
-                      surface uses.
+                      `null` is never "0%", and it now has two causes worth
+                      telling apart. Nothing scoreable in the row means no niche
+                      rule reached these Shorts — an admin has something to
+                      configure, and the cell says so in the same words every
+                      other surface uses. Nothing DECIDED means the rules are
+                      fine and the windows have not shut; that is a wait, and
+                      telling somebody to go configure a niche would send them
+                      to fix something that is not broken.
                     */}
-                    {row.hitRate === null ? (
-                      <ThresholdNotConfigured size="sm" className="justify-end" />
-                    ) : (
-                      <span className="tnum font-medium text-foreground">
-                        {formatPercent(row.hitRate)}
-                        <span className="ml-1.5 text-[11px] font-normal text-subtle-foreground">
-                          {row.hitCount}/{row.shortsCount}
+                    {row.hits.rate === null ? (
+                      row.hits.tally.pending === 0 && row.hits.tally.unknown === 0 ? (
+                        <HitRuleNotConfigured size="sm" className="justify-end" />
+                      ) : (
+                        <span className="text-[12px] text-subtle-foreground">
+                          {NOTHING_DECIDED_SHORT}
                         </span>
+                      )
+                    ) : (
+                      /*
+                        The fraction says what the rate is OVER; the bounds say
+                        what it had to leave out. A tag whose Shorts mostly went
+                        unrecorded reports the same 40% as one measured cleanly,
+                        and an editor deciding what to make more of reads them
+                        as the same result. The bounds render nothing when there
+                        is nothing to disclose, so the common row stays a single
+                        line.
+                      */
+                      <span className="inline-flex flex-col items-end gap-0.5">
+                        <span className="tnum font-medium text-foreground">
+                          {formatPercent(row.hits.rate)}
+                          <span className="ml-1.5 text-[11px] font-normal text-subtle-foreground">
+                            {row.hits.hits}/{row.hits.judged} decided
+                          </span>
+                        </span>
+                        <HitRateBounds summary={row.hits} />
                       </span>
                     )}
                   </td>
@@ -191,9 +217,18 @@ export function ContentTypePerformanceTable({
         </div>
       )}
 
-      {rows.length > 0 && threshold !== null ? (
+      {rows.length > 0 ? (
         <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-subtle-foreground">
-          A hit is a Short with at least {formatCompactNumber(threshold)} views.
+          {/* The footnote used to name one number, which was the whole bug: a
+              tag whose Shorts were published last month scored near zero
+              against one whose Shorts were two years old, and the sentence
+              underneath said nothing about time. Each Short is judged by its
+              own niche&rsquo;s rule now, so there is no single figure to print
+              here — what there is instead is what the rate is over. */}
+          A hit is a Short that reached its niche&rsquo;s view threshold within
+          that niche&rsquo;s hit window. Rates are over decided Shorts only:
+          Shorts still inside their window, and those published with no view
+          history recorded during it, are in neither half.
         </p>
       ) : null}
     </Card>

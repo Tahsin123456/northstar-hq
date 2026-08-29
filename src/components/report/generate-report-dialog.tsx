@@ -22,8 +22,8 @@ import {
 } from "@/components/ui/dialog";
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import {
-  UNCONFIGURED_THRESHOLD_LABEL,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_LABEL,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import { formatCompactNumber, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -112,7 +112,7 @@ export function GenerateReportDialog({ trigger }: { trigger?: React.ReactNode })
      */
     if (threshold === null) {
       setError(
-        `${UNCONFIGURED_THRESHOLD_LABEL}. Set a hit rate threshold for ${nicheName ?? "this niche"} before generating a report, or switch to All niches.`,
+        `${UNCONFIGURED_RULE_LABEL}. Set a view threshold and a hit window for ${nicheName ?? "this niche"} before generating a report, or switch to All niches.`,
       );
       return;
     }
@@ -258,7 +258,7 @@ export function GenerateReportDialog({ trigger }: { trigger?: React.ReactNode })
               label="Hit threshold"
               value={
                 threshold === null
-                  ? UNCONFIGURED_THRESHOLD_SHORT
+                  ? UNCONFIGURED_RULE_SHORT
                   : `${formatCompactNumber(threshold)} views · ${
                       thresholdSource === "niche"
                         ? `${nicheName} default`

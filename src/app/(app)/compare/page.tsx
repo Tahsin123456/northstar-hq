@@ -35,11 +35,12 @@ import {
 } from "@/components/dashboard/scope-filters";
 import { useDataset } from "@/hooks/use-dataset";
 import { useFilters } from "@/components/providers/filters-provider";
-import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
+import { HitRuleNotConfiguredNotice } from "@/components/metrics/hit-rule-not-configured";
+import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import {
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
-  UNCONFIGURED_THRESHOLD_LABEL,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_EXPLANATION,
+  UNCONFIGURED_RULE_LABEL,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import {
   EM_DASH,
@@ -83,8 +84,8 @@ export default function ComparePage() {
     if (initialised.current || rows.length === 0) return;
     initialised.current = true;
     const ranked = [...rows]
-      .filter((row) => row.metrics.hitRate !== null)
-      .sort((a, b) => (b.metrics.hitRate ?? 0) - (a.metrics.hitRate ?? 0));
+      .filter((row) => row.metrics.hits.rate !== null)
+      .sort((a, b) => (b.metrics.hits.rate ?? 0) - (a.metrics.hits.rate ?? 0));
     const seed = (ranked.length > 0 ? ranked : rows).slice(0, 3);
     setSelectedIds(seed.map((row) => row.channel.id));
   }, [rows]);
@@ -114,9 +115,14 @@ export default function ComparePage() {
   const chartData: ComparisonDatum[] = selected.map((row, index) => ({
     id: row.channel.id,
     name: row.channel.displayName,
-    hitRate: row.metrics.hitRate,
-    hitCount: row.metrics.hitCount,
+    hitRate: row.metrics.hits.rate,
+    hitCount: row.metrics.hits.hits,
+    // The chart's fraction is over DECIDED Shorts, matching the rate above it.
+    // Pairing a windowed rate with a denominator of everything uploaded would
+    // print "3 / 40" beside "60%" and make both look wrong.
+    judged: row.metrics.hits.judged,
     totalShorts: row.metrics.totalShorts,
+    excluded: row.metrics.hits.excluded,
     medianViews: row.metrics.medianViews,
     colorIndex: index,
   }));
@@ -137,7 +143,7 @@ export default function ComparePage() {
         title="Compare"
         description={
           threshold === null
-            ? `${UNCONFIGURED_THRESHOLD_LABEL}. Channels can still be compared on views and volume; hit rate is not reported.`
+            ? `${UNCONFIGURED_RULE_LABEL}. Channels can still be compared on views and volume; hit rate is not reported.`
             : `Put channels side by side at ${formatCompactNumber(threshold)}+ views.`
         }
       />
@@ -229,10 +235,15 @@ export default function ComparePage() {
                       <span className="min-w-0 flex-1 truncate text-[12px] text-foreground">
                         {row.channel.displayName}
                       </span>
-                      <span className="tnum shrink-0 text-[11px] text-subtle-foreground">
-                        {row.metrics.threshold === null
-                          ? null
-                          : formatPercent(row.metrics.hitRate, 0)}
+                      {/* The rate this row is ranked and picked by, and the
+                          range the unrecorded Shorts leave around it. Compact
+                          because the row is a checkbox, an avatar and a name in
+                          a 280px column — and because the info button of the
+                          full form is a control inside a <label>, which would
+                          toggle the checkbox when somebody pressed it. */}
+                      <span className="tnum flex shrink-0 items-center gap-1 text-[11px] text-subtle-foreground">
+                        {formatPercent(row.metrics.hits.rate, 0)}
+                        <HitRateBounds summary={row.metrics.hits} compact />
                       </span>
                       {isSelected ? (
                         <span
@@ -265,7 +276,7 @@ export default function ComparePage() {
                     <CardTitle>Hit rate</CardTitle>
                     <CardDescription>
                       {threshold === null ? (
-                        UNCONFIGURED_THRESHOLD_EXPLANATION
+                        UNCONFIGURED_RULE_EXPLANATION
                       ) : (
                         <>
                           The share of each channel&rsquo;s Shorts that reached{" "}
@@ -279,7 +290,7 @@ export default function ComparePage() {
                         is a chart that asserts total failure. There is nothing
                         to plot, so nothing is plotted. */}
                     {threshold === null ? (
-                      <ThresholdNotConfiguredNotice nicheName={nicheName} />
+                      <HitRuleNotConfiguredNotice nicheName={nicheName} />
                     ) : (
                       <ComparisonChart data={chartData} />
                     )}
@@ -357,22 +368,56 @@ const METRIC_ROWS: MetricRow[] = [
    */
   {
     label: "Hits",
+    hint: "Shorts that reached their niche's threshold inside its hit window, out of the Shorts decided so far.",
     higherIsBetter: true,
-    value: (row) => row.metrics.hitCount,
+    value: (row) => row.metrics.hits.hits,
     format: (row) =>
-      row.metrics.threshold === null
-        ? UNCONFIGURED_THRESHOLD_SHORT
-        : formatFraction(row.metrics.hitCount, row.metrics.totalShorts),
+      row.metrics.hits.judged === 0
+        ? UNCONFIGURED_RULE_SHORT
+        : formatFraction(row.metrics.hits.hits, row.metrics.hits.judged),
   },
   {
     label: "Hit rate",
-    hint: "The headline metric: hits divided by Shorts uploaded in the period.",
+    hint: "The headline metric: hits divided by DECIDED Shorts. Shorts still inside their hit window, and those with no view history recorded during it, are in neither half.",
     higherIsBetter: true,
-    value: (row) => row.metrics.hitRate,
+    value: (row) => row.metrics.hits.rate,
+    /*
+     * THE RATE, AND THE RANGE THE UNRECORDED SHORTS LEAVE AROUND IT.
+     *
+     * A head-to-head table is exactly where a bare point estimate does its
+     * damage: two channels both reading 22% are not the same claim when one of
+     * them has a hundred Shorts whose windows closed with nobody watching, and
+     * a reader comparing the two numbers side by side has no way to see that
+     * from the numbers. The bounds are silent when there is nothing to
+     * disclose, so a cleanly measured row still reads as one figure — which is
+     * what keeps the disclosure worth reading on the rows that carry it.
+     */
     format: (row) =>
-      row.metrics.threshold === null
-        ? UNCONFIGURED_THRESHOLD_SHORT
-        : formatPercent(row.metrics.hitRate),
+      row.metrics.hits.rate === null ? (
+        UNCONFIGURED_RULE_SHORT
+      ) : (
+        <span className="inline-flex flex-col items-end gap-0.5">
+          <span>{formatPercent(row.metrics.hits.rate)}</span>
+          <HitRateBounds summary={row.metrics.hits} />
+        </span>
+      ),
+  },
+  {
+    /*
+     * A ROW FOR WHAT THE RATE ABOVE LEFT OUT.
+     *
+     * The comparison table is where two channels are put side by side, and the
+     * exclusions are exactly what makes two identical percentages incomparable:
+     * 40% over 50 decided Shorts and 40% over 3 are not the same claim. Ranked
+     * as lower-is-better because a channel with less excluded is the better
+     * measured one, whatever its rate.
+     */
+    label: "Not decided",
+    hint: "Shorts uploaded in the period that are in neither half of the rate: still inside their hit window, published with no view history recorded during it, or in a niche with no rule.",
+    higherIsBetter: false,
+    value: (row) => row.metrics.hits.excluded,
+    format: (row) =>
+      `${row.metrics.hits.excluded} of ${row.metrics.totalShorts}`,
   },
   {
     label: "Consistency",

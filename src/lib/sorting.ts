@@ -51,9 +51,9 @@ function valueFor(row: SortableRow, key: SortKey): number | string | null {
     case "bestShort":
       return row.metrics.bestShort?.views ?? null;
     case "hitCount":
-      return row.metrics.hitCount;
+      return row.metrics.hits.hits;
     case "hitRate":
-      return row.metrics.hitRate;
+      return row.metrics.hits.rate;
     case "consistency":
       return row.metrics.consistencyScore;
     case "lastUpdated":
@@ -66,11 +66,14 @@ function valueFor(row: SortableRow, key: SortKey): number | string | null {
 /**
  * Sorts rows, keeping "no data" rows at the bottom in *both* directions.
  *
- * This matters more than it sounds. A channel with no Shorts this period has a
- * `null` hit rate, not a zero. If nulls sorted as zero they would flood the top
- * of an ascending sort and look like the worst performers, when in fact they
- * are simply unmeasured. Parking them at the end in either direction keeps the
- * ranked list about channels that actually have a number.
+ * This matters more than it sounds, and it matters more again now. A channel
+ * with no Shorts this period has a `null` hit rate, not a zero — and so does a
+ * channel whose Shorts are all still inside their hit windows, or all in a
+ * niche nobody has configured. If nulls sorted as zero, all three would flood
+ * the top of an ascending sort and read as the worst performers, when in fact
+ * they are unmeasured, unfinished and unconfigured respectively. Parking them
+ * at the end in either direction keeps the ranked list about channels that
+ * actually have a number.
  */
 export function sortRows<T extends SortableRow>(
   rows: readonly T[],
@@ -114,13 +117,18 @@ export function sortRows<T extends SortableRow>(
 }
 
 /**
- * Stable tie-break: more Shorts first, then alphabetically.
+ * Stable tie-break: more DECIDED Shorts first, then alphabetically.
  *
  * Two channels both at 40% are not equally convincing — one proved it over 50
- * uploads and the other over 5. Volume is the honest tie-break for a
- * consistency metric.
+ * decided Shorts and the other over 5. Decided rather than uploaded, because a
+ * channel that published forty Shorts this week has not yet proved anything
+ * with them: they are all pending, they are in nobody's rate, and ranking on
+ * them would let volume alone break a tie between two measured results.
+ * Uploads remain the tie-break when neither side has anything decided.
  */
 function tieBreak(a: SortableRow, b: SortableRow): number {
+  const byJudged = b.metrics.hits.judged - a.metrics.hits.judged;
+  if (byJudged !== 0) return byJudged;
   const byVolume = b.metrics.totalShorts - a.metrics.totalShorts;
   if (byVolume !== 0) return byVolume;
   return a.channel.displayName.localeCompare(b.channel.displayName);

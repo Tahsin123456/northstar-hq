@@ -3,9 +3,11 @@
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
 import {
-  NEEDS_THRESHOLD_LABEL,
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
+  NEEDS_RULE_LABEL,
+  UNCONFIGURED_RULE_EXPLANATION,
+  UNCONFIGURED_WINDOW_EXPLANATION,
 } from "@/lib/analytics/constants";
+import { missingHitRuleHalf } from "@/lib/analytics/hit-rate";
 import type { NicheDTO } from "@/lib/dto";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -21,9 +23,16 @@ import { cn } from "@/lib/utils";
  * warning — which is a task with nobody attached to it.
  */
 
-/** True when this niche has no hit threshold and therefore reports no hit rate. */
-export function needsThresholdConfiguration(niche: NicheDTO): boolean {
-  return niche.hitThreshold === null;
+/**
+ * True when this niche is missing EITHER half of its rule.
+ *
+ * It used to ask only about the threshold, which quietly stopped being the
+ * question the day a hit gained a clock: a niche with "1,000,000" and no window
+ * looks configured, wears no badge, and reports nothing. That is the precise
+ * failure this badge exists to prevent, so the test is the whole rule.
+ */
+export function needsRuleConfiguration(niche: NicheDTO): boolean {
+  return missingHitRuleHalf(niche) !== null;
 }
 
 /**
@@ -37,8 +46,8 @@ export function needsThresholdConfiguration(niche: NicheDTO): boolean {
  */
 export function unconfiguredFirst(niches: readonly NicheDTO[]): NicheDTO[] {
   return [...niches].sort((a, b) => {
-    const aNeeds = needsThresholdConfiguration(a) ? 0 : 1;
-    const bNeeds = needsThresholdConfiguration(b) ? 0 : 1;
+    const aNeeds = needsRuleConfiguration(a) ? 0 : 1;
+    const bNeeds = needsRuleConfiguration(b) ? 0 : 1;
     if (aNeeds !== bNeeds) return aNeeds - bNeeds;
     if (a.sortOrder !== b.sortOrder) return a.sortOrder - b.sortOrder;
     return a.name.localeCompare(b.name);
@@ -51,8 +60,21 @@ export function unconfiguredFirst(niches: readonly NicheDTO[]): NicheDTO[] {
  * A warning tone rather than a danger one: nothing is broken and no data is
  * wrong. A decision is outstanding, and the niche works as a filter in the
  * meantime — it simply reports no hit rate.
+ *
+ * The tooltip names WHICH HALF is missing, because "not configured" sends an
+ * admin looking through a form for something that might be either of two
+ * fields, and the whole point of surfacing a gap is that somebody can close it
+ * without having to ask which one it is.
  */
-export function NeedsThresholdBadge({ className }: { className?: string }) {
+export function NeedsRuleBadge({
+  niche,
+  className,
+}: {
+  niche: NicheDTO;
+  className?: string;
+}) {
+  const missing = missingHitRuleHalf(niche);
+
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -62,10 +84,14 @@ export function NeedsThresholdBadge({ className }: { className?: string }) {
           className={cn("normal-case tracking-normal", className)}
         >
           <AlertTriangle className="size-3" aria-hidden />
-          {NEEDS_THRESHOLD_LABEL}
+          {NEEDS_RULE_LABEL}
         </Badge>
       </TooltipTrigger>
-      <TooltipContent>{UNCONFIGURED_THRESHOLD_EXPLANATION}</TooltipContent>
+      <TooltipContent>
+        {missing === "window"
+          ? UNCONFIGURED_WINDOW_EXPLANATION
+          : UNCONFIGURED_RULE_EXPLANATION}
+      </TooltipContent>
     </Tooltip>
   );
 }

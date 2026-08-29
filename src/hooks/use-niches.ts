@@ -77,11 +77,25 @@ export function useRenameNiche() {
   });
 }
 
-export function useUpdateNicheThreshold() {
+/**
+ * Writes either half of a niche's hit rule, or both at once.
+ *
+ * One mutation rather than two because the two halves are one decision: an
+ * admin setting "500K in 48 hours" is answering a single question, and two
+ * requests would let a niche sit in a state where the bar had moved and the
+ * clock had not.
+ */
+export function useUpdateNicheRule() {
   const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
-    mutationFn: ({ id, hitThreshold }: { id: string; hitThreshold: number | null }) =>
-      api.setNicheThreshold(id, hitThreshold),
+    mutationFn: ({
+      id,
+      ...rule
+    }: {
+      id: string;
+      hitThreshold?: number | null;
+      hitWindowHours?: number | null;
+    }) => api.setNicheRule(id, rule),
     onSuccess: () => invalidate(),
   });
 }

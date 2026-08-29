@@ -37,8 +37,8 @@ import {
   HIT_RATE_DEFINITION,
   TOTAL_VIEWS_DEFINITION,
   TOTAL_VIEWS_VS_STUDIO,
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_EXPLANATION,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import { auditActionLabel } from "@/lib/audit/actions";
 import { PERMISSION_LABELS, ROLE_ORDER } from "@/lib/auth/permissions";
@@ -202,13 +202,13 @@ export default function AdminOverviewPage() {
                 emphasis="strong"
                 value={
                   threshold === null
-                    ? UNCONFIGURED_THRESHOLD_SHORT
+                    ? UNCONFIGURED_RULE_SHORT
                     : formatPercent(summary.averageHitRate)
                 }
                 hint={
                   <InfoTip>
                     {threshold === null ? (
-                      UNCONFIGURED_THRESHOLD_EXPLANATION
+                      UNCONFIGURED_RULE_EXPLANATION
                     ) : (
                       <>
                         The mean of each channel&rsquo;s own hit rate, counting only
@@ -232,11 +232,26 @@ export default function AdminOverviewPage() {
                 label="Uploads"
                 value={formatNumber(summary.totalShorts)}
                 caption={
-                  // `totalHits` is 0 with no threshold, and "0 of them cleared
-                  // the threshold" is a false accusation rather than a count.
-                  threshold === null
-                    ? "No threshold set, so none are counted as hits"
-                    : `${formatNumber(summary.totalHits)} of them cleared the threshold`
+                  /*
+                   * Counted from the pooled verdicts, and it says what it is
+                   * over.
+                   *
+                   * "N of them hit" against a total of uploads is the sentence
+                   * that made the old rule look reasonable: the denominator was
+                   * everything published, so a busy month diluted the numerator
+                   * and the number fell for publishing more. Both halves of the
+                   * ratio are decided Shorts now, and the ones that are not
+                   * decided are named rather than folded into the loss.
+                   */
+                  summary.pooled.judged > 0
+                    ? `${formatNumber(summary.pooled.hits)} hit of ${formatNumber(summary.pooled.judged)} decided${
+                        summary.pooled.excluded > 0
+                          ? ` · ${formatNumber(summary.pooled.excluded)} not decided`
+                          : ""
+                      }`
+                    : summary.totalShorts > 0
+                      ? "None decided yet — no niche rule reaches them, or their windows are still open"
+                      : "No Shorts in this period"
                 }
               />
             </Tile>

@@ -4,14 +4,17 @@ import * as React from "react";
 import { Target } from "lucide-react";
 import { toast } from "sonner";
 import {
+  HIT_WINDOW_PRESETS,
+  MAX_HIT_WINDOW_HOURS,
   MAX_THRESHOLD,
+  MIN_HIT_WINDOW_HOURS,
   MIN_THRESHOLD,
   THRESHOLD_PRESETS,
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
 } from "@/lib/analytics/constants";
+import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import type { NicheDTO } from "@/lib/dto";
 import { formatCompactNumber } from "@/lib/format";
-import { useUpdateNicheThreshold } from "@/hooks/use-niches";
+import { useUpdateNicheRule } from "@/hooks/use-niches";
 import { useSession } from "@/components/providers/session-provider";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,7 +30,14 @@ import { FieldHint, Input, Label } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
 /**
- * Setting a niche's hit threshold, in one place.
+ * Setting a niche's hit rule, in one place.
+ *
+ * BOTH HALVES, IN ONE FORM. A hit is a number of views reached within a set
+ * time of publishing, so the bar and the clock are one decision and are made
+ * together. Splitting them across two controls would let a niche sit with a
+ * threshold and no window — which is the old lifetime comparison, the one that
+ * scored the same channels 5.9% at a week old and 18.8% at 30–90 days with
+ * nothing about the work changing.
  *
  * This used to live inside the Niches page. It moved here because the same
  * control now has to appear in three places — the Niches page, the admin's
@@ -77,7 +87,7 @@ export function NicheThresholdDialog({
  */
 export function SetNicheThresholdButton({
   niche,
-  label = "Set threshold",
+  label = "Set hit rule",
   variant = "secondary",
   size = "sm",
 }: {
@@ -112,29 +122,35 @@ function NicheThresholdForm({
   const [value, setValue] = React.useState(
     niche.hitThreshold === null ? "" : String(niche.hitThreshold),
   );
+  const [windowValue, setWindowValue] = React.useState(
+    niche.hitWindowHours === null ? "" : String(niche.hitWindowHours),
+  );
   const [error, setError] = React.useState<string | null>(null);
-  const save = useUpdateNicheThreshold();
+  const save = useUpdateNicheRule();
 
-  const commit = (hitThreshold: number | null) => {
+  const commit = (hitThreshold: number | null, hitWindowHours: number | null) => {
     save.mutate(
-      { id: niche.id, hitThreshold },
+      { id: niche.id, hitThreshold, hitWindowHours },
       {
         onSuccess: () => {
+          const complete = hitThreshold !== null && hitWindowHours !== null;
           toast.success(
-            hitThreshold === null
-              ? `${niche.name} now has no hit rate threshold`
-              : `${niche.name} hit threshold set to ${formatCompactNumber(hitThreshold)}`,
+            complete
+              ? `${niche.name}: ${formatCompactNumber(hitThreshold)} views within ${formatHitWindow(hitWindowHours)}`
+              : `${niche.name} has no complete hit rule`,
             {
-              description:
-                hitThreshold === null
-                  ? "No hit rate will be reported for it until one is set."
-                  : undefined,
+              // Never silent about an incomplete rule. A niche with a bar and no
+              // clock reports nothing at all, and an admin who half-filled this
+              // form has to be told that rather than discovering it on a chart.
+              description: complete
+                ? undefined
+                : "A hit needs both a number of views and a time to reach it in. No hit rate is reported until both are set.",
             },
           );
           onOpenChange(false);
         },
         onError: (e) =>
-          toast.error("Could not save that threshold", {
+          toast.error("Could not save that hit rule", {
             description: e instanceof Error ? e.message : undefined,
           }),
       },
@@ -145,33 +161,53 @@ function NicheThresholdForm({
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        // An empty field clears the threshold rather than erroring. It no longer
+        // An empty field clears that half rather than erroring. It no longer
         // means "fall back to the account default" — it means the niche has no
         // definition of a hit, and every screen says so.
         const cleaned = value.replace(/[,\s_]/g, "");
-        if (!cleaned) {
-          commit(null);
-          return;
+        const cleanedWindow = windowValue.replace(/[,\s_]/g, "");
+
+        let threshold: number | null = null;
+        if (cleaned) {
+          const parsed = Number(cleaned);
+          if (!Number.isFinite(parsed) || parsed < MIN_THRESHOLD) {
+            setError(
+              `Enter a number of at least ${MIN_THRESHOLD}, or leave it empty to clear the threshold.`,
+            );
+            return;
+          }
+          if (parsed > MAX_THRESHOLD) {
+            setError("That is higher than any video has ever been viewed.");
+            return;
+          }
+          threshold = Math.trunc(parsed);
         }
-        const parsed = Number(cleaned);
-        if (!Number.isFinite(parsed) || parsed < MIN_THRESHOLD) {
-          setError(
-            `Enter a number of at least ${MIN_THRESHOLD}, or leave it empty to clear the threshold.`,
-          );
-          return;
+
+        let windowHours: number | null = null;
+        if (cleanedWindow) {
+          const parsed = Number(cleanedWindow);
+          if (!Number.isFinite(parsed) || parsed < MIN_HIT_WINDOW_HOURS) {
+            setError(
+              `Enter a window of at least ${MIN_HIT_WINDOW_HOURS} hour, or leave it empty to clear it.`,
+            );
+            return;
+          }
+          if (parsed > MAX_HIT_WINDOW_HOURS) {
+            setError("A window longer than a year stops meaning anything.");
+            return;
+          }
+          windowHours = Math.trunc(parsed);
         }
-        if (parsed > MAX_THRESHOLD) {
-          setError("That is higher than any video has ever been viewed.");
-          return;
-        }
-        commit(Math.trunc(parsed));
+
+        commit(threshold, windowHours);
       }}
     >
       <DialogHeader>
-        <DialogTitle>{niche.name} hit threshold</DialogTitle>
+        <DialogTitle>{niche.name} hit rule</DialogTitle>
         <DialogDescription>
-          What counts as a hit in this niche. Selecting {niche.name} anywhere in the app
-          uses this number automatically.
+          What counts as a hit in this niche: the views a Short has to reach, and how long
+          it has to reach them. Selecting {niche.name} anywhere in the app uses this rule
+          automatically.
         </DialogDescription>
       </DialogHeader>
 
@@ -190,13 +226,7 @@ function NicheThresholdForm({
               setError(null);
             }}
           />
-          {error ? (
-            <FieldHint tone="danger">{error}</FieldHint>
-          ) : (
-            <FieldHint>
-              Leave empty to clear it. {UNCONFIGURED_THRESHOLD_EXPLANATION}
-            </FieldHint>
-          )}
+          {error ? <FieldHint tone="danger">{error}</FieldHint> : null}
         </div>
 
         <div className="flex flex-wrap gap-1.5">
@@ -219,6 +249,59 @@ function NicheThresholdForm({
             </button>
           ))}
         </div>
+
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="niche-window">Within</Label>
+          <Input
+            id="niche-window"
+            inputMode="numeric"
+            placeholder="e.g. 168"
+            value={windowValue}
+            invalid={Boolean(error)}
+            onChange={(event) => {
+              setWindowValue(event.target.value);
+              setError(null);
+            }}
+          />
+          <FieldHint>
+            Hours from publishing. A Short that reaches the threshold after this has
+            missed — which is what stops an older Short scoring better than a newer one
+            for no reason but the calendar.
+          </FieldHint>
+        </div>
+
+        <div className="flex flex-wrap gap-1.5">
+          {HIT_WINDOW_PRESETS.map((preset) => (
+            <button
+              key={preset}
+              type="button"
+              onClick={() => {
+                setWindowValue(String(preset));
+                setError(null);
+              }}
+              className={cn(
+                "tnum rounded-md border px-2 py-1 text-[12px] font-medium transition-colors",
+                Number(windowValue) === preset
+                  ? "border-accent bg-accent-subtle text-foreground"
+                  : "border-border text-muted-foreground hover:border-border-strong hover:text-foreground",
+              )}
+            >
+              {formatHitWindow(preset)}
+            </button>
+          ))}
+        </div>
+
+        {/*
+          Said before saving, not after. An admin who fills one field and not the
+          other has configured nothing, and a niche that silently reports no hit
+          rate is exactly the state this product keeps having to explain.
+        */}
+        {Boolean(value.trim()) !== Boolean(windowValue.trim()) ? (
+          <FieldHint tone="danger">
+            A hit needs both halves. With only one of them set, no hit rate is reported
+            for {niche.name}.
+          </FieldHint>
+        ) : null}
       </DialogBody>
 
       <DialogFooter>
@@ -226,7 +309,7 @@ function NicheThresholdForm({
           Cancel
         </Button>
         <Button type="submit" variant="primary" loading={save.isPending}>
-          Save threshold
+          Save hit rule
         </Button>
       </DialogFooter>
     </form>

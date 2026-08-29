@@ -46,12 +46,13 @@ import {
   useCanConfigureThreshold,
 } from "@/components/niches/niche-threshold-dialog";
 import {
-  NeedsThresholdBadge,
+  NeedsRuleBadge,
   NicheByline,
-  needsThresholdConfiguration,
+  needsRuleConfiguration,
   unconfiguredFirst,
 } from "@/components/niches/niche-threshold-status";
 import { NotesPanel } from "@/components/notes/notes-panel";
+import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
 import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
@@ -60,11 +61,11 @@ import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analyt
 import type { NicheDTO } from "@/lib/dto";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
 import {
-  EMPLOYEE_THRESHOLD_NOTICE,
+  EMPLOYEE_HIT_RULE_NOTICE,
   MAX_THRESHOLD,
   MIN_THRESHOLD,
   THRESHOLD_PRESETS,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import { cn } from "@/lib/utils";
 
@@ -97,7 +98,7 @@ export default function NichesPage() {
     [data?.niches],
   );
 
-  const unconfiguredCount = niches.filter(needsThresholdConfiguration).length;
+  const unconfiguredCount = niches.filter(needsRuleConfiguration).length;
 
   const unassigned = React.useMemo(
     () => rows.filter((row) => row.channel.niches.length === 0),
@@ -205,7 +206,7 @@ function NicheCard({
    * from a real measurement.
    */
   const nicheThreshold = niche.hitThreshold;
-  const needsThreshold = needsThresholdConfiguration(niche);
+  const needsThreshold = needsRuleConfiguration(niche);
   const canConfigure = useCanConfigureThreshold();
 
   const [renameOpen, setRenameOpen] = React.useState(false);
@@ -218,28 +219,46 @@ function NicheCard({
     [rows, niche.id],
   );
 
-  // Recomputed at this niche's threshold rather than reusing row.metrics,
-  // which was calculated at whatever the page-level threshold happens to be.
-  // With a null threshold the engine returns `hitRate: null` for every channel,
-  // so `averageHitRate` is null and the card renders "Not configured" — the
-  // volume figures beside it are unaffected and still entirely real.
-  const summary = React.useMemo(
+  // Recomputed at this niche's bar rather than reusing row.metrics, which is
+  // annotated against whatever the page-level bar happens to be.
+  //
+  // THE HIT RATE IS THE SAME EITHER WAY, and that is the change worth noting:
+  // it is counted from the verdicts stored on the Shorts, each decided against
+  // the rule of the niche that governs it, so no threshold passed in here can
+  // move it. What the bar still changes is the shading and the ratio column.
+  // A niche with no rule yields `unscoreable` Shorts, a null rate, and a card
+  // reading "Not configured" — with the volume figures beside it unaffected
+  // and still entirely real.
+  const entries = React.useMemo(
     () =>
-      calculatePortfolioSummary(
-        members.map((row) => ({
-          id: row.channel.id,
-          name: row.channel.displayName,
-          metrics: calculateChannelMetrics({
-            videos: row.videos,
-            range,
-            threshold: nicheThreshold,
-          }),
-        })),
-      ),
+      members.map((row) => ({
+        id: row.channel.id,
+        name: row.channel.displayName,
+        metrics: calculateChannelMetrics({
+          videos: row.videos,
+          range,
+          threshold: nicheThreshold,
+        }),
+      })),
     [members, range, nicheThreshold],
   );
 
+  const summary = React.useMemo(() => calculatePortfolioSummary(entries), [entries]);
+
   const best = summary.topChannel;
+  /*
+   * The top channel's OWN verdicts, so the range printed beside its rate is its
+   * range and not the niche's.
+   *
+   * `topChannel` carries a bare number by design — it is the result of a
+   * ranking, not a measurement anybody should quote — so the summary it was
+   * ranked from is looked back up here rather than widened into the portfolio
+   * shape. Pooling the niche's bounds onto one channel's percentage would be a
+   * new wrong number in place of an incomplete one.
+   */
+  const bestHits = best
+    ? (entries.find((entry) => entry.id === best.id)?.metrics.hits ?? null)
+    : null;
 
   return (
     <>
@@ -321,7 +340,7 @@ function NicheCard({
             both in the same glance. */}
         {needsThreshold ? (
           <div className="relative z-10 mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
-            <NeedsThresholdBadge />
+            <NeedsRuleBadge niche={niche} />
             <NicheByline niche={niche} />
             {canConfigure ? (
               <button
@@ -349,7 +368,7 @@ function NicheCard({
             // measured and came up empty.
             value={
               nicheThreshold === null
-                ? UNCONFIGURED_THRESHOLD_SHORT
+                ? UNCONFIGURED_RULE_SHORT
                 : formatPercent(summary.averageHitRate)
             }
             muted={nicheThreshold === null}
@@ -383,11 +402,17 @@ function NicheCard({
               <div className="text-[10px] uppercase tracking-wider text-subtle-foreground">
                 Top channel
               </div>
-              <div className="truncate text-[12px] text-foreground">
-                {best.name}{" "}
-                <span className="tnum text-subtle-foreground">
+              {/* The name yields the width, not the figures: a single `truncate`
+                  over the whole line would clip the range off the end, which is
+                  the one part of it a reader cannot reconstruct. Compact and
+                  title-only because this footer sits UNDER the card's stretched
+                  link, where an info button would never receive a click. */}
+              <div className="flex min-w-0 items-baseline gap-1.5 text-[12px] text-foreground">
+                <span className="truncate">{best.name}</span>
+                <span className="tnum shrink-0 text-subtle-foreground">
                   {formatPercent(best.hitRate)}
                 </span>
+                {bestHits ? <HitRateBounds summary={bestHits} compact /> : null}
               </div>
             </div>
           ) : (
@@ -448,8 +473,15 @@ function UncategorisedCard({ rows }: { rows: readonly ChannelRow[] }) {
             >
               {row.channel.displayName}
             </Link>
-            <span className="tnum shrink-0 text-[12px] text-muted-foreground">
-              {row.metrics.hitRate === null ? EM_DASH : formatPercent(row.metrics.hitRate)}
+            {/* An unfiled channel is one nobody has characterised yet, so its
+                Shorts are the likeliest in the app to have gone unrecorded.
+                Printing the rate here without the range would be the bare
+                figure at its least defensible. */}
+            <span className="tnum flex shrink-0 items-center gap-1.5 text-[12px] text-muted-foreground">
+              {row.metrics.hits.rate === null
+                ? EM_DASH
+                : formatPercent(row.metrics.hits.rate)}
+              <HitRateBounds summary={row.metrics.hits} compact />
             </span>
           </div>
         ))}
@@ -501,8 +533,8 @@ function UnconfiguredSummary({ count }: { count: number }) {
       <Target className="size-3.5 shrink-0 text-warning" aria-hidden />
       <p className="text-[12px] text-foreground">
         {count === 1
-          ? "1 niche has no hit rate threshold"
-          : `${formatNumber(count)} niches have no hit rate threshold`}
+          ? "1 niche has no complete hit rule"
+          : `${formatNumber(count)} niches have no complete hit rule`}
         <span className="text-muted-foreground">
           {" "}
           — no hit rate is reported for {count === 1 ? "it" : "them"} until an Admin sets
@@ -586,7 +618,7 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
           toast.success(`Niche “${niche.name}” created`, {
             description:
               niche.hitThreshold === null
-                ? "No hit rate threshold yet, so no hit rate is reported for it."
+                ? "No complete hit rule yet — a hit needs both a view threshold and a window — so no hit rate is reported for it."
                 : `A hit in ${niche.name} is ${formatCompactNumber(niche.hitThreshold)} views.`,
           });
           onOpenChange(false);
@@ -672,7 +704,7 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
           /* Friendly and specific, not a permission error. They are allowed to
              be here; the number is simply somebody else's to choose. */
           <p className="rounded-md border border-border bg-surface-sunken px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
-            {EMPLOYEE_THRESHOLD_NOTICE}
+            {EMPLOYEE_HIT_RULE_NOTICE}
           </p>
         )}
       </DialogBody>

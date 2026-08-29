@@ -19,7 +19,11 @@ import { youtubeChannelUrl } from "@/lib/format";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { setChannelNiches } from "./niche-service";
 import { syncChannel, upsertChannel, type SyncOptions } from "./channel-sync";
-import { buildSyncOptions } from "./sync-service";
+import {
+  buildChannelSyncOptions,
+  buildSyncOptions,
+  resolveChannelHitWindows,
+} from "./sync-service";
 import { resolveChannel } from "./youtube";
 import { getCurrentOrgId, getCurrentOrgSettings, getScope } from "./user-service";
 
@@ -43,9 +47,10 @@ import { getCurrentOrgId, getCurrentOrgSettings, getScope } from "./user-service
  * function is now only the "which organization?" half.
  */
 async function syncOptionsForCurrentOrg(
+  channelId: string,
   trigger: SyncOptions["trigger"],
 ): Promise<SyncOptions> {
-  return buildSyncOptions(await getCurrentOrgId(), trigger);
+  return buildChannelSyncOptions(await getCurrentOrgId(), channelId, trigger);
 }
 
 /**
@@ -174,7 +179,10 @@ export async function addChannel(
 
   // Pull history immediately: a channel that appears in the tracker with no
   // numbers reads as broken, even though it is only unsynced.
-  const sync = await syncChannel(channelRow.id, await syncOptionsForCurrentOrg("initial"));
+  const sync = await syncChannel(
+    channelRow.id,
+    await syncOptionsForCurrentOrg(channelRow.id, "initial"),
+  );
 
   const refreshed = await prisma.channel.findUniqueOrThrow({
     where: { id: channelRow.id },
@@ -361,7 +369,10 @@ export async function refreshChannel(channelId: string): Promise<RefreshResultDT
   });
   if (!tracking) throw errors.notFound("channel");
 
-  const result = await syncChannel(channelId, await syncOptionsForCurrentOrg("manual"));
+  const result = await syncChannel(
+    channelId,
+    await syncOptionsForCurrentOrg(channelId, "manual"),
+  );
   return toRefreshResultDTO(result);
 }
 
@@ -378,7 +389,7 @@ export async function refreshStaleChannels(
 ): Promise<RefreshResultDTO[]> {
   const organizationId = await getCurrentOrgId();
   const settings = await getCurrentOrgSettings();
-  const syncOptions = await syncOptionsForCurrentOrg("auto");
+  const syncOptions = await buildSyncOptions(organizationId, "auto");
 
   // The organization's configured staleness threshold, not the environment
   // default — the environment value is only the seed for a new installation.
@@ -406,9 +417,20 @@ export async function refreshStaleChannels(
     take: options.maxChannels ?? 50,
   });
 
+  // Windows for the whole batch in one query rather than one per channel: the
+  // cadence has to be the channel's own, but working that out is a property of
+  // the tracker, not of each refresh.
+  const windows = await resolveChannelHitWindows(
+    organizationId,
+    tracked.map((row) => row.channelId),
+  );
+
   const results: RefreshResultDTO[] = [];
   for (const row of tracked) {
-    const result = await syncChannel(row.channelId, syncOptions);
+    const result = await syncChannel(row.channelId, {
+      ...syncOptions,
+      hitWindowHours: windows.get(row.channelId) ?? null,
+    });
     results.push(toRefreshResultDTO(result));
   }
   return results;

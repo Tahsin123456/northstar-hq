@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { History, Info } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { calculateViewDistribution } from "@/lib/analytics/distribution";
-import type { AnalyticsVideo, DateRange } from "@/lib/analytics/types";
+import type { JudgedVideo, DateRange } from "@/lib/analytics/types";
 import { useNow } from "@/hooks/use-now";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -52,7 +52,7 @@ export function DistributionPanel({
   channelId,
   className,
 }: {
-  shorts: readonly AnalyticsVideo[];
+  shorts: readonly JudgedVideo[];
   range: DateRange;
   /**
    * `null` when the niche in view has no configured threshold. The histogram
@@ -98,7 +98,19 @@ export function DistributionPanel({
       : data.videos;
     if (scoped.length === 0) return null;
 
-    const asAnalytics: AnalyticsVideo[] = scoped.map((v) => ({
+    /*
+     * `hit: null` on every row, and that is the honest value rather than a
+     * placeholder.
+     *
+     * These are RECONSTRUCTED view counts as of a past date, assembled from the
+     * snapshot table so the two distributions can be compared. A verdict is
+     * about a Short, not about a point in time, and the historical endpoint has
+     * no evaluation to return — so every one of these lands in `unscoreable`
+     * and contributes to no rate. Nothing on this comparison reads a tally, so
+     * nothing is lost; what matters is that they cannot be silently counted as
+     * misses by a future reader who does.
+     */
+    const asAnalytics: JudgedVideo[] = scoped.map((v) => ({
       id: v.id,
       youtubeVideoId: v.id,
       title: "",
@@ -108,6 +120,7 @@ export function DistributionPanel({
       comments: null,
       durationSeconds: 0,
       isShort: true,
+      hit: null,
     }));
 
     return calculateViewDistribution(asAnalytics, threshold);

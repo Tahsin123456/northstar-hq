@@ -18,6 +18,7 @@ import { ApiError } from "@/lib/api-client";
 import { formatNumber, pluralize } from "@/lib/format";
 import { useFinalizePeriod } from "@/hooks/use-payroll";
 import { SkippedNichesSummary } from "./skipped-niches-notice";
+import { UnresolvedShortsSummary } from "./unresolved-shorts-notice";
 import { formatRunTotalWithRecords, periodSentence, periodWindowSentence } from "./payroll-format";
 import type { PayrollPeriodDTO } from "@/server/services/payroll-service";
 
@@ -172,6 +173,16 @@ function FinalizeForm({
           they may be about to freeze without knowing it.
         */}
         <SkippedNichesSummary skippedNiches={period.skippedNiches} />
+
+        {/*
+          Under the skipped niches and above the unfinished-month checkbox. A
+          missing rule is somebody's mistake and comes first; a still-open
+          window is the rule working as intended, and the question it raises —
+          "is it worth waiting?" — is the same question the checkbox below asks
+          in a different form. Read in this order they build one argument
+          instead of three warnings.
+        */}
+        <UnresolvedShortsSummary unresolved={period.unresolved} />
 
         {needsForce ? (
           <div className="flex gap-3 rounded-lg border border-warning/30 bg-warning-subtle px-4 py-3">

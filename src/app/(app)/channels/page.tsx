@@ -174,11 +174,6 @@ export default function ChannelsPage() {
 
 function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }) {
   const { channel, metrics } = row;
-  // Passed through so the card can say "Not configured" rather than the em dash
-  // it would otherwise show for a niche with no threshold — an em dash here
-  // means "no Shorts in period", which is a different and untrue claim.
-  const { threshold } = useFilters();
-
   return (
     <Card className="group relative flex flex-col p-4 transition-colors duration-150 hover:border-border-strong">
       <div className="flex items-start gap-3">
@@ -233,15 +228,15 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
       <div className="mt-4 grid grid-cols-[1.2fr_1fr_1fr] gap-3 border-t border-border pt-3">
         <div className="pointer-events-none">
           <HitRateValue
-            hitRate={metrics.hitRate}
-            hitCount={metrics.hitCount}
+            summary={metrics.hits}
             totalShorts={metrics.totalShorts}
-            // `null` when unconfigured, `undefined` when configured: this card
-            // never printed the threshold beside its fraction and still should
-            // not, but it does have to know when there is no threshold at all.
-            threshold={threshold === null ? null : undefined}
             size="sm"
             showBar
+            // A card in a grid. The exclusions are the channel page's job;
+            // three extra counts here would crowd out the one number the card
+            // exists to show, and the bounds still appear beside the figure
+            // wherever the unrecorded population makes it ambiguous.
+            showExclusions={false}
           />
         </div>
 

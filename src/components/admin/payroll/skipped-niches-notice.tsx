@@ -8,7 +8,20 @@ import { SetNicheThresholdButton } from "@/components/niches/niche-threshold-dia
 import { useNicheList } from "@/hooks/use-niches";
 import { formatNumber, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import type { MissingHitRuleHalf } from "@/lib/analytics/hit-rate";
 import type { PayrollSkippedNicheDTO } from "@/server/services/payroll-service";
+
+/**
+ * Which field to go and fill in.
+ *
+ * The half is named rather than described, because the point of this notice is
+ * that somebody can close the gap without asking anybody what it means.
+ */
+function missingHalfLabel(missing: MissingHitRuleHalf): string {
+  if (missing === "threshold") return "hit threshold";
+  if (missing === "window") return "hit window";
+  return "hit threshold or window";
+}
 
 /**
  * "These Shorts were not counted, and here is the setting that would count
@@ -17,13 +30,22 @@ import type { PayrollSkippedNicheDTO } from "@/server/services/payroll-service";
  * ─────────────────────────────────────────────────────────────────────────────
  * WHY A PAYROLL SCREEN CARRIES A CONFIGURATION WARNING AT ALL
  * ─────────────────────────────────────────────────────────────────────────────
- * A niche with no hit threshold cannot produce a hit — the dashboard has always
- * said so, and payroll now agrees. But payroll is the one consumer where that
- * silence costs somebody money: every Short in an unconfigured niche used to be
- * judged against the organization default and paid a bonus, and it no longer
- * is. The difference is real pay, and a reduction that arrives with no
+ * A niche without a complete hit rule cannot produce a hit — the dashboard has
+ * always said so, and payroll now agrees. But payroll is the one consumer where
+ * that silence costs somebody money: every Short in an unconfigured niche used
+ * to be judged against the organization default and paid a bonus, and it no
+ * longer is. The difference is real pay, and a reduction that arrives with no
  * explanation is indistinguishable from a bug — the person losing it cannot
  * tell, and neither can the admin approving the run.
+ *
+ * A RULE NOW HAS TWO HALVES, AND THIS NAMES THE MISSING ONE
+ * A hit is a threshold reached inside a window. A niche with a threshold and no
+ * window is exactly as unscoreable as one with neither — judging it on lifetime
+ * views is the age-biased comparison the whole change removes — but it does not
+ * LOOK unconfigured on the niches screen, which is precisely why it has to be
+ * named here. "Set a threshold" and "set a window" are two different fields,
+ * and an admin told only that something is unconfigured has to go and find out
+ * which.
  *
  * So this sits at the top of the page body, above the table: the earliest
  * point on the last screen where the fix is still cheap, since after
@@ -101,10 +123,11 @@ function SkippedNichesPanel({
             counted for hit bonuses
           </p>
           <p className="mt-1 max-w-prose text-[12px] leading-relaxed text-muted-foreground">
-            {skippedNiches.length === 1 ? "This niche has" : "These niches have"} no
-            hit rate threshold, so there is no definition of a hit to judge their
-            Shorts against and no bonus can be paid for them. Nobody&rsquo;s salary
-            is affected — only the hit bonus.
+            A hit is a view threshold reached within a set window of publishing.{" "}
+            {skippedNiches.length === 1 ? "This niche is" : "These niches are"}{" "}
+            missing half of that rule or all of it, so there is no definition of a
+            hit to judge their Shorts against and no bonus can be paid for them.
+            Nobody&rsquo;s salary is affected — only the hit bonus.
           </p>
         </div>
       </div>
@@ -122,7 +145,8 @@ function SkippedNichesPanel({
                 <span className="font-medium">{niche.nicheName}</span>
                 <span className="text-muted-foreground">
                   {" "}
-                  — {formatNumber(niche.shortCount)}{" "}
+                  — no {missingHalfLabel(niche.missing)} ·{" "}
+                  {formatNumber(niche.shortCount)}{" "}
                   {pluralize(niche.shortCount, "Short")} not considered
                 </span>
               </span>
@@ -147,9 +171,9 @@ function SkippedNichesPanel({
           retroactive half is always the true half.
         */}
         <p className="min-w-0 flex-1 text-[12px] leading-relaxed text-muted-foreground">
-          Set a threshold and this run recounts against it the next time it is
+          Complete the rule and this run recounts against it the next time it is
           opened, so these Shorts are included before the month is frozen. Once
-          the period is finalized the figures stop moving and a threshold set
+          the period is finalized the figures stop moving and a rule completed
           afterwards only counts towards later periods.
         </p>
         <Button variant="secondary" size="sm" asChild>
@@ -191,20 +215,21 @@ export function SkippedNichesSummary({
           {formatNumber(skippedNiches.length)}{" "}
           {pluralize(skippedNiches.length, "niche")} will be recorded as
           earning no hit bonus, because{" "}
-          {skippedNiches.length === 1 ? "that niche has" : "those niches have"} no
-          hit rate threshold to judge them against.
+          {skippedNiches.length === 1 ? "that niche is" : "those niches are"}{" "}
+          missing part of the rule that decides a hit.
         </p>
         <ul className="flex flex-col gap-0.5 text-[12px] text-muted-foreground">
           {skippedNiches.map((niche) => (
             <li key={niche.nicheId}>
-              <span className="text-foreground">{niche.nicheName}</span> —{" "}
-              {formatNumber(niche.shortCount)} {pluralize(niche.shortCount, "Short")}
+              <span className="text-foreground">{niche.nicheName}</span> — no{" "}
+              {missingHalfLabel(niche.missing)} · {formatNumber(niche.shortCount)}{" "}
+              {pluralize(niche.shortCount, "Short")}
             </li>
           ))}
         </ul>
         <p className="text-[12px] leading-relaxed text-muted-foreground">
-          Freezing the month records that as the answer. Cancel and set the
-          thresholds first if those Shorts should have paid a bonus — once this
+          Freezing the month records that as the answer. Cancel and complete
+          those rules first if those Shorts should have paid a bonus — once this
           period is finalized, setting them changes nothing about it.
         </p>
       </div>

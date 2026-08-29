@@ -1,7 +1,7 @@
-import { calculateHitRate, countHits } from "./hit-rate";
+import { calculateHitRate, tallyShorts, type HitRateSummary } from "./hit-rate";
 import { getShortsInDateRange } from "./filters";
 import { mean, median, roundTo, sum } from "./stats";
-import type { AnalyticsVideo, DateRange } from "./types";
+import type { DateRange, JudgedVideo } from "./types";
 
 /**
  * ==========================================================================
@@ -55,21 +55,26 @@ import type { AnalyticsVideo, DateRange } from "./types";
  * classified or it is not — so `untaggedShorts + taggedShorts === totalShorts`
  * holds exactly, and that is the only additive identity on this whole shape.
  *
- * A HIT IS DEFINED IN EXACTLY ONE PLACE.
+ * A HIT IS DEFINED IN EXACTLY ONE PLACE, AND IT IS NOT HERE.
  *
- * `countHits` / `calculateHitRate` from `./hit-rate`, which is the same pair
- * `calculateChannelMetrics` uses. There is one definition of a hit in this
- * codebase and this is not a second one — if the threshold rule changes, it
- * changes here for free.
+ * A hit is a bar reached inside a window; the verdict is decided once by
+ * `evaluateHit` and materialised per Short on `VideoHitEvaluation`. This table
+ * COUNTS those verdicts — `tallyShorts` then `calculateHitRate`, the same pair
+ * `calculateChannelMetrics` uses — and contains no comparison of its own
+ * between a view count and a threshold. It used to count lifetime views
+ * against the bar, with no clock anywhere in it, and a tag whose Shorts were
+ * all published last month scored near zero against one whose Shorts were two
+ * years old.
  *
- * AND AN UNCONFIGURED THRESHOLD YIELDS `null`, NEVER `0`.
+ * AND AN UNSCOREABLE ROW YIELDS `null`, NEVER `0`.
  *
- * Copied in spirit from `calculateChannelMetrics`, for the same reason set out
- * there: `0%` asserts "these Shorts were measured and none of them hit", which
- * is a completely different claim from "nobody has said what a hit is in this
- * niche". Everything that does not depend on a threshold — counts, medians,
- * means, total views — is still computed in full, because none of it was ever
- * in doubt. The UI renders the `null` as "Not configured".
+ * Same reason as everywhere else: `0%` asserts "these Shorts were judged and
+ * none of them hit", which is a completely different claim from "none of these
+ * Shorts has a verdict yet". A row whose Shorts are all pending, all unknown or
+ * all in unconfigured niches reports `rate: null` and carries the counts that
+ * say which. Everything that never depended on a verdict — counts, medians,
+ * means, total views — is computed in full, because none of it was ever in
+ * doubt.
  */
 
 /**
@@ -87,7 +92,7 @@ import type { AnalyticsVideo, DateRange } from "./types";
  * that quietly reports the wrong library; the caller resolves first, which it
  * can only do where the channel is in scope.
  */
-export interface TaggedVideo extends AnalyticsVideo {
+export interface TaggedVideo extends JudgedVideo {
   /** `(channel's tags − exclusions) ∪ manual tags`, from `resolveContentTypes`. */
   readonly effectiveContentTypeIds: readonly string[];
 }
@@ -121,12 +126,16 @@ export interface ContentTypePerformanceRow {
   readonly medianViews: number | null;
   readonly meanViews: number | null;
 
-  readonly hitCount: number;
   /**
-   * Percentage 0..100, or `null` when there is no threshold to judge against.
-   * Never `0` for want of a threshold — see the header.
+   * The verdicts of this row's Shorts, the rate over the judged ones, and what
+   * that rate left out.
+   *
+   * The exclusions matter more here than almost anywhere: content types are how
+   * a team decides what to make next, and "Funny Memes: 40%" over four judged
+   * Shorts with thirty pending is a very different instruction from the same
+   * number over forty.
    */
-  readonly hitRate: number | null;
+  readonly hits: HitRateSummary;
 
   /**
    * This row's Shorts as a share of every Short in the window, 0..1.
@@ -140,6 +149,7 @@ export interface ContentTypePerformanceRow {
 
 export interface ContentTypePerformance {
   readonly range: DateRange;
+  /** The display bar only. It decides nothing here; see the header. */
   readonly threshold: number | null;
 
   /**
@@ -172,7 +182,12 @@ export interface ContentTypePerformanceInput {
   /** Shorts and long-form alike; the window and the Shorts filter are applied here. */
   readonly videos: readonly TaggedVideo[];
   readonly range: DateRange;
-  /** `null` when the active niche has no configured threshold. */
+  /**
+   * The display bar, or `null` when the active niche has none configured.
+   *
+   * Carried through onto the result so a caller can label the table, and used
+   * for nothing else — no row's rate depends on it.
+   */
   readonly threshold: number | null;
   /**
    * The organization's tags, for names and accents.
@@ -188,10 +203,10 @@ export interface ContentTypePerformanceInput {
 }
 
 /**
- * Performance by content type, over one window at one threshold.
+ * Performance by content type, over one window.
  *
- * Pure and total, like the rest of this directory: hand it videos, a range, a
- * threshold and a catalogue, and it returns a complete set of rows with `null`
+ * Pure and total, like the rest of this directory: hand it judged videos, a
+ * range and a catalogue, and it returns a complete set of rows with `null`
  * wherever a statistic genuinely does not exist.
  *
  * Single pass over the videos, then one pass per bucket. A dashboard holds a
@@ -209,8 +224,8 @@ export function calculateContentTypePerformance(
 
   const known = new Map(contentTypes.map((type) => [type.id, type]));
 
-  const buckets = new Map<string, AnalyticsVideo[]>();
-  const untagged: AnalyticsVideo[] = [];
+  const buckets = new Map<string, JudgedVideo[]>();
+  const untagged: JudgedVideo[] = [];
   let taggedShorts = 0;
   let taggedAssignments = 0;
 
@@ -257,7 +272,6 @@ export function calculateContentTypePerformance(
           isUntagged: false,
         },
         bucketShorts,
-        threshold,
         totalShorts,
       ),
     );
@@ -283,7 +297,6 @@ export function calculateContentTypePerformance(
           isUntagged: true,
         },
         untagged,
-        threshold,
         totalShorts,
       ),
     );
@@ -317,12 +330,10 @@ function buildRow(
     ContentTypePerformanceRow,
     "contentTypeId" | "name" | "colorIndex" | "isUntagged"
   >,
-  shorts: readonly AnalyticsVideo[],
-  threshold: number | null,
+  shorts: readonly JudgedVideo[],
   totalShorts: number,
 ): ContentTypePerformanceRow {
   const views = shorts.map((short) => short.views);
-  const hitCount = countHits(shorts, threshold);
   const medianViews = median(views);
   const meanViews = mean(views);
 
@@ -332,12 +343,12 @@ function buildRow(
     totalViews: sum(views),
     medianViews: medianViews === null ? null : roundTo(medianViews, 0),
     meanViews: meanViews === null ? null : roundTo(meanViews, 0),
-    hitCount,
-    // The `threshold === null` guard is the whole point, and it is spelled out
-    // rather than left to `calculateHitRate`: that function's `null` means "no
-    // Shorts to divide by", and collapsing the two would make an unconfigured
-    // niche indistinguishable from an empty row.
-    hitRate: threshold === null ? null : calculateHitRate(hitCount, shorts.length),
+    // `calculateHitRate` already returns `null` rather than `0` on an empty
+    // denominator, and under the new rule the two cases that produce one are
+    // "no Shorts here" and "none of these Shorts has been decided". The tally
+    // it comes back with is how a reader tells them apart, which is why the row
+    // carries the whole summary rather than a bare percentage.
+    hits: calculateHitRate(tallyShorts(shorts)),
     shareOfShorts: totalShorts > 0 ? shorts.length / totalShorts : 0,
   };
 }

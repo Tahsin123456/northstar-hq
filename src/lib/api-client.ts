@@ -351,14 +351,21 @@ export const api = {
   renameNiche: (id: string, name: string): Promise<{ niche: NicheDTO }> =>
     request(`/api/niches/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
 
-  /** `null` clears the threshold, leaving the niche unconfigured. */
-  setNicheThreshold: (
+  /**
+   * Both halves of the rule: the bar and the clock.
+   *
+   * Either may be omitted — an absent key is not a write, so the dashboard's
+   * threshold control can save a number without touching the window. Either may
+   * be `null`, which CLEARS that half and leaves the niche unable to score
+   * anything until it is set again. Half a rule is not a rule.
+   */
+  setNicheRule: (
     id: string,
-    hitThreshold: number | null,
+    rule: { hitThreshold?: number | null; hitWindowHours?: number | null },
   ): Promise<{ niche: NicheDTO }> =>
     request(`/api/niches/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ hitThreshold }),
+      body: JSON.stringify(rule),
     }),
 
   deleteNiche: (id: string): Promise<{ unassignedChannels: number }> =>

@@ -26,7 +26,16 @@ import {
 } from "@/lib/filters-store";
 
 /**
- * Global analysis filters: which period, which niche, and what counts as a hit.
+ * Global analysis filters: which period, which niche, and which view bar the
+ * tables are explored with.
+ *
+ * THAT LAST ONE NO LONGER DECIDES ANYTHING. It used to be "what counts as a
+ * hit", and every rate on every screen moved with it. A hit is now a niche's
+ * threshold reached inside that niche's window, decided once per Short by the
+ * evaluator and stored — so this control shades rows, scales the "vs bar"
+ * column and marks the histogram, and moves no hit rate anywhere. The
+ * vocabulary below still says "threshold" because that is the column it writes
+ * to on `Niche`; what changed is what reads it.
  *
  * THRESHOLD RESOLUTION
  * `threshold` is *derived*, not stored:

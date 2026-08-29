@@ -11,8 +11,8 @@ import {
 } from "lucide-react";
 import type { EvaluatedShort } from "@/lib/analytics/types";
 import {
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_EXPLANATION,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import {
   EM_DASH,
@@ -24,7 +24,6 @@ import {
   youtubeShortsUrl,
   youtubeThumbnailUrl,
 } from "@/lib/format";
-import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -35,7 +34,23 @@ import {
 import { useOptionalSession } from "@/components/providers/session-provider";
 import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
 import { EMPTY_RESOLUTION, type ContentTypeResolution } from "@/lib/content-types/resolve";
+import {
+  hitContributionOf,
+  tallyShorts,
+} from "@/lib/analytics/hit-rate";
+import { HitOutcomeBadge } from "@/components/metrics/hit-outcome-badge";
 import { cn } from "@/lib/utils";
+
+/**
+ * The tabs above the table.
+ *
+ * Three of the four are verdicts and the fourth is everything that has not
+ * reached one. "Not decided" deliberately pools pending, unrecorded and
+ * unscoreable rather than offering three more tabs: they are three reasons for
+ * the same fact — this Short is in nobody's hit rate — and the badge on each
+ * row says which reason applies.
+ */
+type ShortsFilter = "all" | "hit" | "miss" | "undecided";
 
 type ShortsSortKey = "publishedAt" | "views" | "likes" | "comments" | "duration";
 type Direction = "asc" | "desc";
@@ -66,16 +81,20 @@ export function ShortsTable({
 }: {
   shorts: readonly EvaluatedShort[];
   /**
-   * `null` when the niche in view has no configured threshold. Every Short is
-   * then a non-hit with no ratio, and the "vs threshold" column has nothing to
-   * be a ratio of — see the cell renderer below.
+   * The view bar the screen is exploring with, or `null` when the niche in view
+   * has none configured.
+   *
+   * A LENS, NOT A DEFINITION. It shades the views column and scales the "vs
+   * bar" ratio; the Outcome column beside it reads each Short's stored verdict
+   * and moving this control changes none of them. `null` leaves the ratio
+   * column with nothing to be a ratio of — see the cell renderer below.
    */
   threshold: number | null;
   className?: string;
 }) {
   const [sortKey, setSortKey] = React.useState<ShortsSortKey>("publishedAt");
   const [direction, setDirection] = React.useState<Direction>("desc");
-  const [filter, setFilter] = React.useState<"all" | "hits" | "misses">("all");
+  const [filter, setFilter] = React.useState<ShortsFilter>("all");
   const [selected, setSelected] = React.useState<ReadonlySet<string>>(() => new Set());
 
   const session = useOptionalSession();
@@ -87,10 +106,24 @@ export function ShortsTable({
 
   const sorted = React.useMemo(() => {
     const factor = direction === "asc" ? 1 : -1;
+    /*
+     * FILTERED ON THE VERDICT, not on the bar.
+     *
+     * These tabs used to read "Hits" and "Below threshold" and split the table
+     * by a lifetime comparison — so a Short that crossed the line two years
+     * late sat under "Hits", and one still four days into its window sat under
+     * "Below threshold" as though it had already failed. The undecided Shorts
+     * now get a tab of their own instead of being filed under the answer they
+     * have not reached.
+     */
     const subset =
       filter === "all"
         ? [...shorts]
-        : shorts.filter((s) => (filter === "hits" ? s.isHit : !s.isHit));
+        : shorts.filter((s) => {
+            const contribution = hitContributionOf(s.hit);
+            if (filter === "undecided") return contribution !== "hit" && contribution !== "miss";
+            return contribution === filter;
+          });
 
     return subset.sort((a, b) => {
       const value = (short: EvaluatedShort): number => {
@@ -121,7 +154,10 @@ export function ShortsTable({
     }
   };
 
-  const hitCount = shorts.filter((s) => s.isHit).length;
+  // One pass over the verdicts for every tab count, so the tabs and the rows
+  // can never disagree about what a Short is.
+  const tally = tallyShorts(shorts);
+  const undecidedCount = tally.pending + tally.unknown + tally.unscoreable;
 
   const selectedIds = React.useMemo(
     () => sorted.filter((short) => selected.has(short.id)).map((short) => short.id),
@@ -188,8 +224,9 @@ export function ShortsTable({
           {(
             [
               { id: "all", label: "All", count: shorts.length },
-              { id: "hits", label: "Hits", count: hitCount },
-              { id: "misses", label: "Below threshold", count: shorts.length - hitCount },
+              { id: "hit", label: "Hits", count: tally.hits },
+              { id: "miss", label: "Misses", count: tally.misses },
+              { id: "undecided", label: "Not decided", count: undecidedCount },
             ] as const
           ).map((option) => (
             <button
@@ -263,7 +300,7 @@ export function ShortsTable({
                 className="w-[92px]"
               />
               <SortHeader
-                label="vs threshold"
+                label="vs bar"
                 active={false}
                 direction={direction}
                 onClick={() => toggleSort("views")}
@@ -271,8 +308,8 @@ export function ShortsTable({
                 className="hidden w-[96px] md:table-cell"
                 tip={
                   threshold === null
-                    ? UNCONFIGURED_THRESHOLD_EXPLANATION
-                    : `Views as a multiple of the ${formatCompactNumber(threshold)} threshold. 1.0× is exactly at the line.`
+                    ? UNCONFIGURED_RULE_EXPLANATION
+                    : `LIFETIME views as a multiple of the ${formatCompactNumber(threshold)} bar above. 1.0× is exactly at the line. This is not how close the Short came to being a hit — that is measured at the window's close, and it is in the Outcome tooltip where a reading exists.`
                 }
               />
               <SortHeader
@@ -348,8 +385,11 @@ function ShortRow({
     <tr
       className={cn(
         "group border-b border-border transition-colors duration-100 last:border-b-0 hover:bg-surface-hover/50",
-        // Leading rule marks a hit without tinting the whole row.
-        short.isHit && "shadow-[inset_2px_0_0_0_var(--success)]",
+        // Leading rule marks a HIT — the stored verdict, not the bar. It used
+        // to key on lifetime views, which put the green edge on every Short
+        // that eventually crawled over the line.
+        hitContributionOf(short.hit) === "hit" &&
+          "shadow-[inset_2px_0_0_0_var(--success)]",
         isSelected && "bg-accent-subtle",
       )}
     >
@@ -413,7 +453,7 @@ function ShortRow({
         <span
           className={cn(
             "tnum text-[13px]",
-            short.isHit ? "font-medium text-foreground" : "text-muted-foreground",
+            short.clearsThreshold ? "font-medium text-foreground" : "text-muted-foreground",
           )}
         >
           {formatCompactNumber(short.views)}
@@ -424,9 +464,9 @@ function ShortRow({
         {/* No threshold, no ratio. `formatThresholdRatio(null)` would render an
             em dash, which in this column reads as "we could not work it out"
             rather than "there is nothing to work out". */}
-        {short.thresholdRatio === null ? (
+        {short.lifetimeRatio === null ? (
           <span className="text-[11px] text-subtle-foreground">
-            {UNCONFIGURED_THRESHOLD_SHORT}
+            {UNCONFIGURED_RULE_SHORT}
           </span>
         ) : (
           <Tooltip>
@@ -434,21 +474,33 @@ function ShortRow({
               <span
                 className={cn(
                   "tnum text-[12px]",
-                  short.thresholdRatio >= 1
+                  short.lifetimeRatio >= 1
                     ? "text-success"
-                    : short.thresholdRatio >= 0.75
+                    : short.lifetimeRatio >= 0.75
                       ? "text-warning"
                       : "text-subtle-foreground",
                 )}
               >
-                {formatThresholdRatio(short.thresholdRatio)}
+                {formatThresholdRatio(short.lifetimeRatio)}
               </span>
             </TooltipTrigger>
-            <TooltipContent>
-              {formatNumber(short.views)} views
-              {short.thresholdRatio < 1
-                ? ` — ${formatPercentShort(1 - short.thresholdRatio)} short of the threshold`
+            <TooltipContent className="max-w-[260px]">
+              {formatNumber(short.views)} lifetime views
+              {short.lifetimeRatio < 1
+                ? ` — ${formatPercentShort(1 - short.lifetimeRatio)} short of the bar`
                 : ""}
+              {/* The number the RULE reads, where there is one. Most Shorts on
+                  this account have no reading from inside their window, and the
+                  honest thing is to say nothing rather than let the lifetime
+                  figure above be mistaken for it. */}
+              {short.windowRatio !== null ? (
+                <>
+                  {" "}
+                  At its window&rsquo;s close it was{" "}
+                  {formatThresholdRatio(short.windowRatio)} of the bar that
+                  judged it.
+                </>
+              ) : null}
             </TooltipContent>
           </Tooltip>
         )}
@@ -487,13 +539,14 @@ function ShortRow({
       </td>
 
       <td className="px-4 py-2 text-right">
-        {short.isHit ? (
-          <Badge variant="hit" size="sm">
-            Hit
-          </Badge>
-        ) : (
-          <span className="text-[12px] text-subtle-foreground">{EM_DASH}</span>
-        )}
+        {/* THE STORED VERDICT. This cell used to read "Hit" whenever lifetime
+            views cleared the bar, which is the central bug of the old rule
+            rendered one row at a time. */}
+        <HitOutcomeBadge
+          verdict={short.hit}
+          publishedAt={short.publishedAt}
+          lifetimeViews={short.views}
+        />
       </td>
     </tr>
   );

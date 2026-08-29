@@ -13,7 +13,6 @@ import {
   YAxis,
 } from "recharts";
 import type { ViewDistributionBin } from "@/lib/analytics/types";
-import { UNCONFIGURED_THRESHOLD_LABEL } from "@/lib/analytics/constants";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import {
   AXIS_TICK,
@@ -102,7 +101,7 @@ export function DistributionChart({
 
   const labels = bins.map((b) => b.label);
   const yWidth = categoryAxisWidth(labels);
-  const anyHitBucket = bins.some((b) => b.isHitBucket);
+  const anyBucketAboveBar = bins.some((b) => b.isAboveThreshold);
 
   // A fixed row height keeps every bucket the same visual weight and lets the
   // chart grow with the data instead of squeezing ten rows into a fixed box.
@@ -190,12 +189,15 @@ export function DistributionChart({
               {bins.map((bin) => (
                 <Cell
                   key={bin.id}
-                  // Emerald above the threshold, neutral below. Two states, no
-                  // gradient — the reader only needs "hit or not".
+                  // Emerald above the bar, neutral below. Two states, no
+                  // gradient — this marks where the bar falls on a LIFETIME
+                  // axis and nothing more. It is not a hit zone: a Short in the
+                  // top bucket may have taken three years to get there, which
+                  // is a miss under the rule.
                   fill={
                     comparing
                       ? "var(--chart-1)"
-                      : bin.isHitBucket
+                      : bin.isAboveThreshold
                         ? "var(--chart-2)"
                         : "var(--border-strong)"
                   }
@@ -229,18 +231,33 @@ export function DistributionChart({
               comparable even when the volumes are not.
             </>
           ) : threshold === null ? (
-            /* The shape is real and worth reading; the verdict is what is
-               missing. Naming a threshold here would invent one. */
+            /* The shape is real and worth reading; the bar is what is missing.
+               Naming one here would invent it. */
             <>
-              {UNCONFIGURED_THRESHOLD_LABEL}, so no bucket is marked as a hit zone.
-              The distribution itself is unaffected.
+              No view bar is set, so no bucket is highlighted. The distribution
+              itself is unaffected.
             </>
-          ) : anyHitBucket ? (
-            <>Buckets at or above {formatCompactNumber(threshold)} views count as hits.</>
+          ) : anyBucketAboveBar ? (
+            <>
+              {/* THIS AXIS IS LIFETIME VIEWS AND THE CAPTION HAS TO SAY SO.
+                  It used to read "buckets at or above N count as hits", which
+                  was true under the old rule and is now the most misleading
+                  sentence that could sit under this chart: a Short reaches the
+                  top bucket whether it took two days or two years, and only one
+                  of those is a hit. The views-at-window histogram — the one
+                  that WOULD show hits — is not computable on this account: only
+                  59 of 1,904 Shorts have a reading captured inside their
+                  window, so it would be a picture of 3% of the library wearing
+                  the library&rsquo;s name. See calculateViewDistribution. */}
+              Lifetime views. Buckets at or above{" "}
+              {formatCompactNumber(threshold)} are highlighted — that marks the
+              bar, not a hit: a hit is that bar reached inside the niche&rsquo;s
+              hit window.
+            </>
           ) : (
             <>
-              The current threshold of {formatCompactNumber(threshold)} views sits above
-              every bucket shown.
+              Lifetime views. The current bar of {formatCompactNumber(threshold)}{" "}
+              views sits above every bucket shown.
             </>
           )}
         </span>
@@ -310,9 +327,25 @@ function DistributionTooltip({
         ) : null}
       </div>
 
-      {bin.isHitBucket ? (
-        <div className="mt-1.5 border-t border-border pt-1.5 text-[10px] uppercase tracking-wide text-success">
-          Counts as a hit
+      {/* What the bucket's Shorts were actually JUDGED to be — the part of
+          "where do the hits sit" that is answerable from what the database
+          knows. A bucket of forty Shorts well over the bar, of which two are
+          hits and thirty-eight were never recorded, is a specific and important
+          thing to be able to say, and the height of the bar cannot say it. */}
+      {bin.tally.hits > 0 || bin.tally.misses > 0 ? (
+        <div className="mt-1.5 border-t border-border pt-1.5">
+          <Row
+            label="Judged"
+            value={`${bin.tally.hits} hit · ${bin.tally.misses} miss`}
+          />
+        </div>
+      ) : null}
+      {bin.tally.pending > 0 || bin.tally.unknown > 0 || bin.tally.unscoreable > 0 ? (
+        <div className="mt-1 text-[10px] leading-relaxed text-subtle-foreground">
+          Not in any rate:
+          {bin.tally.pending > 0 ? ` ${bin.tally.pending} still in window` : ""}
+          {bin.tally.unknown > 0 ? ` ${bin.tally.unknown} unrecorded` : ""}
+          {bin.tally.unscoreable > 0 ? ` ${bin.tally.unscoreable} no rule` : ""}
         </div>
       ) : null}
     </div>

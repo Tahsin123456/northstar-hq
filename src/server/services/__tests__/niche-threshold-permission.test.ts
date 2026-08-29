@@ -37,6 +37,15 @@ const mocks = vi.hoisted(() => ({
   count: vi.fn(),
   create: vi.fn(),
   update: vi.fn(),
+  /** Every niche in the organization, as the re-evaluation step reads them. */
+  nicheFindMany: vi.fn(),
+  /**
+   * The tracked channels the re-evaluation would walk. Returning none keeps
+   * this file about permissions — what is asserted below is that the
+   * re-evaluation was ASKED FOR, not what it decided, which
+   * `hit-evaluation.test.ts` covers in full.
+   */
+  trackedFindMany: vi.fn(),
   /** The permission set `requireActor` reports for this test's caller. */
   permissions: new Set<string>(),
 }));
@@ -49,7 +58,9 @@ vi.mock("@/server/db", () => ({
       count: mocks.count,
       create: mocks.create,
       update: mocks.update,
+      findMany: mocks.nicheFindMany,
     },
+    trackedChannel: { findMany: mocks.trackedFindMany },
   },
 }));
 
@@ -89,6 +100,7 @@ function nicheRow(overrides: Record<string, unknown> = {}) {
     slug: "gta",
     colorIndex: 0,
     hitThreshold: null,
+    hitWindowHours: null,
     sortOrder: 0,
     createdAt: new Date("2026-08-01T00:00:00.000Z"),
     updatedAt: new Date("2026-08-01T00:00:00.000Z"),
@@ -102,6 +114,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.findUnique.mockResolvedValue(null); // no slug clash
   mocks.count.mockResolvedValue(0);
+  mocks.nicheFindMany.mockResolvedValue([]);
+  mocks.trackedFindMany.mockResolvedValue([]);
   mocks.create.mockImplementation(async ({ data }: { data: Record<string, unknown> }) =>
     nicheRow(data),
   );
@@ -198,5 +212,100 @@ describe("changing a threshold later", () => {
 
     await updateNiche("niche_gta", { hitThreshold: null });
     expect(mocks.update.mock.calls[1][0].data.hitThreshold).toBeNull();
+  });
+});
+
+/**
+ * THE WINDOW IS THE SAME DECISION AS THE THRESHOLD.
+ *
+ * "1M views ever" and "1M views in 48 hours" are different definitions of a
+ * hit, and the second is the bigger claim. Guarding the number and leaving the
+ * clock open would let somebody redefine every chart and every bonus by editing
+ * the half nobody thought to protect.
+ */
+describe("the hit window is guarded exactly as the threshold is", () => {
+  it("refuses an employee who sends a window", async () => {
+    signInAs("head_of_shorts");
+
+    await expect(
+      updateNiche("niche_gta", { hitWindowHours: 168 }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an employee creating a niche with one", async () => {
+    signInAs("head_of_shorts");
+
+    await expect(
+      createNiche({ name: "Red Dead", hitWindowHours: 48 }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it("lets an admin set both halves at once, which is how a rule is made", async () => {
+    signInAs("admin");
+
+    await updateNiche("niche_gta", { hitThreshold: 500_000, hitWindowHours: 48 });
+
+    expect(mocks.update.mock.calls[0][0].data).toMatchObject({
+      hitThreshold: 500_000,
+      hitWindowHours: 48,
+    });
+  });
+
+  it("creates a niche unconfigured on BOTH halves when nobody sets them", async () => {
+    signInAs("head_of_shorts");
+
+    await createNiche({ name: "Red Dead" });
+
+    // Not "inherit the default window" — there is no default window, because
+    // nobody has ever chosen one. Half a rule is not a rule.
+    expect(mocks.create.mock.calls[0][0].data.hitWindowHours).toBeNull();
+  });
+});
+
+/**
+ * CHANGING THE RULE RE-DECIDES WHAT IT JUDGED.
+ *
+ * Stored verdicts are answers to the question the old rule asked. Leaving them
+ * after an admin moves the bar would mean a dashboard showing one definition
+ * and a payslip quoting another.
+ */
+describe("re-evaluation after a rule change", () => {
+  it("re-decides the niche's Shorts when the threshold moves", async () => {
+    signInAs("admin");
+
+    await updateNiche("niche_gta", { hitThreshold: 750_000 });
+
+    expect(mocks.trackedFindMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-decides them when the window moves", async () => {
+    signInAs("admin");
+
+    await updateNiche("niche_gta", { hitWindowHours: 168 });
+
+    expect(mocks.trackedFindMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-decide anything for a rename", async () => {
+    signInAs("head_of_shorts");
+
+    await updateNiche("niche_gta", { name: "Grand Theft Auto" });
+
+    // Renaming a label cannot change a verdict, and re-judging a library on
+    // every edit would make a rename an expensive operation for no reason.
+    expect(mocks.trackedFindMany).not.toHaveBeenCalled();
+  });
+
+  it("does not re-decide when the number sent is the one already stored", async () => {
+    signInAs("admin");
+    mocks.findFirst.mockResolvedValue(nicheRow({ hitThreshold: 750_000 }));
+
+    await updateNiche("niche_gta", { hitThreshold: 750_000 });
+
+    expect(mocks.trackedFindMany).not.toHaveBeenCalled();
   });
 });

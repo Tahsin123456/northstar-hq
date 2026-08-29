@@ -6,7 +6,14 @@ import {
   type TaggedVideo,
 } from "../content-type-performance";
 import type { DateRange } from "../types";
-import { DAY_MS, daysAgo, makeLongform, makeShort } from "./factories";
+import {
+  DAY_MS,
+  daysAgo,
+  makeLongform,
+  makeMiss,
+  makeShort,
+  makeVerdict,
+} from "./factories";
 
 const NOW = Date.UTC(2026, 5, 1);
 const range = (days: number): DateRange => ({
@@ -19,14 +26,40 @@ const RANKINGS: ContentTypeRef = { id: "ct-rank", name: "Rankings", colorIndex: 
 const CUTSCENE: ContentTypeRef = { id: "ct-cut", name: "Cutscenes", colorIndex: 2 };
 const CATALOGUE = [FUNNY, RANKINGS, CUTSCENE];
 
-/** A Short with tags, published inside every window used below. */
+/**
+ * A Short with tags, published inside every window used below.
+ *
+ * DECIDED BY DEFAULT, and by its view count: over a million is a hit, under is
+ * a miss. That mapping is a fixture convenience, NOT the rule — several tests
+ * below override it precisely to prove that the two are independent — but it
+ * keeps every existing expectation in this file meaning what it always meant,
+ * which is that a tag's rate describes its Shorts rather than their ages.
+ */
 function tagged(
   views: number,
   contentTypeIds: readonly string[],
   overrides: Partial<TaggedVideo> = {},
 ): TaggedVideo {
+  const base = makeShort({ views, publishedAt: daysAgo(5, NOW), ...overrides });
   return {
-    ...makeShort({ views, publishedAt: daysAgo(5, NOW), ...overrides }),
+    ...base,
+    hit:
+      base.hit ??
+      (views >= 1_000_000
+        ? makeVerdict("hit", { viewsAtWindow: views, observedAtHours: 24 })
+        : makeVerdict("miss")),
+    effectiveContentTypeIds: contentTypeIds,
+  };
+}
+
+/** The same shape, with no rule behind it — a niche nobody has configured. */
+function untaggedByRule(
+  views: number,
+  contentTypeIds: readonly string[],
+): TaggedVideo {
+  return {
+    ...makeShort({ views, publishedAt: daysAgo(5, NOW) }),
+    hit: makeVerdict("unknown", { thresholdApplied: null, windowHoursApplied: null }),
     effectiveContentTypeIds: contentTypeIds,
   };
 }
@@ -152,13 +185,13 @@ describe("median views", () => {
   });
 });
 
-describe("an unconfigured threshold", () => {
+describe("a tag no niche rule reaches", () => {
   it("yields a null hit rate, not 0", () => {
     const result = calculateContentTypePerformance({
       videos: [
-        tagged(5_000_000, [FUNNY.id]),
-        tagged(4_000_000, [FUNNY.id]),
-        tagged(10, [RANKINGS.id]),
+        untaggedByRule(5_000_000, [FUNNY.id]),
+        untaggedByRule(4_000_000, [FUNNY.id]),
+        untaggedByRule(10, [RANKINGS.id]),
       ],
       range: range(30),
       threshold: null,
@@ -166,35 +199,36 @@ describe("an unconfigured threshold", () => {
     });
 
     for (const row of result.rows) {
-      expect(row.hitRate).toBeNull();
-      expect(row.hitCount).toBe(0);
+      expect(row.hits.rate).toBeNull();
+      expect(row.hits.hits).toBe(0);
+      // Never counted as failures. An unconfigured niche must not drag a
+      // portfolio rate down while looking like a measurement.
+      expect(row.hits.tally.misses).toBe(0);
     }
 
-    // Everything that never depended on a threshold is still computed in full.
+    // Everything that never depended on a rule is still computed in full.
     expect(rowFor(result, FUNNY.id).shortsCount).toBe(2);
     expect(rowFor(result, FUNNY.id).medianViews).toBe(4_500_000);
     expect(rowFor(result, FUNNY.id).totalViews).toBe(9_000_000);
     expect(result.threshold).toBeNull();
   });
 
-  it("is a different state from a real 0% — same Shorts, a threshold nothing clears", () => {
-    const videos = [tagged(10, [FUNNY.id]), tagged(20, [FUNNY.id])];
-
+  it("is a different state from a real 0% — same Shorts, one lot judged", () => {
     const unconfigured = calculateContentTypePerformance({
-      videos,
+      videos: [untaggedByRule(10, [FUNNY.id]), untaggedByRule(20, [FUNNY.id])],
       range: range(30),
       threshold: null,
       contentTypes: CATALOGUE,
     });
     const measured = calculateContentTypePerformance({
-      videos,
+      videos: [tagged(10, [FUNNY.id]), tagged(20, [FUNNY.id])],
       range: range(30),
       threshold: 1_000_000,
       contentTypes: CATALOGUE,
     });
 
-    expect(rowFor(unconfigured, FUNNY.id).hitRate).toBeNull();
-    expect(rowFor(measured, FUNNY.id).hitRate).toBe(0);
+    expect(rowFor(unconfigured, FUNNY.id).hits.rate).toBeNull();
+    expect(rowFor(measured, FUNNY.id).hits.rate).toBe(0);
   });
 
   it("still reports a rate of 0 for a tag that genuinely missed", () => {
@@ -209,9 +243,37 @@ describe("an unconfigured threshold", () => {
       contentTypes: CATALOGUE,
     });
 
-    expect(rowFor(result, FUNNY.id).hitRate).toBe(100);
-    expect(rowFor(result, RANKINGS.id).hitRate).toBe(0);
-    expect(rowFor(result, RANKINGS.id).hitCount).toBe(0);
+    expect(rowFor(result, FUNNY.id).hits.rate).toBe(100);
+    expect(rowFor(result, RANKINGS.id).hits.rate).toBe(0);
+    expect(rowFor(result, RANKINGS.id).hits.hits).toBe(0);
+  });
+
+  it("a tag's rate is its verdicts, not its view counts", () => {
+    /*
+     * THE TABLE'S OWN VERSION OF THE CENTRAL BUG.
+     *
+     * "Rankings" here has two Shorts at four million views each, both of which
+     * took months to get there. The old table counted lifetime views against
+     * the bar and reported 100% — and an editor reading it would go and make
+     * more Rankings.
+     * The verdicts say neither one hit.
+     */
+    const slowGiants = [
+      { ...makeMiss({ views: 4_000_000, publishedAt: daysAgo(5, NOW) }), effectiveContentTypeIds: [RANKINGS.id] },
+      { ...makeMiss({ views: 4_200_000, publishedAt: daysAgo(6, NOW) }), effectiveContentTypeIds: [RANKINGS.id] },
+    ];
+
+    const result = calculateContentTypePerformance({
+      videos: slowGiants,
+      range: range(30),
+      threshold: 1_000_000,
+      contentTypes: CATALOGUE,
+    });
+
+    const row = rowFor(result, RANKINGS.id);
+    expect(row.totalViews).toBe(8_200_000);
+    expect(row.hits.rate).toBe(0);
+    expect(row.hits.judged).toBe(2);
   });
 });
 
@@ -238,7 +300,7 @@ describe("the untagged row", () => {
     expect(untagged.shortsCount).toBe(3);
     expect(untagged.medianViews).toBe(300_000);
     // It is a real row about real Shorts: its hit rate is measured like any other.
-    expect(untagged.hitRate).toBe(roundedThird());
+    expect(untagged.hits.rate).toBe(roundedThird());
     expect(result.untaggedShorts).toBe(3);
     expect(result.taggedShorts).toBe(1);
   });

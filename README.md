@@ -2,10 +2,13 @@
 
 Analytics for researching YouTube Shorts channels, built around a single question:
 
-> **Out of every 100 Shorts this channel publishes, how many become 1M+ view Shorts?**
+> **Out of every 100 Shorts this channel publishes, how many reach their niche's view
+> threshold inside its hit window?**
 
 Total views reward one lucky video. **Hit rate** rewards a repeatable system — and that
-distinction is what this tool is designed to make obvious.
+distinction is what this tool is designed to make obvious. The window is what keeps it
+honest: without one, a Short that crawled to a million over three years scored the same as
+one that got there in a day, and simply publishing more made the number fall.
 
 ---
 
@@ -208,24 +211,65 @@ that partitions before sorting while preserving the hit-rate ranking inside each
 
 ## Hit rate: the exact definition
 
+**A hit is `hitThreshold` views reached within `hitWindowHours` of publishing.** Both are
+set per niche by an admin, and a niche needs both before anything filed under it can be
+scored — half a rule is not a rule.
+
 ```
-hit rate = hits ÷ Shorts uploaded during the period × 100
+hit rate = hits ÷ decided Shorts × 100
 ```
 
-- **Denominator** — Shorts whose *upload date* falls inside the selected period. Never the
-  channel's whole back catalogue.
-- **Numerator** — those Shorts whose **current** view count is `>=` the threshold.
-  Inclusive: exactly 1,000,000 counts at a 1M threshold; 999,999 does not.
-- **Zero Shorts in the period ⇒ `null`, rendered as an em dash — never `0%`.**
-  0% would claim "this channel published Shorts and none hit", which is a different and
-  false statement from "this channel published nothing".
+- **Denominator** — Shorts whose *upload date* falls inside the selected period **and whose
+  outcome has been decided**. Never the channel's whole back catalogue, and never a Short
+  that is still inside its window.
+- **Numerator** — Shorts that reached their niche's threshold inside their niche's window.
+  Inclusive at the bar: exactly 1,000,000 counts at a 1M threshold; 999,999 does not.
+- **Nothing decided ⇒ `null`, rendered as an em dash — never `0%`.** 0% would claim "these
+  Shorts were judged and none hit", which is a different and false statement from "these
+  Shorts have not been judged".
+
+### The four outcomes
+
+Every Short lands on exactly one, and only the first two are in the ratio.
+
+| Outcome | Meaning | In the rate? |
+| --- | --- | --- |
+| **hit** | Reached the bar inside the window. Either seen at the close, or seen earlier and already past it — views only rise, so over the bar on day 2 is a hit on day 7. | numerator + denominator |
+| **miss** | The window shut and it was short. Also reachable with no history at all: if lifetime views today are still under the bar, it cannot have cleared it inside a window that has closed. That one inference judges 80% of the existing library — 1,530 of 1,904 Shorts. | denominator |
+| **pending** | The window is still open. Unfinished, not failed. | neither |
+| **unknown** | The window shut, nobody was recording during it, and the Short *did* eventually pass the bar — so it may have taken two days or two years. 374 Shorts. | neither, and **counted** |
+
+`unknown` is excluded *and shown*, never dropped silently: these are disproportionately
+the winners, so hiding them biases every rate downward while looking clean. Every rate
+therefore ships with `lowerBound` (every unknown was too slow) and `upperBound` (every
+unknown was a hit) beside it.
+
+### Why the clock exists
+
+The old rule compared **lifetime** views to a fixed bar, with no notion of age. Measured on
+this account's real corpus, the same channels scored **5.9%** for Shorts under seven days
+old and **18.8%** at 30–90 days — a 3x spread bought entirely with the calendar. Publishing
+more made the number fall, which is the opposite of what a performance metric is for.
+Judging every Short over the same stretch of its own life removes that bias by
+construction rather than correcting for it afterwards.
 
 ### The distinction that trips people up
 
-The period decides **which uploads are counted**. The threshold decides **which of them
-count as hits**. It is *not* "views accumulated during the last 30 days" — the YouTube Data
-API does not expose per-window view deltas for someone else's channel, and this app does
-not pretend otherwise. This definition is surfaced as a tooltip throughout the UI.
+The period decides **which uploads are counted**. Each Short's own **niche rule** decides
+which of them count as hits — not the view-bar control in the toolbar, which shades tables
+and scales the "vs bar" column and moves no rate at all. And it is *not* "views accumulated
+during the last 30 days": the YouTube Data API does not expose per-window view deltas for
+someone else's channel, and this app does not pretend otherwise. This definition is
+surfaced as a tooltip throughout the UI.
+
+### Where it is decided, and where it is only read
+
+`evaluateHit` in `src/lib/analytics/hit-rate.ts` is the one function that turns evidence
+into a verdict. `hit-evaluation-service` runs it once per (organization, video) and
+materialises the answer on `VideoHitEvaluation`; a settled hit or miss is frozen and never
+recomputed, because a miss inferred from "lifetime is still under the bar" would decay into
+`unknown` once the Short later crept past it. Everything downstream — the dashboard, the
+charts, the PDF, payroll — **counts stored verdicts** and never re-derives one.
 
 ---
 
@@ -234,7 +278,7 @@ not pretend otherwise. This definition is surfaced as a tooltip throughout the U
 ```
 src/
 ├─ lib/analytics/       Pure, isomorphic analytics engine (no I/O, no React)
-│   ├─ hit-rate.ts        calculateHitRate, countHits, evaluateShorts
+│   ├─ hit-rate.ts        evaluateHit (THE definition), calculateHitRate, tallyShorts
 │   ├─ filters.ts         getShortsInDateRange — Shorts-only + date window
 │   ├─ stats.ts           mean, median, percentile, consistencyScore
 │   ├─ distribution.ts    calculateViewDistribution
@@ -264,12 +308,21 @@ sees a raw API response — the boundary is enforced by only exporting normalise
 
 ### Why filters never refetch
 
-`GET /api/dataset` returns every stored video once. Period, threshold, search, sort and
-comparison are all derived **in the browser** by the same analytics engine the server uses.
+`GET /api/dataset` returns every stored video once, **each carrying its decided hit
+verdict**. Period, niche, view bar, search, sort and comparison are all derived **in the
+browser** by the same analytics engine the server uses.
 
 The React Query key is `["dataset"]` — it deliberately contains **neither the period nor the
-threshold**. Changing 1M → 500K, or 30D → 90D, therefore *cannot* invalidate the cache or
+view bar**. Changing 1M → 500K, or 30D → 90D, therefore *cannot* invalidate the cache or
 trigger a request. The requirement is enforced structurally rather than by convention.
+
+The windowed rule did not cost this property, though it moved where the work happens. A hit
+depends on a snapshot series the browser does not hold, so the client cannot decide one —
+and does not: the verdict is decided server-side and ships on the row as five small fields
+(`outcome`, the rule applied, and the reading that produced it). Changing a filter re-tallies
+verdicts already in memory. The one thing that genuinely requires the server is **changing a
+niche's rule**, which re-decides stored verdicts — a mutation with an invalidation behind
+it, not a filter.
 
 ### Historical snapshots
 
@@ -335,12 +388,16 @@ including every acceptance case from the specification:
 
 | Case | Expectation |
 | --- | --- |
-| 40 Shorts, 12 hits | `30%` |
+| 40 decided Shorts, 12 hits | `30%` |
 | 0 Shorts | `null` — not `0%` |
-| 100 Shorts, 0 hits | `0%` |
-| 100 Shorts, 100 hits | `100%` |
+| Shorts published, none decided | `null` — not `0%` |
+| 100 decided, 0 hits | `0%` |
+| 100 decided, 100 hits | `100%` |
 | Date filtering | Shorts outside the period are never counted |
-| Threshold boundary | 1,000,000 is a hit; 999,999 is not |
+| Threshold boundary | 1,000,000 clears a 1M bar inside the window; 999,999 does not |
+| Window boundary | Identical evidence reads `pending` at hour 167 and `hit` at hour 168 |
+| Pending exclusion | A Short inside its window is in neither half of the ratio |
+| Unknown exclusion | Counted and reported; widens the bounds rather than lowering the rate |
 | Long-form exclusion | Long-form never contributes to any Shorts metric |
 
 Plus: an exhaustive invariant sweep over the classifier's entire signal space (asserting
@@ -401,9 +458,9 @@ Both failure modes of the naive `duration < 60s` heuristic showed up in real dat
 videos and took 1.9s versus 12.2s on first add.
 
 **Zero-refetch filtering** — with the network layer instrumented in the browser, four
-period switches, three sort changes and three threshold changes (1M → 500K → 50M) produced
-**0 network requests**, while hit rates recomputed correctly (MrBeast 100% → 71.8%,
-Zach King 100% → 4.2%).
+period switches, three sort changes and three view-bar changes (1M → 500K → 50M) produced
+**0 network requests**. Note that the last of those no longer moves a hit rate: the bar
+shades and sorts, and each Short's verdict was decided against its own niche's rule.
 
 ---
 

@@ -1,12 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { compareToMarket } from "../market";
-import { DAY_MS, daysAgo, makeLongform, makeShort } from "./factories";
+import {
+  DAY_MS,
+  daysAgo,
+  makeHit,
+  makeLongform,
+  makeMiss,
+  makePending,
+  makeShort,
+} from "./factories";
 
 const NOW = Date.UTC(2026, 5, 1);
 const range = (days: number) => ({ startMs: NOW - days * DAY_MS, endMs: NOW });
 
+/**
+ * A channel whose Shorts are DECIDED, hit where they cleared a million.
+ *
+ * The mapping from views to verdict is a fixture convenience and not the rule —
+ * the two are independent, which the "same views, different verdicts" case at
+ * the bottom of this file proves. What it preserves is the intent of every
+ * comparison here: both sides are judged by the same complete rule, which is
+ * what makes a comparison a comparison.
+ */
 const channelWith = (views: number[]) => ({
-  videos: views.map((v, i) => makeShort({ views: v, publishedAt: daysAgo(i + 1, NOW) })),
+  videos: views.map((v, i) =>
+    v >= 1_000_000
+      ? makeHit({ views: v, publishedAt: daysAgo(i + 1, NOW) })
+      : makeMiss({ views: v, publishedAt: daysAgo(i + 1, NOW) }),
+  ),
 });
 
 describe("compareToMarket", () => {
@@ -31,7 +52,7 @@ describe("compareToMarket", () => {
       [
         {
           videos: [
-            makeShort({ views: 1_000_000, publishedAt: daysAgo(2, NOW) }),
+            makeHit({ views: 1_000_000, publishedAt: daysAgo(2, NOW) }),
             makeLongform({ views: 90_000_000, publishedAt: daysAgo(2, NOW) }),
           ],
         },
@@ -116,5 +137,104 @@ describe("compareToMarket", () => {
     const uploads = comparison.metrics.find((m) => m.key === "uploadsPerWeek");
     // Same cadence per channel on both sides, despite 3x the total volume.
     expect(uploads?.ours).toBe(uploads?.market);
+  });
+});
+
+/**
+ * =========================================================================
+ * WHAT THE WINDOW CHANGED ABOUT THIS COMPARISON
+ * =========================================================================
+ * Both sides used to be scored by counting Shorts above the threshold passed
+ * in, which meant the comparison was really "whose back catalogue has had
+ * longer". A competitor who had stopped publishing a year ago beat a channel
+ * publishing weekly, every time, on nothing but maturity.
+ */
+describe("compareToMarket under the windowed rule", () => {
+  it("identical view counts can produce opposite rates, and the verdicts decide", () => {
+    // Both sides: three Shorts at two million. Ours reached it inside the
+    // window; theirs took months. Same numbers, opposite answers.
+    const oursFast = {
+      videos: [2_000_000, 2_100_000, 2_200_000].map((v, i) =>
+        makeHit({ views: v, publishedAt: daysAgo(i + 1, NOW) }),
+      ),
+    };
+    const theirsSlow = {
+      videos: [2_000_000, 2_100_000, 2_200_000].map((v, i) =>
+        makeMiss({ views: v, publishedAt: daysAgo(i + 1, NOW) }),
+      ),
+    };
+
+    const comparison = compareToMarket([oursFast], [theirsSlow], range(30), 1_000_000);
+    const hitRate = comparison.metrics.find((m) => m.key === "hitRate");
+
+    expect(hitRate?.ours).toBe(100);
+    expect(hitRate?.market).toBe(0);
+    // And the pooled view totals are identical, which is the point.
+    expect(comparison.ours.metrics.totalViews).toBe(
+      comparison.market.metrics.totalViews,
+    );
+  });
+
+  it("a side whose Shorts are all in flight has no rate, and does not lose by default", () => {
+    const oursInFlight = {
+      videos: Array.from({ length: 5 }, (_, i) =>
+        makePending({ views: 20_000, publishedAt: daysAgo(i + 1, NOW) }),
+      ),
+    };
+    const comparison = compareToMarket(
+      [oursInFlight],
+      [channelWith([2_000_000, 100_000])],
+      range(30),
+      1_000_000,
+    );
+
+    const hitRate = comparison.metrics.find((m) => m.key === "hitRate");
+    expect(hitRate?.ours).toBeNull();
+    // `outperforming` is null rather than false: there is nothing to compare,
+    // which is not the same as losing, and the scoreboard must not count it.
+    expect(hitRate?.outperforming).toBeNull();
+  });
+
+  it("growth is null rather than a fabricated fall when the recent half is unfinished", () => {
+    // The old `growth` metric compared lifetime rates between halves of the
+    // window, so the second half — always the younger cohort — was flattered
+    // downward and this row reported a decline on every channel still
+    // publishing.
+    const ours = {
+      videos: [
+        makeHit({ views: 2_000_000, publishedAt: daysAgo(25, NOW) }),
+        makeHit({ views: 2_000_000, publishedAt: daysAgo(24, NOW) }),
+        makePending({ views: 30_000, publishedAt: daysAgo(3, NOW) }),
+        makePending({ views: 40_000, publishedAt: daysAgo(2, NOW) }),
+      ],
+    };
+    const comparison = compareToMarket(
+      [ours],
+      [channelWith([500_000, 600_000])],
+      range(30),
+      1_000_000,
+    );
+
+    expect(comparison.metrics.find((m) => m.key === "growth")?.ours).toBeNull();
+  });
+
+  it("a competitor in an unconfigured niche is excluded, never counted as failing", () => {
+    const theirs = {
+      videos: Array.from({ length: 4 }, (_, i) =>
+        // No verdict at all: nothing has judged these Shorts.
+        makeShort({ views: 3_000_000, publishedAt: daysAgo(i + 1, NOW) }),
+      ),
+    };
+    const comparison = compareToMarket(
+      [channelWith([2_000_000, 100_000])],
+      [theirs],
+      range(30),
+      1_000_000,
+    );
+
+    const hitRate = comparison.metrics.find((m) => m.key === "hitRate");
+    expect(hitRate?.market).toBeNull();
+    expect(comparison.market.metrics.hits.tally.misses).toBe(0);
+    expect(comparison.market.metrics.hits.tally.unscoreable).toBe(4);
   });
 });

@@ -30,9 +30,11 @@ import {
   youtubeClient,
 } from "./youtube";
 import type { VideoClassification, YouTubeChannel, YouTubeVideo } from "./youtube";
+import { snapshotIntervalMinutes } from "@/lib/sync/snapshot-cadence";
 
 const MS_PER_DAY = 86_400_000;
 const MS_PER_HOUR = 3_600_000;
+const MS_PER_MINUTE = 60_000;
 /** Chunk size for batched writes — keeps SQLite transactions comfortably sized. */
 const WRITE_CHUNK = 50;
 
@@ -40,6 +42,18 @@ export interface SyncOptions {
   readonly lookbackDays?: number;
   readonly maxPages?: number;
   readonly snapshotIntervalMinutes?: number;
+  /**
+   * The hit window that judges this channel's Shorts, in hours, or null when
+   * none of its niches has a complete rule.
+   *
+   * The snapshot cadence is derived from it: dense inside the window, sparse
+   * outside. It arrives as an option rather than being looked up here because
+   * this module is the fetch/classify/persist pipeline for ONE channel and has
+   * no business knowing about niches — and because both callers, the Refresh
+   * button and the scheduled sweep, must pass the same value or the history of
+   * a channel would depend on which path last touched it.
+   */
+  readonly hitWindowHours?: number | null;
   readonly trigger?: "manual" | "auto" | "initial";
   /** Re-run classification even for already-confident videos. */
   readonly forceReclassify?: boolean;
@@ -217,7 +231,12 @@ export async function syncChannel(
     counters.shortsClassified = classifications.size;
 
     // ---- 5. Persist videos + snapshots ------------------------------------
-    const snapshotInterval = (options.snapshotIntervalMinutes ?? 360) * 60_000;
+    // The organization's interval is no longer the whole story: it is the
+    // starting point that `snapshotIntervalMinutes` bends by age, so a Short
+    // inside its window is sampled densely and one past it is barely sampled at
+    // all. See `@/lib/sync/snapshot-cadence` for what that costs in rows.
+    const baseIntervalMinutes = options.snapshotIntervalMinutes ?? 360;
+    const hitWindowHours = options.hitWindowHours ?? null;
 
     const latestSnapshots = await prisma.video.findMany({
       where: { youtubeVideoId: { in: discoveredIds } },
@@ -269,7 +288,10 @@ export async function syncChannel(
     // Snapshots run after the upsert so brand-new videos already have a row.
     const persisted = await prisma.video.findMany({
       where: { youtubeVideoId: { in: discoveredIds } },
-      select: { id: true, youtubeVideoId: true, publishedAt: true },
+      // `isShort` comes back because the cadence depends on it: only a Short is
+      // judged by a window, so only a Short gets the dense schedule. Long-form
+      // keeps the organization's flat interval exactly as before.
+      select: { id: true, youtubeVideoId: true, publishedAt: true, isShort: true },
     });
     const rowIdByVideoId = new Map(persisted.map((v) => [v.youtubeVideoId, v]));
 
@@ -282,12 +304,26 @@ export async function syncChannel(
       const lastCaptured = previous?.snapshots[0]?.capturedAt ?? null;
       const lastViews = previous?.snapshots[0]?.viewCount ?? null;
 
+      const ageHours = Math.max(
+        0,
+        Math.floor((now.getTime() - video.publishedAt.getTime()) / MS_PER_HOUR),
+      );
+      const intervalMs =
+        snapshotIntervalMinutes({
+          ageHours,
+          windowHours: row.isShort ? hitWindowHours : null,
+          baseIntervalMinutes,
+        }) * MS_PER_MINUTE;
+
       const dueByTime =
-        lastCaptured === null || now.getTime() - lastCaptured.getTime() >= snapshotInterval;
+        lastCaptured === null || now.getTime() - lastCaptured.getTime() >= intervalMs;
       const changed = lastViews === null || lastViews !== BigInt(Math.trunc(video.viewCount));
 
       // Write only when the interval has elapsed *and* something moved. A
-      // stalled video does not need an identical row every six hours.
+      // stalled video does not need an identical row however dense the schedule
+      // says to be — which is what keeps an hourly cadence inside the window
+      // from turning into 24 identical rows a day for a Short nobody is
+      // watching.
       if (!dueByTime || !changed) continue;
 
       snapshotRows.push({
@@ -295,10 +331,7 @@ export async function syncChannel(
         viewCount: BigInt(Math.trunc(video.viewCount)),
         likeCount: toBigInt(video.likeCount),
         commentCount: toBigInt(video.commentCount),
-        videoAgeHours: Math.max(
-          0,
-          Math.floor((now.getTime() - video.publishedAt.getTime()) / MS_PER_HOUR),
-        ),
+        videoAgeHours: ageHours,
         capturedAt: now,
       });
     }

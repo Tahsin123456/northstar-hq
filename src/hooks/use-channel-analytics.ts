@@ -27,13 +27,26 @@ export interface ChannelRow {
 }
 
 /**
- * Derives every channel's metrics for the current period and threshold.
+ * Derives every channel's metrics for the current period.
  *
  * This is where the "changing a filter recalculates instead of refetching"
  * promise is actually kept. The dataset is an immutable object from the query
  * cache; the filters are plain state. When either changes this memo re-runs the
  * analytics engine over in-memory arrays — a few milliseconds for thousands of
  * videos — and no request is made.
+ *
+ * THE PROMISE SURVIVED THE RULE CHANGE, and it is worth saying how. A hit is
+ * now views-within-a-window, decided from a snapshot series the browser does
+ * not have — so on the face of it the client can no longer compute the headline
+ * number at all. It does not have to: the VERDICT ships with each video on the
+ * dataset payload, already decided, and everything here is still arithmetic
+ * over in-memory arrays. Changing the period re-tallies verdicts; changing the
+ * niche re-scopes them; changing the view bar re-shades the table and moves no
+ * rate at all, because it decides nothing.
+ *
+ * What genuinely does require the server now is a CHANGE TO A RULE — a new
+ * threshold or window on a niche — because that re-decides stored verdicts.
+ * That is a mutation with an invalidation behind it, not a filter.
  */
 export function useChannelRows(dataset: DatasetDTO | undefined): ChannelRow[] {
   const { range, threshold } = useFilters();

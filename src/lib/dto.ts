@@ -13,6 +13,7 @@
  */
 
 import type { AnalyticsVideo } from "@/lib/analytics/types";
+import type { HitOutcome } from "@/lib/analytics/hit-rate";
 
 /**
  * Whether the user operates a channel or is researching it.
@@ -47,6 +48,15 @@ export interface NicheDTO extends NicheRefDTO {
    * this state reports no hit rate at all until an Admin sets one.
    */
   readonly hitThreshold: number | null;
+  /**
+   * How long a Short has to reach that threshold, in hours.
+   *
+   * The other half of the rule, and `null` means the same thing it means above:
+   * UNCONFIGURED. A niche needs both before anything in it can be scored —
+   * "a million views" with no clock is the lifetime comparison this product
+   * replaced, and it reported the publishing calendar as if it were quality.
+   */
+  readonly hitWindowHours: number | null;
   readonly sortOrder: number;
   /** Active tracked channels currently assigned to this niche. */
   readonly channelCount: number;
@@ -181,11 +191,92 @@ export interface ChannelDTO {
 }
 
 /**
+ * =========================================================================
+ * THE VERDICT, AS IT SHIPS
+ * =========================================================================
+ *
+ * One `VideoHitEvaluation` row, narrowed to what a screen actually renders.
+ *
+ * WHY IT TRAVELS AT ALL. A hit is `hitThreshold` views reached within
+ * `hitWindowHours` of publishing. The evidence for that is a snapshot series in
+ * the database; the answer is worked out once by the evaluator and materialised
+ * per (organization, video). The client cannot derive it — it has neither the
+ * series nor any business holding one — so the answer has to come with the row.
+ * Without it every dashboard number would be a lifetime comparison again, which
+ * is the bug this whole change exists to remove.
+ *
+ * THE CLIENT MUST NOT RECOMPUTE A VERDICT FROM THIS. It reads `outcome` and
+ * renders. `evaluateHit` is the only thing that decides, it runs on the server,
+ * and a browser that re-derived would be a second definition with a different
+ * clock — the exact fork the rule has one home to prevent.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CARRY, because this ships for every video and
+ * the app's zero-refetch property depends on the payload staying small:
+ *
+ *   • `windowClosesAt` — derivable exactly, and by the same arithmetic the
+ *     evaluator used: `publishedAt + windowHours × 3,600,000`. See
+ *     `windowClosesAt()` in the analytics engine, which is the function that
+ *     produced the stored column in the first place. Shipping a timestamp whose
+ *     two inputs are already on the row would be paying for a third copy.
+ *   • `nicheId` — the channel already carries its niches, and no surface needs
+ *     to know which of them won the tie-break. The RULE that applied is what a
+ *     reader has to see, and that is right here.
+ *   • `evaluatedAt` — an operational fact about the evaluator, not about the
+ *     Short. It belongs in the run summary the cron logs.
+ *
+ * Five fields for a few thousand rows, and empty on none of them: a Short with
+ * no verdict ships `hit: null` rather than an object full of nulls.
+ */
+export interface VideoHitDTO {
+  /** "hit" | "miss" | "pending" | "unknown". Never coerced, never defaulted. */
+  readonly outcome: HitOutcome;
+  /**
+   * The rule as it stood WHEN THE VERDICT WAS REACHED, not the niche's setting
+   * today.
+   *
+   * Both `null` together is the unscoreable case — the Short's channel sat in
+   * no niche with both halves of a rule, so the evaluator recorded "unknown"
+   * with nothing to record beside it. That pair of nulls is the only way a
+   * reader tells "nobody was recording during the window" apart from "nobody
+   * has configured this niche", and the two send an admin to different places.
+   *
+   * They are also what keeps a badge honest after an admin moves a niche from
+   * seven days to fourteen: February's Shorts go on showing the bar that
+   * actually judged them.
+   */
+  readonly thresholdApplied: number | null;
+  readonly windowHoursApplied: number | null;
+  /**
+   * What was seen inside the window, and how old the Short was when it was
+   * seen.
+   *
+   * `null` on both for most Shorts on this account, and that is the honest
+   * state rather than a gap in the payload: a miss inferred from "lifetime is
+   * still under the bar" never observed anything, and only 59 of 1,904 Shorts
+   * have any reading inside seven days of publishing. `observedAtHours` is the
+   * field that stops a verdict overstating itself — "still short at hour 167"
+   * and "still short at hour 6" are very different evidence for the same word.
+   */
+  readonly viewsAtWindow: number | null;
+  readonly observedAtHours: number | null;
+}
+
+/**
  * A video as the client consumes it. Extends the analytics engine's own input
  * shape, so a dataset row can be handed straight to `calculateChannelMetrics`
  * with no adaptation.
  */
 export interface VideoDTO extends AnalyticsVideo {
+  /**
+   * The stored verdict, or `null` when this Short has none yet.
+   *
+   * `null` is a real state, not a defect: the evaluator runs inside the sync
+   * cron, so a Short discovered ten minutes ago genuinely has no answer, and
+   * long-form videos never get one because a hit is a Shorts concept. Every
+   * metric treats it as `unscoreable` — excluded from both halves of the rate
+   * and counted where a reader can see it — rather than as a miss.
+   */
+  readonly hit: VideoHitDTO | null;
   /** "short" | "not_short" | "uncertain" */
   readonly classification: string;
   readonly classificationConfidence: number;

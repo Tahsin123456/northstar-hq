@@ -18,6 +18,7 @@ import {
   fromUtcDayInputValue,
   toUtcDayInputValue,
 } from "@/components/admin/payroll/payroll-format";
+import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { formatMoneyTrimmed } from "@/lib/finance/money";
 import { formatDate, formatNumber } from "@/lib/format";
 import { useNow } from "@/hooks/use-now";
@@ -60,19 +61,24 @@ import { cn } from "@/lib/utils";
  * employee who cannot reproduce their own bonus has to take it on trust.
  *
  * WHAT IS DELIBERATELY STILL HERE
- * The threshold each niche was judged against, on its own line under the niche.
- * It is the one piece of vocabulary this page cannot drop — "you got 120 hits"
- * means nothing without "a hit in GTA is 100,000 views" — and it is stated as a
+ * The rule each niche was judged against, on its own line under the niche —
+ * BOTH halves of it, the view count and the window. It is the one piece of
+ * vocabulary this page cannot drop: "you got 120 hits" means nothing without
+ * "a hit in GTA is 100,000 views within 7 days", and the window is not optional
+ * detail — a Short can reach the number and still not be a hit. Stated as a
  * sentence rather than a column header called "Threshold".
  *
- * THE ZERO THAT IS NOT A ZERO
- * A niche with no threshold set cannot produce a hit, so somebody whose niches
- * are all unconfigured earns no bonus at all. Rendered naively that is a column
- * of zeroes, which reads as "you did not land one" — a verdict on their work
- * for what is actually an empty field on an admin's settings screen. Every
- * surface that could carry that misreading says the true thing instead: the row
- * under the total, the per-niche line, and a block at the top of the hits card.
- * `noMeasurableNiche` comes from the server so all three agree.
+ * THE ZERO THAT IS NOT A ZERO, IN THREE FLAVOURS
+ * A niche whose rule is incomplete cannot produce a hit, so somebody whose
+ * niches are all half-configured earns no bonus at all. A Short whose window is
+ * still open has not earned yet either — and one whose window shut with nothing
+ * recorded never will. Rendered naively all three are a column of zeroes, which
+ * reads as "you did not land one" — a verdict on their work for what is
+ * variously an empty settings field, a wait, and a gap in the view history.
+ * Every surface that could carry that misreading says the true thing instead:
+ * the notices from the server, the per-niche line, and the block at the top of
+ * the hits card. `noMeasurableNiche` and `unresolved` come from the server so
+ * they cannot disagree with the rows under them.
  *
  * The `notices` from the server are rendered as prominently as the total. The
  * most common honest answer on this screen is "nothing yet, and here is why",
@@ -859,8 +865,9 @@ function HitsCard({ earnings }: { earnings: MyEarningsDTO }) {
             Your hits
           </h2>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-            A hit is a Short that passed the view count its niche counts as a
-            win. You are paid for each one.
+            A hit is a Short that reached the view count its niche counts as a
+            win, and reached it within that niche&rsquo;s window of going live.
+            You are paid for each one, in the month its window closed.
           </p>
         </div>
 
@@ -890,12 +897,13 @@ function HitsCard({ earnings }: { earnings: MyEarningsDTO }) {
                     Your hits cannot be counted yet
                   </p>
                   <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                    Nobody has set the number of views that counts as a hit for
-                    the {earnings.byNiche.length === 1 ? "niche" : "niches"} you
-                    are on, so none of your Shorts can be counted as one. This is
-                    a setting an administrator fills in — it is not about your
+                    A hit needs two settings: how many views, and how long a
+                    Short has to reach them. Neither is fully set for the{" "}
+                    {earnings.byNiche.length === 1 ? "niche" : "niches"} you are
+                    on, so none of your Shorts can be counted as one. These are
+                    settings an administrator fills in — it is not about your
                     work, and it does not affect your normal pay. Ask an
-                    administrator to set a hit number for{" "}
+                    administrator to finish the hit rule for{" "}
                     {earnings.byNiche.map((line) => line.nicheName).join(", ")}.
                   </p>
                 </div>
@@ -922,6 +930,27 @@ function HitsCard({ earnings }: { earnings: MyEarningsDTO }) {
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * What is missing from this niche's rule, said the way somebody would ask for it.
+ *
+ * A finalized line never reaches here, so there is no case for "the rule was not
+ * recorded" — that one belongs on the admin screen, where a stored hit whose
+ * evaluation has gone still has to render. Here the only reason a half is
+ * absent is that nobody has set it yet.
+ */
+function missingRuleSentence(line: MyEarningsNicheLineDTO): string {
+  const noThreshold = line.thresholdApplied === null;
+  const noWindow = line.windowHoursApplied === null;
+
+  if (noThreshold && noWindow) {
+    return "Nobody has set what counts as a hit here yet — it needs both a number of views and a window to reach it in — so nothing in this niche can be counted. An administrator sets both.";
+  }
+  if (noThreshold) {
+    return "Nobody has set the number of views that counts as a hit here yet, so nothing in this niche can be counted. An administrator sets it.";
+  }
+  return `A hit here needs ${formatNumber(line.thresholdApplied ?? 0)} views, but nobody has set how long a Short has to reach them — so nothing in this niche can be counted yet. An administrator sets the window.`;
 }
 
 function NicheHitLine({
@@ -958,9 +987,17 @@ function NicheHitLine({
             a column header reading "Threshold" is exactly the jargon the brief
             rules out — so it is a sentence instead.
           */}
-          {unconfigured || line.thresholdApplied === null
-            ? "Nobody has set the number of views that counts as a hit here yet, so nothing in this niche can be counted. An administrator sets it."
-            : `A hit here is ${formatNumber(line.thresholdApplied)} views.`}
+          {/*
+            THE RULE HAS TWO HALVES AND THE ROW NAMES THE MISSING ONE.
+            "A hit here is 500,000 views" was a complete sentence when a
+            threshold was the whole rule. It is now half of one — a Short can
+            reach 500,000 views and not be a hit — so the window is stated with
+            it, and when either half is unset the row says WHICH, because the
+            person reading it will be the one asking an administrator to fix it.
+          */}
+          {unconfigured || line.thresholdApplied === null || line.windowHoursApplied === null
+            ? missingRuleSentence(line)
+            : `A hit here is ${formatNumber(line.thresholdApplied)} views within ${formatHitWindow(line.windowHoursApplied)} of going live.`}
         </p>
       </div>
 

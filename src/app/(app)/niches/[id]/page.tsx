@@ -13,12 +13,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { nicheColor } from "@/components/niches/niche-chip";
 import { SetNicheThresholdButton } from "@/components/niches/niche-threshold-dialog";
 import {
-  NeedsThresholdBadge,
+  NeedsRuleBadge,
   NicheByline,
-  needsThresholdConfiguration,
+  needsRuleConfiguration,
 } from "@/components/niches/niche-threshold-status";
 import { useDataset } from "@/hooks/use-dataset";
-import { UNCONFIGURED_THRESHOLD_SHORT } from "@/lib/analytics/constants";
+import { UNCONFIGURED_RULE_SHORT } from "@/lib/analytics/constants";
+import { formatHitWindow, resolveHitRule } from "@/lib/analytics/hit-rate";
 import { formatCompactNumber, formatNumber } from "@/lib/format";
 
 /**
@@ -98,7 +99,10 @@ export default function NicheDetailPage({
     );
   }
 
-  const needsThreshold = needsThresholdConfiguration(niche);
+  const needsThreshold = needsRuleConfiguration(niche);
+  // Null unless BOTH halves are set — the same resolution every other consumer
+  // uses, rather than this screen deciding for itself what counts as configured.
+  const rule = resolveHitRule(niche);
 
   return (
     <PageContainer className="flex flex-col gap-5">
@@ -136,22 +140,28 @@ export default function NicheDetailPage({
           value={formatNumber(channels.length)}
           hint={channels.length === 0 ? "None assigned yet" : undefined}
         />
+        {/*
+          One fact, not two, because a hit is one rule. Splitting the bar and
+          the clock into separate stats would let a reader take either of them
+          for the definition, and each half on its own is exactly the mistake
+          this change exists to correct.
+        */}
         <Fact
-          label="Hit threshold"
+          label="A hit here is"
           value={
-            niche.hitThreshold === null
-              ? UNCONFIGURED_THRESHOLD_SHORT
-              : `≥ ${formatCompactNumber(niche.hitThreshold)}`
+            rule === null
+              ? UNCONFIGURED_RULE_SHORT
+              : `≥ ${formatCompactNumber(rule.threshold)} in ${formatHitWindow(rule.windowHours)}`
           }
-          muted={niche.hitThreshold === null}
+          muted={rule === null}
         />
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {needsThreshold ? <NeedsThresholdBadge /> : null}
+          {needsThreshold ? <NeedsRuleBadge niche={niche} /> : null}
           <NicheByline niche={niche} />
           <SetNicheThresholdButton
             niche={niche}
-            label={needsThreshold ? "Set threshold" : "Change threshold"}
+            label={needsThreshold ? "Set hit rule" : "Change hit rule"}
             variant="ghost"
           />
         </div>

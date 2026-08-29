@@ -9,9 +9,16 @@ import { pruneRateLimits } from "@/server/auth/rate-limit";
 import { syncChannel, type SyncOptions, type SyncResult } from "./channel-sync";
 import { getOrgSettings } from "./user-service";
 import {
+  evaluateHitsForOrganization,
+  resolveChannelRule,
+  type HitEvaluationSummary,
+} from "./hit-evaluation-service";
+import {
   syncRevenueForOrganization,
   type RevenueSyncSummary,
 } from "./youtube-revenue-service";
+import { resolveHitRule, HOUR_MS, type HitRule } from "@/lib/analytics/hit-rate";
+import { isInsideWindow } from "@/lib/sync/snapshot-cadence";
 
 /**
  * Scheduled synchronisation — refreshing the data without a human present.
@@ -57,6 +64,25 @@ import {
  */
 
 const MS_PER_MINUTE = 60_000;
+
+/**
+ * How often a channel with a Short still inside its hit window is refreshed.
+ *
+ * WHY THE STALENESS RULE NEEDED AN EXCEPTION AT ALL
+ * The snapshot cadence asks for hourly readings while a window is open, but a
+ * snapshot is only ever written during a sync — so a cadence of one hour
+ * against a sweep that reaches the channel every six is a cadence of six hours
+ * wearing a smaller number. The two halves only work together.
+ *
+ * The cost is bounded and worth stating: a channel refresh is 10–15 quota units
+ * against a 10,000/day allowance, so an hourly refresh is about 300 units a day
+ * for as long as that channel has something in flight. Northstar publishes a
+ * handful of Shorts a week, so this is a few hundred units a day in total — and
+ * it only applies to channels with an open window, which is the whole point.
+ * Everything else keeps the organization's own interval and gets cheaper,
+ * because the cadence stops sampling the back catalogue four times a day.
+ */
+const OPEN_WINDOW_REFRESH_MINUTES = 60;
 
 /** How the run was initiated. Recorded so the audit log can tell them apart. */
 export type ScheduledSyncTrigger = "cron" | "manual";
@@ -127,6 +153,16 @@ export interface ScheduledSyncSummary {
    * connected account.
    */
   readonly revenue: RevenueSyncSummary | null;
+  /**
+   * What the hit evaluation step decided, or null when it could not run.
+   *
+   * On this schedule rather than one of its own, for the same reason revenue is:
+   * the cron endpoint is the only thing here that runs on a clock, and a second
+   * schedule is a second thing to configure at deploy and forget. It also has
+   * to run AFTER the channel sweep in the same pass — the snapshots it reads
+   * are the ones that pass just wrote.
+   */
+  readonly hitEvaluation: HitEvaluationSummary | null;
   readonly errors: readonly ScheduledSyncError[];
 }
 
@@ -138,6 +174,15 @@ export interface AllOrganizationsSyncSummary {
   /** Monthly ledger entries the revenue step wrote or corrected across every org. */
   readonly revenueEntriesCreated: number;
   readonly revenueEntriesRevised: number;
+  /**
+   * Verdicts written or moved across every organization.
+   *
+   * Worth a line in the run's output because it is the number that says whether
+   * the new definition is actually settling anything: a steady state is a large
+   * `shortsConsidered` and a small figure here, and a run that writes thousands
+   * is one where a rule changed or a backlog finally resolved.
+   */
+  readonly hitVerdictsWritten: number;
   readonly durationMs: number;
   readonly summaries: readonly ScheduledSyncSummary[];
 }
@@ -187,6 +232,76 @@ export async function buildSyncOptions(
 }
 
 /**
+ * The hit window that judges each channel's Shorts, in hours.
+ *
+ * Null for a channel filed under no niche, or under none with BOTH halves of a
+ * rule — which is not a defect to work around but the state most of this
+ * tracker is in until an admin finishes configuring it. The snapshot cadence
+ * reads null as "no window", falls back to the organization's flat interval,
+ * and nothing about the old behaviour changes for those channels.
+ *
+ * The choice among several niches is `resolveChannelRule`, which is the
+ * evaluator's — and through it the analytics engine's `pickGoverningRule`. It
+ * has to be: sampling a channel densely for seven days and then judging it on a
+ * 48-hour rule would collect the wrong evidence, so the cadence and the verdict
+ * must be reading the same clock.
+ */
+export async function resolveChannelHitWindows(
+  organizationId: string,
+  channelIds: readonly string[],
+): Promise<Map<string, number | null>> {
+  const windows = new Map<string, number | null>(channelIds.map((id) => [id, null]));
+  if (channelIds.length === 0) return windows;
+
+  const [niches, tracked] = await Promise.all([
+    prisma.niche.findMany({
+      where: { organizationId },
+      select: { id: true, hitThreshold: true, hitWindowHours: true },
+    }),
+    prisma.trackedChannel.findMany({
+      where: { organizationId, isActive: true, channelId: { in: [...channelIds] } },
+      select: { channelId: true, niches: { select: { nicheId: true } } },
+    }),
+  ]);
+
+  const ruleByNicheId = new Map<string, HitRule>();
+  for (const niche of niches) {
+    const rule = resolveHitRule(niche);
+    if (rule !== null) ruleByNicheId.set(niche.id, rule);
+  }
+
+  for (const row of tracked) {
+    const governing = resolveChannelRule(
+      row.niches.map((assignment) => assignment.nicheId),
+      ruleByNicheId,
+    );
+    windows.set(row.channelId, governing?.rule.windowHours ?? null);
+  }
+
+  return windows;
+}
+
+/**
+ * Sync options for ONE channel, window included.
+ *
+ * The single-channel entry point, so the Refresh button and the scheduled sweep
+ * cannot end up passing different cadences for the same channel. That is the
+ * same reason `buildSyncOptions` lives here rather than in channel-service: a
+ * channel's snapshot history must not depend on which path last touched it.
+ */
+export async function buildChannelSyncOptions(
+  organizationId: string,
+  channelId: string,
+  trigger: SyncOptions["trigger"],
+): Promise<SyncOptions> {
+  const [base, windows] = await Promise.all([
+    buildSyncOptions(organizationId, trigger),
+    resolveChannelHitWindows(organizationId, [channelId]),
+  ]);
+  return { ...base, hitWindowHours: windows.get(channelId) ?? null };
+}
+
+/**
  * Deletes rows that have outlived their purpose.
  *
  * Bundled into the sync run because this app deliberately does not host its own
@@ -232,6 +347,50 @@ interface DueChannel {
   readonly channelId: string;
   readonly label: string;
   readonly lastFetchedAt: Date | null;
+  /** The window judging this channel's Shorts, passed straight to the sync. */
+  readonly hitWindowHours: number | null;
+  /** At least one Short on this channel is still inside its window. */
+  readonly hasOpenWindow: boolean;
+}
+
+/**
+ * Which channels have a Short whose window has not shut yet.
+ *
+ * One query for the whole tracker rather than one per channel: the widest
+ * window in the organization bounds what could possibly still be open, and the
+ * per-channel clock is then applied in memory. Long-form is excluded because a
+ * window only judges Shorts.
+ */
+async function findChannelsWithOpenWindows(
+  windowByChannelId: ReadonlyMap<string, number | null>,
+  nowMs: number,
+): Promise<Set<string>> {
+  const open = new Set<string>();
+
+  const windowed = [...windowByChannelId.entries()].filter(
+    (entry): entry is [string, number] => entry[1] !== null && entry[1] > 0,
+  );
+  if (windowed.length === 0) return open;
+
+  const widestWindowHours = Math.max(...windowed.map(([, hours]) => hours));
+
+  const recent = await prisma.video.findMany({
+    where: {
+      channelId: { in: windowed.map(([channelId]) => channelId) },
+      isShort: true,
+      publishedAt: { gte: new Date(nowMs - widestWindowHours * HOUR_MS) },
+    },
+    select: { channelId: true, publishedAt: true },
+  });
+
+  for (const video of recent) {
+    if (open.has(video.channelId)) continue;
+    if (isInsideWindow(video.publishedAt.getTime(), windowByChannelId.get(video.channelId) ?? null, nowMs)) {
+      open.add(video.channelId);
+    }
+  }
+
+  return open;
 }
 
 /**
@@ -262,25 +421,48 @@ async function findDueChannels(
     },
   });
 
-  // A zero interval means "always due", which is what the Settings minimum of 0
-  // promises. Computing the cutoff from it gives that for free.
-  const staleBefore = Date.now() - refreshIntervalMinutes * MS_PER_MINUTE;
+  const nowMs = Date.now();
+  const windowByChannelId = await resolveChannelHitWindows(
+    organizationId,
+    tracked.map((row) => row.channelId),
+  );
+  const openWindowChannelIds = await findChannelsWithOpenWindows(windowByChannelId, nowMs);
 
   return tracked
-    .filter((row) => {
-      const lastFetchedAt = row.channel.lastFetchedAt;
-      return lastFetchedAt === null || lastFetchedAt.getTime() < staleBefore;
-    })
     .map((row) => ({
       channelId: row.channelId,
       label: row.label ?? row.channel.title,
       lastFetchedAt: row.channel.lastFetchedAt,
+      hitWindowHours: windowByChannelId.get(row.channelId) ?? null,
+      hasOpenWindow: openWindowChannelIds.has(row.channelId),
     }))
+    .filter((channel) => {
+      // A zero interval means "always due", which is what the Settings minimum
+      // of 0 promises. Computing the cutoff from it gives that for free.
+      //
+      // A channel with a Short still inside its window is held to a tighter
+      // interval, because those are the only hours in which a reading can prove
+      // anything. `min` rather than a flat 60, so a team that has chosen to
+      // refresh every 15 minutes is not slowed down by this.
+      const intervalMinutes = channel.hasOpenWindow
+        ? Math.min(refreshIntervalMinutes, OPEN_WINDOW_REFRESH_MINUTES)
+        : refreshIntervalMinutes;
+      const staleBefore = nowMs - intervalMinutes * MS_PER_MINUTE;
+      const lastFetchedAt = channel.lastFetchedAt;
+      return lastFetchedAt === null || lastFetchedAt.getTime() < staleBefore;
+    })
     .sort((a, b) => {
       // Never fetched outranks everything: it is the only state where the
       // dashboard shows a channel with no numbers at all.
       if (a.lastFetchedAt === null) return b.lastFetchedAt === null ? 0 : -1;
       if (b.lastFetchedAt === null) return 1;
+      // Then an open window, because that evidence expires. A stale channel
+      // whose Shorts have all been judged loses nothing by waiting for the next
+      // run; a channel three hours into a 48-hour window loses a reading that
+      // can never be taken again. This is the only ordering rule in this file
+      // that is about information rather than about fairness, and the per-run
+      // cap is what makes it matter.
+      if (a.hasOpenWindow !== b.hasOpenWindow) return a.hasOpenWindow ? -1 : 1;
       return a.lastFetchedAt.getTime() - b.lastFetchedAt.getTime();
     });
 }
@@ -314,7 +496,10 @@ export async function runScheduledSync(
   // `false` with nothing synced means opted out; `true` with
   // `channelsConsidered: 0` means everything was already fresh; `false` with
   // channels synced means an operator forced a catch-up.
-  const emptySummary = (revenue: RevenueSyncSummary | null = null): ScheduledSyncSummary => ({
+  const emptySummary = (
+    revenue: RevenueSyncSummary | null = null,
+    hitEvaluation: HitEvaluationSummary | null = null,
+  ): ScheduledSyncSummary => ({
     organizationId,
     trigger,
     channelsConsidered: 0,
@@ -327,6 +512,7 @@ export async function runScheduledSync(
     autoRefreshEnabled: settings.autoRefreshEnabled,
     housekeeping,
     revenue,
+    hitEvaluation,
     errors: [],
   });
 
@@ -337,7 +523,16 @@ export async function runScheduledSync(
   // want to be. No audit entry is written on this path: an hourly "sync
   // triggered" event for a team that opted out would bury the log in noise
   // describing work that never happened.
-  if (!maySync) return emptySummary();
+  //
+  // The hit evaluation runs on BOTH sides of this gate, which is why it is
+  // taken here rather than after the sweep only. It spends no quota and talks
+  // to nobody: it reads snapshots this database already has and decides what
+  // they mean. Its verdicts also change with the CLOCK rather than with new
+  // data — every hour, windows shut and Shorts stop being "pending" — so an
+  // organization that has opted out of background refresh still needs its
+  // pending verdicts settling, or its hit rate would stay frozen at whatever it
+  // was the last time somebody pressed Refresh.
+  if (!maySync) return emptySummary(null, await runHitEvaluationStep(organizationId));
 
   /**
    * Revenue first, and independently of whether any channel is due.
@@ -359,7 +554,11 @@ export async function runScheduledSync(
   const revenue = await runRevenueStep(organizationId, trigger, options.request ?? null);
 
   const due = await findDueChannels(organizationId, settings.refreshIntervalMinutes);
-  if (due.length === 0) return emptySummary(revenue);
+  // Still evaluates. Nothing being due means nothing NEW to read, not that the
+  // windows on what is already stored have stopped closing.
+  if (due.length === 0) {
+    return emptySummary(revenue, await runHitEvaluationStep(organizationId));
+  }
 
   const maxChannels = Math.max(1, options.maxChannels ?? env.syncMaxChannelsPerRun);
   const batch = due.slice(0, maxChannels);
@@ -412,7 +611,13 @@ export async function runScheduledSync(
   for (const channel of batch) {
     let result: SyncResult;
     try {
-      result = await syncChannel(channel.channelId, syncOptions);
+      // The window rides along per channel: everything else in these options is
+      // an organization-wide setting, but the snapshot cadence is decided by
+      // the rule that will judge THIS channel's Shorts.
+      result = await syncChannel(channel.channelId, {
+        ...syncOptions,
+        hitWindowHours: channel.hitWindowHours,
+      });
     } catch (caught) {
       // syncChannel records upstream failures on the row and returns them, so
       // reaching here means something structural — the channel row vanished
@@ -452,6 +657,12 @@ export async function runScheduledSync(
     channelsSynced += 1;
   }
 
+  // Last, and deliberately after the loop rather than inside it: the snapshots
+  // this reads are the ones the sweep has just written, and a Short that was
+  // pending at the top of the run may have had its window shut and its
+  // deciding reading taken in the same pass.
+  const hitEvaluation = await runHitEvaluationStep(organizationId);
+
   const summary: ScheduledSyncSummary = {
     organizationId,
     trigger,
@@ -465,11 +676,38 @@ export async function runScheduledSync(
     autoRefreshEnabled: settings.autoRefreshEnabled,
     housekeeping,
     revenue,
+    hitEvaluation,
     errors,
   };
 
   await recordRunFailureIfAny(summary, options.request ?? null);
   return summary;
+}
+
+/**
+ * The hit evaluation, wrapped so it can never end the run.
+ *
+ * Contained for the same reason the revenue step is: this is bookkeeping over
+ * data the sweep has already fetched and paid for, and letting a lock on
+ * `video_hit_evaluations` throw away a successful sync would trade something
+ * expensive for something recomputable. The next run re-decides everything it
+ * missed — that is what idempotence buys — so a failure here costs an hour of
+ * freshness on the verdicts and nothing else.
+ *
+ * A null in the summary therefore means "did not run", never "found nothing".
+ */
+async function runHitEvaluationStep(
+  organizationId: string,
+): Promise<HitEvaluationSummary | null> {
+  try {
+    return await evaluateHitsForOrganization(organizationId);
+  } catch (caught) {
+    const appError = toAppError(caught);
+    console.error(
+      `[sync] hit evaluation failed for organization ${organizationId}: ${appError.code} — ${appError.message}`,
+    );
+    return null;
+  }
 }
 
 /**
@@ -635,6 +873,10 @@ export async function runScheduledSyncForAllOrganizations(
     ),
     revenueEntriesRevised: summaries.reduce(
       (total, s) => total + (s.revenue?.entriesRevised ?? 0),
+      0,
+    ),
+    hitVerdictsWritten: summaries.reduce(
+      (total, s) => total + (s.hitEvaluation?.created ?? 0) + (s.hitEvaluation?.updated ?? 0),
       0,
     ),
     durationMs: Date.now() - startedAt,

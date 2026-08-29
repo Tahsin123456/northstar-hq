@@ -30,10 +30,16 @@ import { z } from "zod";
 import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
 import { requireActor } from "@/server/auth/dal";
-import { MAX_THRESHOLD, MIN_THRESHOLD } from "@/lib/analytics/constants";
+import {
+  MAX_HIT_WINDOW_HOURS,
+  MAX_THRESHOLD,
+  MIN_HIT_WINDOW_HOURS,
+  MIN_THRESHOLD,
+} from "@/lib/analytics/constants";
 import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
+import { reevaluateHitsForNiche } from "./hit-evaluation-service";
 
 /**
  * The columns needed to name a niche's author.
@@ -45,21 +51,32 @@ import { getCurrentOrgId, getScope } from "./user-service";
 const AUTHOR_SELECT = { select: { id: true, name: true, email: true } } as const;
 
 /**
- * Refuses a threshold write from somebody who may organise niches but may not
+ * Refuses a rule write from somebody who may organise niches but may not
  * configure the organization's analysis.
  *
- * Called only when the caller actually sent the field. Omitting `hitThreshold`
- * is not an attempt to set it, so an employee creating an ordinary niche never
- * touches this path — but sending `hitThreshold: null` explicitly *is* a write
- * (it clears the number), and is refused for the same reason setting one is.
+ * BOTH HALVES ARE THE SAME PERMISSION. The window is not a lesser setting than
+ * the threshold — "1M views ever" and "1M views in 48 hours" are different
+ * definitions of a hit, and the second one is a bigger claim than the first.
+ * Guarding the number and leaving the clock open would let an employee redefine
+ * every chart and every bonus by editing the half nobody thought to protect.
+ *
+ * Called only when the caller actually sent one of the fields. Omitting them is
+ * not an attempt to set them, so an employee creating an ordinary niche never
+ * touches this path — but sending an explicit `null` *is* a write (it clears
+ * the number), and is refused for the same reason setting one is.
  */
-async function assertMayConfigureThreshold(): Promise<void> {
+async function assertMayConfigureRule(): Promise<void> {
   const actor = await requireActor();
   if (!actor.permissions.has("settings.manage")) {
     throw errors.forbidden(
-      "set a hit rate threshold. Hit rate thresholds are configured by an Admin",
+      "set a hit rate threshold. Hit rate thresholds and windows are configured by an Admin",
     );
   }
+}
+
+/** True when the caller sent the field at all, an explicit null included. */
+function sent(input: object, key: string): boolean {
+  return key in input && (input as Record<string, unknown>)[key] !== undefined;
 }
 
 /** How many accent colours the niche chips cycle through (`--chart-1..6`). */
@@ -75,6 +92,13 @@ export const createNicheSchema = z.object({
   name: nicheNameSchema,
   colorIndex: z.number().int().min(0).max(NICHE_COLOR_COUNT - 1).optional(),
   hitThreshold: z.number().int().min(MIN_THRESHOLD).max(MAX_THRESHOLD).nullable().optional(),
+  hitWindowHours: z
+    .number()
+    .int()
+    .min(MIN_HIT_WINDOW_HOURS)
+    .max(MAX_HIT_WINDOW_HOURS)
+    .nullable()
+    .optional(),
 });
 
 export const updateNicheSchema = z.object({
@@ -91,6 +115,17 @@ export const updateNicheSchema = z.object({
     .int()
     .min(MIN_THRESHOLD)
     .max(MAX_THRESHOLD)
+    .nullable()
+    .optional(),
+  /**
+   * The other half of the rule, in hours. `null` clears it and leaves the niche
+   * unscoreable — a visible state, not a quiet fall back to anything.
+   */
+  hitWindowHours: z
+    .number()
+    .int()
+    .min(MIN_HIT_WINDOW_HOURS)
+    .max(MAX_HIT_WINDOW_HOURS)
     .nullable()
     .optional(),
 });
@@ -138,6 +173,7 @@ export async function createNiche(input: {
   name: string;
   colorIndex?: number;
   hitThreshold?: number | null;
+  hitWindowHours?: number | null;
 }): Promise<NicheDTO> {
   // The threshold check comes before anything is read or written. An employee's
   // create request that carries a threshold is REFUSED, not quietly stripped:
@@ -146,8 +182,8 @@ export async function createNiche(input: {
   //
   // `in` rather than `!== undefined` so an explicit `hitThreshold: null` is
   // caught too — clearing a threshold is a threshold write.
-  if ("hitThreshold" in input && input.hitThreshold !== undefined) {
-    await assertMayConfigureThreshold();
+  if (sent(input, "hitThreshold") || sent(input, "hitWindowHours")) {
+    await assertMayConfigureRule();
   }
 
   // Both halves of the scope: the organization decides where the row lives and
@@ -182,6 +218,10 @@ export async function createNiche(input: {
       // niche exists, works as a filter, and reports no hit rate until an admin
       // says what a hit is.
       hitThreshold: input.hitThreshold ?? null,
+      // The clock, and null for the same reason: a niche with no window scores
+      // nothing rather than falling back to comparing lifetime views, which is
+      // the age-biased number this whole rule exists to replace.
+      hitWindowHours: input.hitWindowHours ?? null,
       sortOrder: count,
     },
     include: { createdBy: AUTHOR_SELECT },
@@ -197,14 +237,15 @@ export async function updateNiche(
     colorIndex?: number;
     sortOrder?: number;
     hitThreshold?: number | null;
+    hitWindowHours?: number | null;
   },
 ): Promise<NicheDTO> {
   // Same rule as on create, and checked before the row is even looked up: a
   // rename is `niches.manage`, a threshold is `settings.manage`. Somebody who
   // may do the first and not the second gets a 403 rather than a niche that
   // silently kept its old number.
-  if ("hitThreshold" in update && update.hitThreshold !== undefined) {
-    await assertMayConfigureThreshold();
+  if (sent(update, "hitThreshold") || sent(update, "hitWindowHours")) {
+    await assertMayConfigureRule();
   }
 
   const organizationId = await getCurrentOrgId();
@@ -221,6 +262,7 @@ export async function updateNiche(
     colorIndex?: number;
     sortOrder?: number;
     hitThreshold?: number | null;
+    hitWindowHours?: number | null;
   } = {};
 
   if (update.name !== undefined) {
@@ -241,6 +283,7 @@ export async function updateNiche(
   if (update.colorIndex !== undefined) data.colorIndex = update.colorIndex;
   if (update.sortOrder !== undefined) data.sortOrder = update.sortOrder;
   if (update.hitThreshold !== undefined) data.hitThreshold = update.hitThreshold;
+  if (update.hitWindowHours !== undefined) data.hitWindowHours = update.hitWindowHours;
 
   const updated = await prisma.niche.update({
     where: { id: niche.id },
@@ -251,7 +294,43 @@ export async function updateNiche(
     },
   });
 
+  // The rule moved, so every stored verdict it produced answers a question
+  // nobody is asking any more.
+  const ruleChanged =
+    (update.hitThreshold !== undefined && update.hitThreshold !== niche.hitThreshold) ||
+    (update.hitWindowHours !== undefined && update.hitWindowHours !== niche.hitWindowHours);
+  if (ruleChanged) await rejudgeAfterRuleChange(organizationId, niche.id);
+
   return toNicheDTO(updated, updated._count.channels, updated.createdBy);
+}
+
+/**
+ * Re-decide every Short this niche judges, immediately.
+ *
+ * INLINE RATHER THAN LEFT TO THE NEXT CRON RUN. An admin who lowers GTA from 1M
+ * to 500K is asking a question about the library they are looking at, and a
+ * dashboard that keeps showing the old verdicts for an hour afterwards teaches
+ * them that the setting does not work. It is bounded work — one organization's
+ * Shorts on one niche's channels, upserted in batches — not a sweep.
+ *
+ * A FAILURE HERE DOES NOT FAIL THE SAVE. The new rule is already stored, which
+ * is the part the admin asked for and the part everything else derives from;
+ * the verdicts are a cache of it and the scheduled run rebuilds them from the
+ * same rule. Throwing would leave the admin staring at a 500 for a setting that
+ * did in fact save.
+ */
+async function rejudgeAfterRuleChange(
+  organizationId: string,
+  nicheId: string,
+): Promise<void> {
+  try {
+    await reevaluateHitsForNiche(organizationId, nicheId);
+  } catch (error) {
+    console.error(
+      `[niche-service] re-evaluation after a rule change failed for niche ${nicheId}`,
+      error,
+    );
+  }
 }
 
 /**

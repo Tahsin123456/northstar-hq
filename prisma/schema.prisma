@@ -161,6 +161,7 @@ model Organization {
   contentTypes         ContentType[]
   videoContentTypes    VideoContentType[]
   channelRevenueDays   ChannelRevenueDay[]
+  videoHitEvaluations  VideoHitEvaluation[]
 
   @@map("organizations")
 }
@@ -297,6 +298,27 @@ model Niche {
   /// that has never been configured should follow the global setting if the
   /// user later changes it.
   hitThreshold Int?
+
+  /// How long a Short has to reach `hitThreshold`, in hours.
+  ///
+  /// THIS IS WHAT MAKES A HIT A HIT. "A million views" is not a standard — a
+  /// Short published in February has had months to get there and one published
+  /// on Thursday has had days, so the old lifetime comparison reported the
+  /// publishing calendar as if it were quality. Measured on real data, the same
+  /// channels scored 5.9% for Shorts under a week old and 18.8% at 30–90 days
+  /// with nothing about the work changing.
+  ///
+  /// Adding a clock fixes that by construction: every Short is judged on the
+  /// same stretch of its own life, so the number stops moving when the release
+  /// schedule does.
+  ///
+  /// Hours rather than days because Shorts move fast enough that a 48-hour rule
+  /// is a reasonable thing for a team to want, and a day-based column could not
+  /// express it. The UI talks in days where days are what somebody means.
+  ///
+  /// Null means unconfigured, exactly as `hitThreshold` does — and a niche needs
+  /// BOTH before it can score anything. Half a rule is not a rule.
+  hitWindowHours Int?
 
   /// Manual ordering in the filter menu; ties break alphabetically.
   sortOrder Int @default(0)
@@ -490,10 +512,11 @@ model Video {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  snapshots    VideoSnapshot[]
-  notes        Note[]
-  savedShorts  SavedShort[]
-  contentTypes VideoContentType[]
+  snapshots      VideoSnapshot[]
+  hitEvaluations VideoHitEvaluation[]
+  notes          Note[]
+  savedShorts    SavedShort[]
+  contentTypes   VideoContentType[]
 
   @@index([channelId, publishedAt])
   @@index([channelId, isShort, publishedAt])
@@ -1613,4 +1636,74 @@ model ChannelRevenueDay {
   @@index([organizationId, day])
   @@index([channelId, day])
   @@map("channel_revenue_days")
+}
+
+/// What a Short did inside its window, decided once and kept.
+///
+/// WHY THIS IS STORED RATHER THAN COMPUTED
+/// Answering "did it reach 500,000 within 7 days" means finding the snapshot
+/// nearest the window's close — a per-video lookup that would run across the
+/// whole library on every dashboard load. It also never changes: views at day
+/// seven is a historical fact, so once the window shuts the answer is final and
+/// recomputing it is pure cost.
+///
+/// THE FOUR OUTCOMES, and the two that usually get skipped
+///   "hit"     the Short reached the bar inside the window. Either observed at
+///             the close, or observed EARLIER and already past it — views only
+///             rise, so a Short over the bar on day two is a hit on day seven.
+///   "miss"    the window shut and it was short. Also reachable without any
+///             history at all: if a Short's LIFETIME total is still under the
+///             bar today, it cannot have cleared it inside the window. That one
+///             inference rescues 80% of the existing library.
+///   "pending" the window is still open. Counted in NEITHER half of the rate —
+///             this is the mechanism that removes the age bias, rather than a
+///             correction applied afterwards.
+///   "unknown" the window shut, nobody was recording, and the Short did
+///             eventually pass the bar — so it might have taken two days or two
+///             years. Excluded and COUNTED, because these are disproportionately
+///             the winners and quietly dropping them would bias every rate
+///             downward while looking clean.
+model VideoHitEvaluation {
+  id String @id @default(cuid())
+
+  /// The verdict belongs to the organization, not the video: `Video` is a global
+  /// deduplicated row and the rule that judged it is one team's niche setting.
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  videoId String
+  video   Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  /// "hit" | "miss" | "pending" | "unknown"
+  outcome String
+
+  /// Which niche's rule decided it. Null when the Short's channel sits in no
+  /// niche, or in none that is configured — a state the UI names rather than
+  /// scoring as a miss.
+  nicheId String?
+
+  /// The rule as it stood, copied rather than referenced.
+  ///
+  /// An admin who raises a threshold in March must not silently rewrite what
+  /// February's Shorts achieved, and payroll needs to explain a bonus paid
+  /// months ago against the bar that actually applied at the time.
+  thresholdApplied   Int?
+  windowHoursApplied Int?
+
+  /// What we saw, and how old the Short was when we saw it.
+  ///
+  /// `observedAtHours` is the honesty column: a verdict read from a snapshot at
+  /// 6 hours on a 168-hour window is a different quality of evidence from one
+  /// read at 167, and a screen that shows the outcome without it is overstating
+  /// what the database knows.
+  viewsAtWindow   BigInt?
+  observedAtHours Int?
+
+  windowClosesAt DateTime?
+  evaluatedAt    DateTime  @default(now())
+
+  @@unique([organizationId, videoId])
+  @@index([organizationId, outcome])
+  @@index([organizationId, windowClosesAt])
+  @@map("video_hit_evaluations")
 }

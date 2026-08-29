@@ -27,7 +27,15 @@ import { InfoTip } from "@/components/ui/tooltip";
 import { useChannelRows } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
 import { useFilters } from "@/components/providers/filters-provider";
-import { compareToMarket, type MarketMetric } from "@/lib/analytics/market";
+import {
+  compareToMarket,
+  type MarketMetric,
+  type MarketPool,
+} from "@/lib/analytics/market";
+import {
+  NOTHING_DECIDED_SHORT,
+  UNCONFIGURED_RULE_SHORT,
+} from "@/lib/analytics/constants";
 import {
   calculateMarketShare,
   calculateMarketShareSeries,
@@ -46,7 +54,7 @@ import {
   TOOLTIP_CONTAINMENT,
   xAxisHeight,
 } from "@/components/charts/chart-layout";
-import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
+import { HitRuleNotConfiguredNotice } from "@/components/metrics/hit-rule-not-configured";
 import { EM_DASH, formatCompactNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -208,7 +216,7 @@ export default function OurVsMarketPage() {
               views, upload cadence and market share are all unaffected. The
               banner says which row is missing and why. */}
           {threshold === null ? (
-            <ThresholdNotConfiguredNotice nicheName={nicheName} />
+            <HitRuleNotConfiguredNotice nicheName={nicheName} />
           ) : null}
 
           <Scoreboard
@@ -516,57 +524,166 @@ function MetricTable({ metrics }: { metrics: readonly MarketMetric[] }) {
   );
 }
 
+/**
+ * The plainest kind of nothing, in one place so the two rows cannot word it
+ * differently. Distinct from the em dash: this says why.
+ */
+const NO_SHORTS_IN_PERIOD = "No Shorts in period";
+
+/** One side of one row: a figure, or the reason there isn't one. */
+interface HeadlineSide {
+  readonly label: "Ours" | "Market";
+  readonly value: number | null;
+  /** What to say in the bar's place. Only read when `value` is null. */
+  readonly absence: string;
+}
+
+/**
+ * Why a side has no hit rate — read off that side's own verdicts rather than
+ * inferred from the missing number.
+ *
+ * The same three-way test `HitRateValue` makes, in the same order and in the
+ * same words, because a chart and a stat disagreeing about which kind of
+ * nothing this is would be the original bug wearing a different hat. Nothing
+ * published, no rule to judge by, or a rule with nothing decided under it yet:
+ * the first is a shrug, the second sends an admin to a settings screen and the
+ * third means come back on Thursday.
+ */
+function hitRateAbsence(pool: MarketPool): string {
+  const { totalShorts, hits } = pool.metrics;
+  if (totalShorts === 0) return NO_SHORTS_IN_PERIOD;
+  if (hits.judged === 0 && hits.tally.pending === 0 && hits.tally.unknown === 0) {
+    return UNCONFIGURED_RULE_SHORT;
+  }
+  return NOTHING_DECIDED_SHORT;
+}
+
+/**
+ * Hit rate and median views, ours beside the market's.
+ *
+ * A NULL RATE IS NOT A ZERO-HEIGHT BAR. `?? 0` stood in both rows, so a side
+ * whose Shorts were all still inside their windows drew a bar and labelled it
+ * "0.0%" — this chart asserting that nothing hit, on the same screen as the
+ * metric table above it passing the same null through to an em dash.
+ * `formatPercent` was already guarding it correctly; the coalesce is what got
+ * past the guard.
+ *
+ * So an absent value draws NO BAR AT ALL and states which kind of nothing it
+ * is. Not an empty track either: an empty track is still a bar of zero length,
+ * and a reader has to measure it against its neighbour to tell "unmeasured"
+ * from "measured and scored nothing" — which is the distinction the whole
+ * redesign exists to make unmissable. Where neither side has a figure there is
+ * no axis worth drawing and the row collapses to the reason alone.
+ *
+ * A genuine 0 still draws its 2%-wide sliver, and that is the point of keeping
+ * the two cases apart: zero is a real, earned measurement and deserves to be
+ * visible as one.
+ */
 function HeadlineChart({ comparison }: { comparison: ReturnType<typeof compareToMarket> }) {
   const hitRate = comparison.metrics.find((m) => m.key === "hitRate");
   const medianViews = comparison.metrics.find((m) => m.key === "medianViews");
 
-  const data = [
+  const rows: {
+    metric: string;
+    isRate: boolean;
+    sides: readonly [HeadlineSide, HeadlineSide];
+  }[] = [
     {
       metric: "Hit rate (%)",
-      Ours: hitRate?.ours ?? 0,
-      Market: hitRate?.market ?? 0,
+      isRate: true,
+      sides: [
+        {
+          label: "Ours",
+          value: hitRate?.ours ?? null,
+          absence: hitRateAbsence(comparison.ours),
+        },
+        {
+          label: "Market",
+          value: hitRate?.market ?? null,
+          absence: hitRateAbsence(comparison.market),
+        },
+      ],
     },
     {
       metric: "Median views",
-      Ours: medianViews?.ours ?? 0,
-      Market: medianViews?.market ?? 0,
+      isRate: false,
+      // A median is null for exactly one reason — the side published nothing
+      // this period — so there is no verdict to interrogate for this row.
+      sides: [
+        {
+          label: "Ours",
+          value: medianViews?.ours ?? null,
+          absence: NO_SHORTS_IN_PERIOD,
+        },
+        {
+          label: "Market",
+          value: medianViews?.market ?? null,
+          absence: NO_SHORTS_IN_PERIOD,
+        },
+      ],
     },
   ];
 
   return (
     <div className="flex flex-col gap-4">
-      {data.map((row) => {
-        const max = Math.max(row.Ours, row.Market, 1);
-        const isRate = row.metric.includes("%");
+      {rows.map((row) => {
+        // Scaled over the values that exist. An absent side contributes nothing
+        // to the axis rather than pinning it at zero.
+        const present = row.sides
+          .map((side) => side.value)
+          .filter((value): value is number => value !== null);
+        const max = Math.max(...present, 1);
+
         return (
           <div key={row.metric}>
             <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-subtle-foreground">
               {row.metric}
             </div>
-            <div className="flex flex-col gap-1.5">
-              {(["Ours", "Market"] as const).map((side) => {
-                const value = row[side];
-                return (
-                  <div key={side} className="flex items-center gap-2.5">
+
+            {present.length === 0 ? (
+              <p className="text-[12px] text-subtle-foreground">
+                {row.sides[0].absence === row.sides[1].absence
+                  ? row.sides[0].absence
+                  : `${row.sides[0].label}: ${row.sides[0].absence} · ${row.sides[1].label}: ${row.sides[1].absence}`}
+              </p>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {row.sides.map((side) => (
+                  <div key={side.label} className="flex items-center gap-2.5">
                     <span className="w-12 shrink-0 text-[11px] text-muted-foreground">
-                      {side}
+                      {side.label}
                     </span>
-                    <div className="h-4 flex-1 overflow-hidden rounded bg-surface-sunken">
-                      <div
-                        className={cn(
-                          "h-full rounded transition-[width] duration-500",
-                          side === "Ours" ? "bg-accent" : "bg-border-strong",
-                        )}
-                        style={{ width: `${Math.max(2, (value / max) * 100)}%` }}
-                      />
-                    </div>
-                    <span className="tnum w-16 shrink-0 text-right text-[12px] text-foreground">
-                      {isRate ? formatPercent(value) : formatCompactNumber(value)}
+                    {side.value === null ? (
+                      <span className="min-w-0 flex-1 truncate text-[11px] text-subtle-foreground">
+                        {side.absence}
+                      </span>
+                    ) : (
+                      <div className="h-4 flex-1 overflow-hidden rounded bg-surface-sunken">
+                        <div
+                          className={cn(
+                            "h-full rounded transition-[width] duration-500",
+                            side.label === "Ours" ? "bg-accent" : "bg-border-strong",
+                          )}
+                          style={{ width: `${Math.max(2, (side.value / max) * 100)}%` }}
+                        />
+                      </div>
+                    )}
+                    <span
+                      className={cn(
+                        "tnum w-16 shrink-0 text-right text-[12px]",
+                        side.value === null ? "text-subtle-foreground" : "text-foreground",
+                      )}
+                    >
+                      {/* Both of these render an em dash for null, which is the
+                          guard that was always working here. */}
+                      {row.isRate
+                        ? formatPercent(side.value)
+                        : formatCompactNumber(side.value)}
                     </span>
                   </div>
-                );
-              })}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}
@@ -581,9 +698,24 @@ function DistributionComparison({
 }: {
   ourViews: number[];
   marketViews: number[];
-  /** `null` when the selected niche has none — no bucket is then a hit zone. */
+  /**
+   * The view bar, or `null` when the selected niche has none configured.
+   *
+   * Marks where the bar falls on a LIFETIME axis. It is not a hit zone: a Short
+   * reaches the top bucket whether it took two days or two years, and only one
+   * of those is a hit.
+   */
   threshold: number | null;
 }) {
+  /*
+   * `hit: null` on every row, and it is the honest value rather than a filler.
+   *
+   * This comparison is handed two plain arrays of view counts — the two pools
+   * are already flattened by the time they arrive, with no ids and no verdicts
+   * to carry. It draws SHAPE, which is a real and useful thing to compare, and
+   * it reads no tally at all. Passing nulls rather than fabricating verdicts is
+   * what stops a future reader of these bins counting them as misses.
+   */
   const ourBins = calculateViewDistribution(
     ourViews.map((views, i) => ({
       id: `o${i}`,
@@ -595,6 +727,7 @@ function DistributionComparison({
       comments: null,
       durationSeconds: 0,
       isShort: true,
+      hit: null,
     })),
     threshold,
   );
@@ -609,6 +742,7 @@ function DistributionComparison({
       comments: null,
       durationSeconds: 0,
       isShort: true,
+      hit: null,
     })),
     threshold,
   );
@@ -619,7 +753,7 @@ function DistributionComparison({
     label: bin.label,
     Ours: Math.round(bin.share * 1000) / 10,
     Market: Math.round((marketBins[i]?.share ?? 0) * 1000) / 10,
-    isHitBucket: bin.isHitBucket,
+    isAboveThreshold: bin.isAboveThreshold,
   }));
 
   if (ourViews.length === 0 || marketViews.length === 0) {

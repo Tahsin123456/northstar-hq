@@ -28,13 +28,23 @@ import type { DateRange } from "./types";
  *    em dash. Inventing a direction from a missing denominator is worse than
  *    admitting there is nothing to say.
  *
- * A CAVEAT THIS CANNOT FIX
- * Comparisons use *current* view counts. Shorts uploaded during the previous
- * window have had a full extra period to accumulate views, so the older
- * period is systematically flattered. Removing that bias needs a view count
- * captured at matched ages, which requires snapshot history spanning both
- * windows. Until then the bias is documented in the UI rather than hidden —
- * see `TREND_MATURATION_CAVEAT`.
+ * A CAVEAT THAT NOW APPLIES TO SOME METRICS AND NOT OTHERS
+ * View-based comparisons — total views, median, average, top decile — use
+ * *current* view counts. Shorts uploaded during the previous window have had a
+ * full extra period to accumulate views, so the older period is systematically
+ * flattered on those. Removing that bias needs a view count captured at matched
+ * ages, which requires snapshot history spanning both windows.
+ *
+ * THE HIT RATE IS NO LONGER ONE OF THEM, and that is the whole reason the rule
+ * changed. A hit is a bar reached inside a fixed window of each Short's own
+ * life, so both periods are measured over the same stretch of maturity by
+ * construction; a Short whose window is still open is `pending` and sits in
+ * neither period's ratio rather than dragging the recent one down. A hit-rate
+ * trend is now a statement about the work.
+ *
+ * The caveat is documented in the UI rather than hidden, and `unit` is what
+ * decides whether it applies — see `TREND_MATURATION_CAVEAT` and
+ * `trendCaveatFor`.
  */
 
 export type TrendDirection = "higherIsBetter" | "lowerIsBetter" | "neutral";
@@ -77,7 +87,30 @@ export const FLAT_THRESHOLD_POINTS = 0.5;
 export const FLAT_THRESHOLD_PERCENT = 1;
 
 export const TREND_MATURATION_CAVEAT =
-  "Comparisons use current view counts. Shorts uploaded in the earlier window have had longer to accumulate views, so the previous period is slightly flattered and the current one understated. Age-matched comparison requires view snapshots spanning both windows.";
+  "This comparison uses current view counts. Shorts uploaded in the earlier window have had longer to accumulate views, so the previous period is slightly flattered and the current one understated. Age-matched comparison requires view snapshots spanning both windows.";
+
+/**
+ * Why a hit-rate trend does NOT carry the caveat above.
+ *
+ * Worth stating rather than merely omitting: a reader who has seen the
+ * maturation warning on the views tiles will reasonably assume it applies here
+ * too, and quietly discount a real improvement.
+ */
+export const TREND_WINDOWED_NOTE =
+  "Both periods are measured the same way: each Short is judged over the same fixed window of its own life, and Shorts still inside their window are in neither period. The comparison carries no age bias.";
+
+/**
+ * The caveat that belongs beside a trend, or `null` when none does.
+ *
+ * Keyed on the unit rather than on a per-call-site flag, because the unit is
+ * already the thing that says what kind of number this is: `percentagePoints`
+ * means the metric is itself a rate — a hit rate, on every surface that draws
+ * one — and rates are windowed now. `relativePercent` means a magnitude, and
+ * magnitudes are lifetime totals that the older period has had longer to grow.
+ */
+export function trendCaveatFor(unit: TrendUnit): string {
+  return unit === "percentagePoints" ? TREND_WINDOWED_NOTE : TREND_MATURATION_CAVEAT;
+}
 
 /**
  * The equivalent window immediately before `range`.

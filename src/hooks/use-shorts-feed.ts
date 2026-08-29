@@ -68,7 +68,16 @@ export interface FeedOptions {
   readonly minViews?: number;
   readonly channelId?: string | null;
   readonly sort?: OutlierSortKey;
-  /** Drop Shorts whose channel has too small a sample to benchmark. */
+  /**
+   * Drop Shorts that have no trustworthy multiple.
+   *
+   * Two causes now, and this flag pools them because it is used by the Outliers
+   * page, which is a ranking BY the multiple — a row without one has no place
+   * in it whichever reason applies. The channel may have too few settled Shorts
+   * to have a typical one, or the Short may still be inside its hit window and
+   * therefore be compared against siblings that have had months. Winners keeps
+   * them and states the reason.
+   */
   readonly requireReliableBaseline?: boolean;
 }
 

@@ -188,6 +188,16 @@ export interface EmployeeNicheBonusDTO {
   readonly nicheId: string | null;
   readonly nicheName: string;
   readonly thresholdApplied: number;
+  /**
+   * The clock half of the rule these hits were judged under, in hours.
+   *
+   * Null on a frozen line: `PayrollHit` has no column for the window, and this
+   * screen deliberately does not go and recover it from the evaluation the way
+   * the payroll detail view does — a roster card is not the place a bonus gets
+   * audited. A null means "not shown here", and the line states the bar alone
+   * rather than inventing a window to keep the sentence tidy.
+   */
+  readonly windowHoursApplied: number | null;
   readonly hitCount: number;
   readonly bonusMinor: number;
 }
@@ -569,7 +579,25 @@ export async function loadEmployeeRecords(
  * here is behind payroll.view, which is what keeps that fallback from ever
  * being mistaken for a figure.
  */
-function toPayrollEmployee(row: EmployeeRecordRow, fallbackCurrency: string): PayrollEmployee {
+function toPayrollEmployee(
+  row: EmployeeRecordRow,
+  fallbackCurrency: string,
+  /**
+   * This person's frozen credits, from the same gatherer the payroll run uses.
+   *
+   * Passed in rather than looked up here, and never defaulted silently to an
+   * empty list at the call site: this roster builds its own employee list
+   * because it has to show people payroll does not, and if that list arrived
+   * without the ledger the Employees screen would count a Short somebody was
+   * already paid for while the Payroll screen correctly refused to. Two screens
+   * disagreeing about one figure is the failure this whole arrangement is
+   * built to avoid.
+   *
+   * Empty for a roster row with no employee profile, who has no rate and can
+   * therefore earn no bonus for the engine to guard against.
+   */
+  alreadyPaidVideoIds: readonly string[],
+): PayrollEmployee {
   return {
     userId: row.userId,
     // A payroll line with a blank name is unreadable, and the account is
@@ -583,6 +611,7 @@ function toPayrollEmployee(row: EmployeeRecordRow, fallbackCurrency: string): Pa
     nicheIds: row.nicheIds,
     joinedOnMs: row.joinedOn?.getTime() ?? null,
     employmentEndedOnMs: row.employmentEndedOn?.getTime() ?? null,
+    alreadyPaidVideoIds,
   };
 }
 
@@ -783,15 +812,33 @@ async function estimateCurrentPeriod(
   const stored = await loadFrozenPeriodFigures(organizationId, period, rows);
   if (stored) return { period, isDraft: false, byUserId: stored };
 
-  const { niches, shorts } = await loadPayrollInputs(organizationId, period);
+  const { niches, shorts, employees } = await loadPayrollInputs(organizationId, period);
 
+  // The one thing this roster DOES take from the gatherer's employee list. The
+  // rest of that list is ignored on purpose — see above — but the frozen
+  // credits are per person and cannot be reconstructed from a roster row, and
+  // an estimate computed without them would credit a Short the payroll run
+  // refuses to pay twice.
+  const alreadyPaidByUserId = new Map(
+    employees.map((employee) => [employee.userId, employee.alreadyPaidVideoIds]),
+  );
+
+  const nowMs = Date.now();
   const byUserId = new Map<string, CurrentPeriodFigure>();
   for (const row of rows) {
     const calculation = calculateEmployeePayroll({
-      employee: toPayrollEmployee(row, fallbackCurrency),
+      employee: toPayrollEmployee(
+        row,
+        fallbackCurrency,
+        alreadyPaidByUserId.get(row.userId) ?? [],
+      ),
       shorts,
       niches,
       period,
+      // One clock for the whole roster. Sampled per employee, two people could
+      // straddle a window's close and disagree about whether the same Short is
+      // still pending.
+      nowMs,
     });
 
     byUserId.set(row.userId, {
@@ -807,6 +854,9 @@ async function estimateCurrentPeriod(
         nicheId: bucket.nicheId,
         nicheName: bucket.nicheName,
         thresholdApplied: bucket.thresholdApplied,
+        // The engine just computed it, so the draft line can state the whole
+        // rule. The frozen branch below cannot — see the field's own note.
+        windowHoursApplied: bucket.windowHoursApplied,
         hitCount: bucket.hitCount,
         bonusMinor: bucket.bonusMinor,
       })),
@@ -942,6 +992,10 @@ function groupStoredHits(
       nicheId: bucket.nicheId,
       nicheName: bucket.nicheName,
       thresholdApplied: bucket.thresholdApplied,
+      // Not recoverable from a PayrollHit row, and deliberately not fetched
+      // here — see the field's note on `EmployeeNicheBonusDTO`. The payroll
+      // detail screen is where a frozen bonus gets explained in full.
+      windowHoursApplied: null,
       hitCount: bucket.hitCount,
       bonusMinor: bucket.hitCount * hitPaymentMinor,
     }))

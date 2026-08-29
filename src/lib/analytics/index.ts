@@ -10,6 +10,11 @@
 export * from "./types";
 export * from "./constants";
 export * from "./stats";
+// The definition of a hit — a bar AND a clock — lives in `hit-rate` and only
+// there. It briefly had a module of its own beside this one, which is two
+// homes for a rule the whole business runs on and therefore two versions of it
+// the first time somebody edits one. Every consumer that decides whether
+// something is a hit calls `evaluateHit` rather than comparing view counts.
 export * from "./hit-rate";
 export * from "./filters";
 export * from "./distribution";

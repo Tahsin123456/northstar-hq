@@ -15,15 +15,16 @@ import {
   useCanConfigureThreshold,
 } from "@/components/niches/niche-threshold-dialog";
 import {
-  NeedsThresholdBadge,
+  NeedsRuleBadge,
   NicheByline,
-  needsThresholdConfiguration,
+  needsRuleConfiguration,
   unconfiguredFirst,
 } from "@/components/niches/niche-threshold-status";
 import { useNicheList } from "@/hooks/use-niches";
 import type { NicheDTO } from "@/lib/dto";
-import { UNCONFIGURED_THRESHOLD_SHORT } from "@/lib/analytics/constants";
+import { UNCONFIGURED_RULE_SHORT } from "@/lib/analytics/constants";
 import { formatNumber, formatThresholdLong, pluralize } from "@/lib/format";
+import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { cn } from "@/lib/utils";
 
 /**
@@ -55,13 +56,13 @@ export default function AdminNichesPage() {
     [data?.niches],
   );
 
-  const unconfigured = niches.filter(needsThresholdConfiguration);
+  const unconfigured = niches.filter(needsRuleConfiguration);
 
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="Niches"
-        description="Every niche in the organization and what counts as a hit in it. A niche with no threshold reports no hit rate anywhere in the app until one is set here."
+        description="Every niche in the organization and what counts as a hit in it: a view threshold AND the window a Short has to reach it in. A niche missing either half reports no hit rate anywhere in the app until both are set here."
         actions={
           <Button variant="secondary" size="sm" asChild>
             <Link href="/niches">
@@ -87,7 +88,7 @@ export default function AdminNichesPage() {
           <EmptyState
             icon={<Layers />}
             title="No niches yet"
-            description="Niches are created from the Niches page. Once one exists, its hit rate threshold is configured here."
+            description="Niches are created from the Niches page. Once one exists, its hit rule — the view threshold and the hit window — is configured here."
           />
         </Card>
       ) : (
@@ -98,7 +99,7 @@ export default function AdminNichesPage() {
               <p className="text-[12px] text-foreground">
                 {formatNumber(unconfigured.length)}{" "}
                 {pluralize(unconfigured.length, "niche", "niches")}{" "}
-                {unconfigured.length === 1 ? "needs" : "need"} a hit rate threshold
+                {unconfigured.length === 1 ? "needs" : "need"} a complete hit rule
                 <span className="text-muted-foreground">
                   {" "}
                   — {unconfigured.map((niche) => niche.name).join(", ")}
@@ -112,7 +113,7 @@ export default function AdminNichesPage() {
               <div
                 className="min-w-[640px]"
                 role="table"
-                aria-label="Niches and their hit rate thresholds"
+                aria-label="Niches and their hit rules"
               >
                 <div role="rowgroup">
                   <div
@@ -121,7 +122,7 @@ export default function AdminNichesPage() {
                     role="row"
                   >
                     <div role="columnheader">Niche</div>
-                    <div role="columnheader">Hit rate threshold</div>
+                    <div role="columnheader">Hit rule</div>
                     <div role="columnheader">Created by</div>
                     <div role="columnheader" className="text-right">
                       Channels
@@ -160,7 +161,7 @@ function NicheRow({
   canConfigure: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
-  const needsThreshold = needsThresholdConfiguration(niche);
+  const needsThreshold = needsRuleConfiguration(niche);
 
   return (
     <>
@@ -187,10 +188,19 @@ function NicheRow({
 
         <div role="cell" className="min-w-0">
           {needsThreshold ? (
-            <NeedsThresholdBadge />
+            <NeedsRuleBadge niche={niche} />
           ) : (
             <span className="tnum text-[13px] text-foreground">
               {formatThresholdLong(niche.hitThreshold as number)}
+              {/*
+                Both halves, because both halves are the rule. A cell showing
+                only the number would read as the old lifetime bar, which is
+                the thing an admin is here to stop the product doing.
+              */}
+              <span className="text-muted-foreground">
+                {" "}
+                within {formatHitWindow(niche.hitWindowHours as number)}
+              </span>
             </span>
           )}
         </div>
@@ -216,7 +226,7 @@ function NicheRow({
             </Button>
           ) : (
             <span className="text-[11px] text-subtle-foreground">
-              {needsThreshold ? UNCONFIGURED_THRESHOLD_SHORT : null}
+              {needsThreshold ? UNCONFIGURED_RULE_SHORT : null}
             </span>
           )}
         </div>

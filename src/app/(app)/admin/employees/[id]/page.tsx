@@ -75,6 +75,7 @@ import {
   formatThreshold,
   pluralize,
 } from "@/lib/format";
+import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { cn } from "@/lib/utils";
 
 import type {
@@ -918,7 +919,14 @@ function CurrentPeriod({ payroll }: { payroll: EmployeePayrollDTO }) {
               key={bucket.nicheId ?? `name:${bucket.nicheName}`}
               label={bucket.nicheName}
               detail={`${formatNumber(bucket.hitCount)} ${pluralize(bucket.hitCount, "hit")} × ${formatMoneyTrimmed(payroll.hitPaymentMinor, currency)}`}
-              hint={`A hit in ${bucket.nicheName} is ${formatThreshold(bucket.thresholdApplied)} views.`}
+              // The whole rule when it is known. A frozen line cannot state the
+              // window — PayrollHit has no column for it — so it says the bar
+              // alone rather than implying a clock that might not have applied.
+              hint={
+                bucket.windowHoursApplied === null
+                  ? `A hit in ${bucket.nicheName} is ${formatThreshold(bucket.thresholdApplied)} views.`
+                  : `A hit in ${bucket.nicheName} is ${formatThreshold(bucket.thresholdApplied)} views within ${formatHitWindow(bucket.windowHoursApplied)} of publishing.`
+              }
               amount={bucket.bonusMinor}
               currency={currency}
             />

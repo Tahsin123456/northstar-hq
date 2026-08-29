@@ -16,6 +16,7 @@ import {
   formatAxisNumber,
   formatCompactNumber,
   formatFraction,
+  formatNumber,
   formatPercent,
 } from "@/lib/format";
 import {
@@ -66,10 +67,22 @@ export function HitRateChart({
 
   // Headroom above the peak so the line never touches the frame, but never
   // below 20% or a flat low series looks dramatic.
-  const maxRate = Math.max(...points.map((p) => p.hitRate ?? 0), 0);
+  const maxRate = Math.max(...points.map((p) => p.hits.rate ?? 0), 0);
   const yMax = Math.min(100, Math.max(20, Math.ceil((maxRate * 1.25) / 10) * 10));
 
-  const data = points.map((point) => ({ ...point, value: point.hitRate }));
+  /*
+   * A bucket with no DECIDED Shorts plots as `null`, which the line renders as
+   * a gap rather than a dip to zero.
+   *
+   * That gap is now doing more work than it used to. It used to mean "nothing
+   * was published in this week". It also means "everything published this week
+   * is still inside its hit window" — which is the normal state of the last
+   * bucket or two on any live chart, and the whole reason this line no longer
+   * slopes downward on the right for reasons that have nothing to do with the
+   * work. The tooltip distinguishes the two; the shape deliberately does not
+   * pretend to know.
+   */
+  const data = points.map((point) => ({ ...point, value: point.hits.rate }));
 
   // Axis space is derived from the labels that will actually be drawn, so a
   // wide value can never be clipped and a narrow one never wastes plot area.
@@ -199,8 +212,28 @@ function HitRateTooltip({
         </div>
       ) : (
         <div className="mt-1.5 flex flex-col gap-0.5 text-[11px]">
-          <Row label="Hit rate" value={formatPercent(point.hitRate)} strong />
-          <Row label="Hits" value={formatFraction(point.hitCount, point.totalShorts)} />
+          <Row label="Hit rate" value={formatPercent(point.hits.rate)} strong />
+          <Row
+            label="Hits"
+            value={formatFraction(point.hits.hits, point.hits.judged)}
+          />
+          <Row label="Shorts published" value={formatNumber(point.totalShorts)} />
+          {/* Named separately rather than summed into one "excluded", because
+              a pending Short is a wait and an unrecorded one is a permanent
+              loss — and a reader looking at a gap in the line needs to know
+              which of the two produced it. */}
+          {point.hits.tally.pending > 0 ? (
+            <Row
+              label="Still in window"
+              value={formatNumber(point.hits.tally.pending)}
+            />
+          ) : null}
+          {point.hits.tally.unknown > 0 ? (
+            <Row label="Unrecorded" value={formatNumber(point.hits.tally.unknown)} />
+          ) : null}
+          {point.hits.tally.unscoreable > 0 ? (
+            <Row label="No rule" value={formatNumber(point.hits.tally.unscoreable)} />
+          ) : null}
           {/* Exact figures live here; the axis only has to convey scale. */}
           <Row label="Views" value={formatCompactNumber(point.totalViews)} />
           <Row label="Median" value={formatCompactNumber(point.medianViews)} />

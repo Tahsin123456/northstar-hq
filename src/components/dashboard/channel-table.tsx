@@ -15,7 +15,6 @@ import {
 import { nextSortState, type SortKey, type SortState } from "@/lib/sorting";
 import {
   PERIOD_PRESET_BY_ID,
-  UNCONFIGURED_THRESHOLD_SHORT,
 } from "@/lib/analytics/constants";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -76,7 +75,7 @@ export function ChannelTable({
   onSortChange: (sort: SortState) => void;
   loading?: boolean;
 }) {
-  const { threshold, period } = useFilters();
+  const { period } = useFilters();
   const periodLabel = PERIOD_PRESET_BY_ID[period.preset]?.shortLabel ?? "Custom";
 
   return (
@@ -114,28 +113,15 @@ export function ChannelTable({
                   extra={
                     column.key === "hitRate" ? (
                       <span className="ml-1 inline-flex items-center gap-1">
-                        {/* The column header states the number every cell below
-                            it was judged against. With no threshold configured
-                            there is no such number, and printing the account
-                            default here would label a column of "Not
-                            configured" cells with a figure. */}
-                        {threshold === null ? (
-                          <Badge
-                            variant="near"
-                            size="sm"
-                            className="normal-case tracking-normal"
-                          >
-                            {UNCONFIGURED_THRESHOLD_SHORT}
-                          </Badge>
-                        ) : (
-                          <Badge
-                            variant="outline"
-                            size="sm"
-                            className="tnum normal-case tracking-normal"
-                          >
-                            ≥ {formatCompactNumber(threshold)}
-                          </Badge>
-                        )}
+                        {/* NO THRESHOLD BADGE HERE ANY MORE, and its absence is
+                            deliberate. The header used to print "≥ 1M" — the
+                            number every cell below it was judged against. Under
+                            the new rule the rows in this column are judged by
+                            each channel's OWN niche rule, which differs down
+                            the column, and the control in the toolbar judges
+                            nothing at all. One number over a column measured
+                            several ways would be the most confident wrong label
+                            on the page. Each cell states its own rule instead. */}
                         <Badge variant="outline" size="sm" className="normal-case tracking-normal">
                           {periodLabel}
                         </Badge>
@@ -227,7 +213,6 @@ function SortableHeader({
 
 function ChannelTableRow({ row, rank }: { row: ChannelRow; rank: number }) {
   const { channel, metrics } = row;
-  const { threshold } = useFilters();
 
   return (
     <div
@@ -284,11 +269,15 @@ function ChannelTableRow({ row, rank }: { row: ChannelRow; rank: number }) {
       {/* --- Hit rate: the headline --- */}
       <div role="cell" className="relative z-10 min-w-0 pointer-events-none">
         <HitRateValue
-          hitRate={metrics.hitRate}
-          hitCount={metrics.hitCount}
+          summary={metrics.hits}
           totalShorts={metrics.totalShorts}
-          threshold={threshold}
           size="md"
+          // The exclusions are suppressed in the table and shown on the channel
+          // page. A row is a scannable comparison and three extra counts under
+          // every rate would drown it; the bounds still ride beside the figure
+          // wherever there is real ambiguity, which is the part that would
+          // change how the row is read.
+          showExclusions={false}
         />
       </div>
 

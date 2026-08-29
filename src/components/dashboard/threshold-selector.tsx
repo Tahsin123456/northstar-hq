@@ -4,18 +4,19 @@ import * as React from "react";
 import { Check, ChevronDown, RotateCcw, Save, Target } from "lucide-react";
 import { toast } from "sonner";
 import {
-  EMPLOYEE_THRESHOLD_NOTICE,
+  EMPLOYEE_HIT_RULE_NOTICE,
   MAX_THRESHOLD,
   MIN_THRESHOLD,
+  THRESHOLD_LENS_EXPLANATION,
   THRESHOLD_PRESETS,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import {
   useFilters,
   type ThresholdSource,
 } from "@/components/providers/filters-provider";
 import { useCanConfigureThreshold } from "@/components/niches/niche-threshold-dialog";
-import { useUpdateNicheThreshold } from "@/hooks/use-niches";
+import { useUpdateNicheRule } from "@/hooks/use-niches";
 import { formatCompactNumber, formatNumber } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label } from "@/components/ui/input";
@@ -23,18 +24,38 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { cn } from "@/lib/utils";
 
 /**
- * The hit-threshold control.
+ * The view-bar control.
  *
- * Sits beside the niche and period selectors because the three together *are*
- * the question: "of the Shorts uploaded in {period} by {niche} channels, how
- * many passed {threshold}?"
+ * =========================================================================
+ * WHAT THIS CONTROL STOPPED DOING
+ * =========================================================================
+ * It used to be the third leg of the question — "of the Shorts uploaded in
+ * {period} by {niche} channels, how many passed {threshold}?" — and every hit
+ * rate on every screen moved when it moved.
+ *
+ * It cannot be that any more. A hit is `hitThreshold` views reached within
+ * `hitWindowHours` of publishing; the verdict depends on a snapshot series and
+ * is decided once by the evaluator and stored per Short. A browser control has
+ * no window attached to it and no history to consult, and letting one recompute
+ * a rate locally would be a second definition with a different clock.
+ *
+ * So this is a LENS. It shades the Shorts table, scales the "vs bar" column and
+ * marks where the line falls on the distribution — genuinely useful for asking
+ * "what would 500K look like across this library?" — and it changes no hit rate
+ * on the page. The popover says so, because a control that used to move the
+ * headline number and silently stopped is worse than one that was never there.
+ *
+ * WRITING THE NICHE DEFAULT IS STILL REAL, and it is the one action here that
+ * changes verdicts: it writes `Niche.hitThreshold`, the evaluator re-decides
+ * every Short in that niche, and the rates move afterwards. That is why it is a
+ * separate, explicit, `settings.manage` action rather than a side effect of
+ * dragging the number.
  *
  * WHY IT SHOWS ITS SOURCE
- * Different niches can define a hit differently — 1M for GTA, 250K for
- * Science — so a bare number is ambiguous. The control always states where the
- * active value came from: the niche default, an account default, or a
- * temporary override. Without that, someone could compare two niches without
- * realising the word "hit" meant different things in each.
+ * Different niches set different bars — 1M for GTA, 250K for Science — so a
+ * bare number is ambiguous about which one is on screen. The control always
+ * states where the active value came from: the niche default, an account
+ * default, or a temporary override.
  *
  * Changing it is always a *temporary override*. Writing the niche default is a
  * separate, explicit action, so experimenting on a view can never silently
@@ -89,7 +110,7 @@ export function ThresholdSelector({
     threshold as (typeof THRESHOLD_PRESETS)[number],
   );
 
-  const saveNicheDefault = useUpdateNicheThreshold();
+  const saveNicheDefault = useUpdateNicheRule();
   const canSaveToNiche = niche !== "all" && niche !== "unassigned";
   // Writing the niche default is `settings.manage`, the same permission the
   // service enforces. Without it the "Save as … default" action is not offered.
@@ -125,9 +146,12 @@ export function ThresholdSelector({
           )}
         >
           <Target className="size-3.5 text-subtle-foreground" />
-          <span className="text-muted-foreground">Hit</span>
+          {/* "Bar", not "Hit". The chip used to read "Hit ≥ 1M", which is now
+              the most misleading four characters in the toolbar: it names a
+              verdict this control no longer produces. */}
+          <span className="text-muted-foreground">Bar</span>
           {isUnconfigured || threshold === null ? (
-            <span className="text-warning">{UNCONFIGURED_THRESHOLD_SHORT}</span>
+            <span className="text-warning">{UNCONFIGURED_RULE_SHORT}</span>
           ) : (
             <span className="tnum text-foreground">
               ≥ {formatCompactNumber(threshold)}
@@ -145,14 +169,23 @@ export function ThresholdSelector({
       <PopoverContent align="end" className="w-[270px] p-2">
         <div className="flex items-baseline justify-between gap-2 px-1 pb-1.5">
           <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
-            Views required for a hit
+            View bar
           </span>
         </div>
+
+        {/* SAID OUT LOUD, IN THE CONTROL ITSELF.
+            Somebody who has used this app for a year will drag this number and
+            watch the hit rate for a change that is never coming. A control that
+            used to move the headline figure and silently stopped is worse than
+            one that never existed, so the popover states what it does now. */}
+        <p className="mb-2 px-1 text-[11px] leading-relaxed text-muted-foreground">
+          {THRESHOLD_LENS_EXPLANATION}
+        </p>
 
         <div className="mb-2 rounded-md border border-border bg-surface-sunken px-2 py-1.5">
           {threshold === null ? (
             <div className="text-[13px] text-foreground">
-              {UNCONFIGURED_THRESHOLD_SHORT}
+              {UNCONFIGURED_RULE_SHORT}
             </div>
           ) : (
             <div className="tnum text-[13px] text-foreground">
@@ -163,8 +196,8 @@ export function ThresholdSelector({
           {isUnconfigured ? (
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {canConfigure
-                ? "Pick a number below and save it as the niche default, or set it on the Niches page."
-                : EMPLOYEE_THRESHOLD_NOTICE}
+                ? "Pick a number below and save it as the niche default. A niche also needs a hit window before anything in it is scored — set both on the Niches page."
+                : EMPLOYEE_HIT_RULE_NOTICE}
             </p>
           ) : null}
         </div>

@@ -3,9 +3,9 @@
 import * as React from "react";
 import { Target } from "lucide-react";
 import {
-  UNCONFIGURED_THRESHOLD_EXPLANATION,
-  UNCONFIGURED_THRESHOLD_LABEL,
-  UNCONFIGURED_THRESHOLD_SHORT,
+  UNCONFIGURED_RULE_EXPLANATION,
+  UNCONFIGURED_RULE_LABEL,
+  UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import { InfoTip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,12 @@ import { cn } from "@/lib/utils";
  * percentage against it. The percentage was real arithmetic over a number no
  * human had chosen, which makes it a fabrication wearing a measurement's
  * clothes.
+ *
+ * IT NOW COVERS BOTH HALVES OF THE RULE. A hit is a threshold reached inside a
+ * window, and a niche with "1,000,000" and no window is exactly as unconfigured
+ * as one with nothing at all — it just looks finished. There is no default
+ * window to borrow, which closes the loophole rather than relying on nobody
+ * finding it.
  *
  * These two components are the replacement, and they are deliberately the only
  * two: an inline substitute for the figure itself, and a banner for the screens
@@ -35,7 +41,7 @@ import { cn } from "@/lib/utils";
  * Sized to match `HitRateValue`'s type ramp so a table row keeps its rhythm
  * when one niche is configured and another is not.
  */
-export function ThresholdNotConfigured({
+export function HitRuleNotConfigured({
   size = "md",
   withTip = true,
   className,
@@ -57,11 +63,11 @@ export function ThresholdNotConfigured({
         className={cn("font-medium leading-none text-subtle-foreground", valueClass)}
         // The full sentence for a screen reader: "Not configured" alone, read
         // out of the visual context of a "Hit rate" column header, says nothing.
-        aria-label={UNCONFIGURED_THRESHOLD_LABEL}
+        aria-label={UNCONFIGURED_RULE_LABEL}
       >
-        {UNCONFIGURED_THRESHOLD_SHORT}
+        {UNCONFIGURED_RULE_SHORT}
       </span>
-      {withTip ? <InfoTip>{UNCONFIGURED_THRESHOLD_EXPLANATION}</InfoTip> : null}
+      {withTip ? <InfoTip>{UNCONFIGURED_RULE_EXPLANATION}</InfoTip> : null}
     </span>
   );
 }
@@ -69,9 +75,11 @@ export function ThresholdNotConfigured({
 /**
  * The banner for a screen whose whole subject is the hit rate.
  *
- * Named rather than generic: "Hit rate threshold: Not configured" is the exact
- * phrasing the product uses everywhere, and it names the niche so somebody
- * looking at a filtered dashboard knows *which* niche needs the number.
+ * Named rather than generic: "Hit rule: Not configured" is the exact phrasing
+ * the product uses everywhere, and it names the niche so somebody looking at a
+ * filtered dashboard knows *which* niche needs the decision. "Rule" rather than
+ * "threshold" because there are two halves to set and a message naming one of
+ * them sends an admin to fix half the problem.
  *
  * `action` is where an admin's "Set threshold" control goes. It is a slot
  * rather than a built-in button because only the caller knows whether the
@@ -79,7 +87,7 @@ export function ThresholdNotConfigured({
  * server will refuse is exactly the door-that-does-not-open problem the
  * permission table exists to avoid.
  */
-export function ThresholdNotConfiguredNotice({
+export function HitRuleNotConfiguredNotice({
   nicheName,
   action,
   className,
@@ -99,13 +107,13 @@ export function ThresholdNotConfiguredNotice({
       <Target className="mt-px size-4 shrink-0 text-warning" aria-hidden />
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-medium text-foreground">
-          {UNCONFIGURED_THRESHOLD_LABEL}
+          {UNCONFIGURED_RULE_LABEL}
           {nicheName ? (
             <span className="font-normal text-muted-foreground"> · {nicheName}</span>
           ) : null}
         </p>
         <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-          {UNCONFIGURED_THRESHOLD_EXPLANATION}
+          {UNCONFIGURED_RULE_EXPLANATION}
         </p>
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}

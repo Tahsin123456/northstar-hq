@@ -19,6 +19,7 @@ import { EMPTY_RESOLUTION, type ContentTypeResolution } from "@/lib/content-type
 import { NicheChips } from "@/components/niches/niche-chip";
 import { ContentTypeControl } from "@/components/content-types/content-type-control";
 import { SaveShortButton } from "./save-short-button";
+import type { UnbenchmarkableReason } from "@/lib/analytics/outliers";
 import { cn } from "@/lib/utils";
 
 /**
@@ -28,24 +29,32 @@ import { cn } from "@/lib/utils";
  * tell you a channel is big; the multiple tells you a Short *broke out*, which
  * is the only one of the two that suggests something worth studying.
  *
- * `null` renders as "Insufficient data", never as a number. A channel with
- * three Shorts has no trustworthy median, and inventing a 40x from that would
- * send a director chasing noise.
+ * `null` renders as words, never as a number, and THE WORDS DIFFER BY REASON.
+ * A channel with three Shorts has no trustworthy median, and inventing a 40x
+ * from that would send a director chasing noise. A Short still inside its hit
+ * window is a different situation entirely: the channel is fine, the Short is
+ * simply not finished, and comparing its two-day view count against a median of
+ * mature Shorts would understate it by exactly the time it has left. One says
+ * "this channel cannot be benchmarked"; the other says "come back Thursday".
  */
 export function OutlierMultiple({
   multiple,
   sampleSize,
+  reason,
   size = "md",
   className,
 }: {
   multiple: number | null;
   sampleSize: number;
+  /** Why there is no multiple. `null` when there is one. */
+  reason?: UnbenchmarkableReason | null;
   size?: "sm" | "md" | "lg";
   className?: string;
 }) {
   const textClass = { sm: "text-[13px]", md: "text-[17px]", lg: "text-[24px]" }[size];
 
   if (multiple === null) {
+    const inFlight = reason === "in-flight";
     return (
       <Tooltip>
         <TooltipTrigger asChild>
@@ -55,14 +64,26 @@ export function OutlierMultiple({
               className,
             )}
           >
-            Insufficient data
+            {inFlight ? "Still in window" : "Insufficient data"}
           </span>
         </TooltipTrigger>
-        <TooltipContent>
-          This channel has only {sampleSize}{" "}
-          {sampleSize === 1 ? "Short" : "Shorts"} in the baseline window. A median
-          needs at least 5 to be a trustworthy benchmark, so no multiple is shown
-          rather than a misleading one.
+        <TooltipContent className="max-w-[280px]">
+          {inFlight ? (
+            <>
+              This Short is still inside its niche&rsquo;s hit window. Its views
+              are compared against the channel&rsquo;s typical Short, and its
+              typical Short has had months — so a multiple now would understate
+              it by however long it has left. Views per day is the age-neutral
+              figure until the window shuts.
+            </>
+          ) : (
+            <>
+              This channel has only {sampleSize}{" "}
+              {sampleSize === 1 ? "settled Short" : "settled Shorts"} in the
+              baseline window. A median needs at least 5 to be a trustworthy
+              benchmark, so no multiple is shown rather than a misleading one.
+            </>
+          )}
         </TooltipContent>
       </Tooltip>
     );
@@ -235,6 +256,7 @@ export function ShortCard({
         <OutlierMultiple
           multiple={short.outlierMultiple}
           sampleSize={short.baselineSampleSize}
+          reason={short.unbenchmarkable}
         />
         <div className="tnum mt-0.5 text-[10px] text-subtle-foreground">
           median {short.channelMedianViews === null

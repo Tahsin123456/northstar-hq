@@ -14,9 +14,16 @@ import {
 import { Card } from "@/components/ui/card";
 import { InfoTip } from "@/components/ui/tooltip";
 import { Stat, TrendPill } from "@/components/metrics/stat";
-import { HitRateInfo } from "@/components/metrics/hit-rate-value";
-import { ThresholdNotConfigured } from "@/components/metrics/threshold-not-configured";
-import { UNCONFIGURED_THRESHOLD_EXPLANATION } from "@/lib/analytics/constants";
+import {
+  HitExclusions,
+  HitRateBounds,
+  HitRateInfo,
+} from "@/components/metrics/hit-rate-value";
+import { HitRuleNotConfigured } from "@/components/metrics/hit-rule-not-configured";
+import {
+  NOTHING_DECIDED_EXPLANATION,
+  UNCONFIGURED_RULE_EXPLANATION,
+} from "@/lib/analytics/constants";
 
 /**
  * KPI strip for one channel.
@@ -26,25 +33,41 @@ import { UNCONFIGURED_THRESHOLD_EXPLANATION } from "@/lib/analytics/constants";
  * context but must not compete with it; the spec is explicit that they should
  * not overpower the main metric, and the layout enforces that rather than
  * relying on restraint.
+ *
+ * THE HEADLINE HAS THREE WAYS OF BEING ABSENT and they are rendered as three
+ * different things, because they ask the reader for three different responses:
+ * no Shorts published (nothing to do), no rule configured (an admin has a niche
+ * to finish), and a rule with nothing decided under it yet (wait). The old card
+ * had two of those states and used the threshold's nullability to pick between
+ * them, which cannot distinguish the third at all.
  */
 export function KpiCards({
   metrics,
   trendDelta,
-  threshold,
   className,
 }: {
   metrics: ChannelMetrics;
   trendDelta: number | null;
-  /**
-   * Stated on the card, because a hit means different things per niche.
-   * `null` when the niche in view has none configured, in which case the
-   * headline reads "Not configured" rather than a percentage.
-   */
-  threshold: number | null;
   className?: string;
 }) {
-  const isUnconfigured = threshold === null;
-  const hasData = !isUnconfigured && metrics.totalShorts > 0;
+  const { hits } = metrics;
+  /*
+   * "Not configured" now means NO RULE REACHED THESE SHORTS, read off the
+   * verdicts rather than off the threshold control.
+   *
+   * That control is a lens — it shades rows and scales the ratio column — and
+   * has not decided a hit since the window arrived. Keying this card on it
+   * would have made a niche with a perfectly good rule read "Not configured"
+   * the moment somebody typed an override, and a niche with no window at all
+   * read as a real 0%.
+   */
+  const nothingScoreable =
+    metrics.totalShorts > 0 &&
+    hits.judged === 0 &&
+    hits.tally.pending === 0 &&
+    hits.tally.unknown === 0;
+  const nothingDecided = metrics.totalShorts > 0 && hits.judged === 0 && !nothingScoreable;
+  const hasData = hits.rate !== null;
 
   return (
     <div className={className}>
@@ -53,20 +76,20 @@ export function KpiCards({
         <Card className="flex flex-col justify-between p-5">
           <div className="flex items-center gap-1">
             <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
-              {isUnconfigured ? "Hit rate" : `Hit rate ≥${formatCompactNumber(threshold)}`}
+              Hit rate
             </span>
             <HitRateInfo side="right" />
           </div>
 
           <div className="mt-3">
-            {isUnconfigured ? (
+            {nothingScoreable ? (
               /* The headline slot, filled with the truth rather than a figure.
                  No trend pill and no bar: both would be drawing a shape for a
                  measurement that does not exist. */
               <>
-                <ThresholdNotConfigured size="xl" withTip={false} />
+                <HitRuleNotConfigured size="xl" withTip={false} />
                 <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
-                  {UNCONFIGURED_THRESHOLD_EXPLANATION}
+                  {UNCONFIGURED_RULE_EXPLANATION}
                 </p>
               </>
             ) : (
@@ -77,28 +100,39 @@ export function KpiCards({
                       hasData ? "text-foreground" : "text-subtle-foreground"
                     }`}
                   >
-                    {hasData ? formatPercent(metrics.hitRate) : EM_DASH}
+                    {hasData ? formatPercent(hits.rate) : EM_DASH}
                   </span>
-                  <TrendPill delta={trendDelta} />
+                  {/* The trend pill compares two windowed rates, so it is only
+                      drawn once there is a rate to have moved. */}
+                  {hasData ? <TrendPill delta={trendDelta} /> : null}
+                  {hasData ? <HitRateBounds summary={hits} /> : null}
                 </div>
 
                 <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-border">
                   <div
                     className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out"
-                    style={{ width: `${Math.min(100, Math.max(0, metrics.hitRate ?? 0))}%` }}
+                    style={{ width: `${Math.min(100, Math.max(0, hits.rate ?? 0))}%` }}
                   />
                 </div>
 
                 <p className="tnum mt-2.5 text-[12px] text-muted-foreground">
                   {hasData ? (
                     <>
-                      {formatFraction(metrics.hitCount, metrics.totalShorts)} Shorts
-                      reached {formatCompactNumber(threshold)} views
+                      {formatFraction(hits.hits, hits.judged)} decided Shorts reached
+                      their niche&rsquo;s bar inside its hit window
                     </>
+                  ) : nothingDecided ? (
+                    NOTHING_DECIDED_EXPLANATION
                   ) : (
                     "No Shorts uploaded in this period"
                   )}
                 </p>
+
+                {/* The exclusions sit directly under the headline, not in a
+                    tooltip. On this account they are frequently the larger
+                    number, and a percentage that hides them is a different
+                    claim from the one the data supports. */}
+                <HitExclusions summary={hits} className="mt-2" />
               </>
             )}
           </div>
@@ -131,8 +165,22 @@ export function KpiCards({
           <div className="border-b border-border p-5 sm:border-r">
             <Stat
               label="Shorts that hit"
-              value={formatNumber(metrics.hitCount)}
-              caption={hasData ? `of ${formatNumber(metrics.totalShorts)} uploaded` : EM_DASH}
+              value={formatNumber(hits.hits)}
+              caption={
+                hits.judged > 0
+                  ? `of ${formatNumber(hits.judged)} decided · ${formatNumber(metrics.totalShorts)} uploaded`
+                  : EM_DASH
+              }
+              hint={
+                hits.excluded > 0 ? (
+                  <InfoTip>
+                    {hits.excluded} of {metrics.totalShorts} Shorts uploaded in this
+                    period are not in the rate: still inside their hit window,
+                    published with no view history recorded during it, or filed
+                    under a niche with no rule.
+                  </InfoTip>
+                ) : undefined
+              }
             />
           </div>
 

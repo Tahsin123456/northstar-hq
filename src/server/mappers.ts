@@ -18,8 +18,10 @@ import type {
   OwnershipType,
   PersonalSettingsDTO,
   VideoDTO,
+  VideoHitDTO,
 } from "@/lib/dto";
 import { isOwnershipType } from "@/lib/dto";
+import type { HitOutcome } from "@/lib/analytics/hit-rate";
 import { youtubeChannelUrl } from "@/lib/format";
 
 /**
@@ -71,6 +73,7 @@ export function toNicheDTO(
     ...toNicheRefDTO(niche),
     slug: niche.slug,
     hitThreshold: niche.hitThreshold,
+    hitWindowHours: niche.hitWindowHours,
     sortOrder: niche.sortOrder,
     channelCount,
     createdById: niche.createdById,
@@ -234,7 +237,55 @@ export type VideoProjection = Pick<
    * a compile error.
    */
   contentTypes: Array<{ contentTypeId: string; state: string }>;
+  /**
+   * This organization's verdict on this video. At most one row.
+   *
+   * AN ARRAY BECAUSE THAT IS WHAT THE RELATION IS, and required for the same
+   * reason `contentTypes` is required rather than optional. `Video` is a
+   * globally deduplicated row shared between organizations and
+   * `VideoHitEvaluation` carries `organizationId`, so these rows only mean
+   * anything once narrowed to one tenant — `@@unique([organizationId, videoId])`
+   * is what makes "at most one" true after that narrowing. An optional field
+   * defaulting to `[]` would let a query that forgot the relation ship every
+   * Short as unjudged, which reads on screen as a library nobody has scored.
+   */
+  hitEvaluations: Array<{
+    outcome: string;
+    thresholdApplied: number | null;
+    windowHoursApplied: number | null;
+    viewsAtWindow: bigint | null;
+    observedAtHours: number | null;
+  }>;
 };
+
+/**
+ * The stored verdict, narrowed for the wire.
+ *
+ * NOTHING IS DECIDED HERE. The outcome string is read back exactly as the
+ * evaluator wrote it, and an unrecognised value is treated as "unknown" — the
+ * same narrowing `hit-evaluation-service` applies on the way in, and for the
+ * same reason: the column is a plain String for SQLite/PostgreSQL portability,
+ * so a value from a future migration this build has never heard of is possible,
+ * and guessing which of four verdicts it meant would be worse than admitting
+ * the row says nothing.
+ */
+function toVideoHitDTO(
+  rows: VideoProjection["hitEvaluations"],
+): VideoHitDTO | null {
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    outcome: toHitOutcome(row.outcome),
+    thresholdApplied: row.thresholdApplied,
+    windowHoursApplied: row.windowHoursApplied,
+    viewsAtWindow: bigIntToNumber(row.viewsAtWindow),
+    observedAtHours: row.observedAtHours,
+  };
+}
+
+function toHitOutcome(value: string): HitOutcome {
+  return value === "hit" || value === "miss" || value === "pending" ? value : "unknown";
+}
 
 export function toVideoDTO(video: VideoProjection): VideoDTO {
   /*
@@ -273,6 +324,7 @@ export function toVideoDTO(video: VideoProjection): VideoDTO {
     classification: video.classification,
     classificationConfidence: video.classificationConfidence,
     isAvailable: video.isAvailable,
+    hit: toVideoHitDTO(video.hitEvaluations),
     // Sorted so a re-save cannot reorder the chips on a Short, and so a
     // client memoising on these arrays does not invalidate for no reason.
     manualContentTypeIds: manualContentTypeIds.sort(),

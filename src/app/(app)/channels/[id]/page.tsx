@@ -24,20 +24,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
 import { useChannelThreshold, useFilters } from "@/components/providers/filters-provider";
-import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
+import { HitRuleNotConfiguredNotice } from "@/components/metrics/hit-rule-not-configured";
 import { SetNicheThresholdButton } from "@/components/niches/niche-threshold-dialog";
 import {
   calculateChannelMetrics,
   calculateHitRateSeries,
   calculateHitRateTrend,
   calculateViewDistribution,
-  evaluateShorts,
+  annotateAgainstThreshold,
   getShortsInDateRange,
   pickGranularity,
 } from "@/lib/analytics";
 import {
   HIT_RATE_DEFINITION,
-  UNCONFIGURED_THRESHOLD_LABEL,
+  UNCONFIGURED_RULE_LABEL,
 } from "@/lib/analytics/constants";
 import { effectiveContentTypeIds } from "@/lib/content-types/resolve";
 import { tallyEffectiveShorts } from "@/lib/content-types/tally";
@@ -164,29 +164,27 @@ export default function ChannelDetailPage({
 
     return {
       shortsInRange,
-      // Recomputed here rather than reusing row.metrics, which was calculated
-      // at the globally selected threshold. Mixing the two would show '29 hit'
-      // beside a table listing 38.
+      // Recomputed here rather than reusing row.metrics, which is annotated
+      // against the globally selected bar. The hit rate itself is identical
+      // either way — it is counted from stored verdicts — but the shading and
+      // the ratio column follow this page's own bar, and mixing the two would
+      // highlight a different set of rows than the header describes.
       metrics: calculateChannelMetrics({ videos: scopedVideos, range, threshold }),
-      evaluated: evaluateShorts(shortsInRange, threshold),
+      evaluated: annotateAgainstThreshold(shortsInRange, threshold),
       granularity,
       distribution: calculateViewDistribution(shortsInRange, threshold),
       /*
-       * The two hit-rate-only derivations are skipped entirely rather than
-       * computed against a substituted number.
+       * The series and the trend no longer take a threshold, and no longer have
+       * to be skipped when there isn't one.
        *
-       * A hit rate series and a first-half/second-half trend are nothing but
-       * hit rate over time; with no threshold there is no series to draw, and
-       * the panels below render an honest empty state instead. Everything else
-       * on this page — uploads, views, the distribution shape — is independent
-       * of the threshold and is still computed in full.
+       * They count the STORED VERDICTS on the Shorts, so a channel in an
+       * unconfigured niche produces buckets of `unscoreable` Shorts with a null
+       * rate in each — which draws as a gap and reads as "nothing decided here",
+       * which is the truth. Guarding on `threshold` would now be guarding on
+       * the display control, which decides nothing.
        */
-      series: threshold === null
-        ? []
-        : calculateHitRateSeries(scopedVideos, range, threshold, granularity),
-      trend: threshold === null
-        ? null
-        : calculateHitRateTrend(scopedVideos, range, threshold),
+      series: calculateHitRateSeries(scopedVideos, range, granularity),
+      trend: calculateHitRateTrend(scopedVideos, range),
     };
   }, [row, scopedVideos, range, threshold]);
 
@@ -257,11 +255,7 @@ export default function ChannelDetailPage({
         />
       </div>
 
-      <KpiCards
-        metrics={metrics}
-        trendDelta={analysis.trend?.delta ?? null}
-        threshold={threshold}
-      />
+      <KpiCards metrics={metrics} trendDelta={analysis.trend?.delta ?? null} />
 
       <div className="grid gap-4 xl:grid-cols-2">
         {/* --- Hit rate over time --- */}
@@ -271,11 +265,14 @@ export default function ChannelDetailPage({
               <div>
                 <CardTitle>Hit rate over time</CardTitle>
                 <CardDescription>
-                  {threshold === null
-                    ? UNCONFIGURED_THRESHOLD_LABEL
-                    : analysis.trend
-                      ? `${formatPercent(analysis.trend.firstHalf)} in the first half of this period, ${formatPercent(analysis.trend.secondHalf)} in the second.`
-                      : "Whether this channel is improving, declining, steady or volatile."}
+                  {/* The halves carry their denominators now. "18% then 24%"
+                      over four decided Shorts and over two hundred are the same
+                      sentence and completely different evidence, and the second
+                      half of any recent window is the one most likely to be
+                      thin because its Shorts are still in flight. */}
+                  {analysis.trend
+                    ? `${formatPercent(analysis.trend.firstHalf)} over ${analysis.trend.firstJudged} decided in the first half of this period, ${formatPercent(analysis.trend.secondHalf)} over ${analysis.trend.secondJudged} in the second.`
+                    : "Whether this channel is improving, declining, steady or volatile."}
                 </CardDescription>
               </div>
               <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-subtle-foreground">
@@ -284,10 +281,16 @@ export default function ChannelDetailPage({
             </div>
           </CardHeader>
           <CardContent>
-            {/* An empty chart, not a flat line at zero. The series is genuinely
-                empty — there is no threshold to measure any bucket against. */}
-            {threshold === null ? (
-              <ThresholdNotConfiguredNotice
+            {/* The notice, not an empty chart, when NO RULE reached these
+                Shorts — read off the verdicts rather than off the display bar,
+                which decides nothing. A channel whose niche has a rule but
+                whose Shorts are all still in flight gets the chart with gaps in
+                it, because that is a wait rather than a misconfiguration. */}
+            {metrics.totalShorts > 0 &&
+            metrics.hits.judged === 0 &&
+            metrics.hits.tally.pending === 0 &&
+            metrics.hits.tally.unknown === 0 ? (
+              <HitRuleNotConfiguredNotice
                 nicheName={thresholdNicheName}
                 action={
                   unconfiguredNiche ? (
@@ -300,11 +303,13 @@ export default function ChannelDetailPage({
                 <HitRateChart
                   points={analysis.series}
                   granularity={analysis.granularity}
-                  averageHitRate={metrics.hitRate}
+                  averageHitRate={metrics.hits.rate}
                 />
                 <p className="mt-2 text-[11px] leading-relaxed text-subtle-foreground">
-                  Gaps mean no Shorts were published in that {analysis.granularity} —
-                  not a 0% hit rate.
+                  A gap means nothing was decided in that {analysis.granularity} —
+                  either nothing was published, or everything published is still
+                  inside its hit window. Neither is a 0% hit rate. Hover a point
+                  for the split.
                 </p>
               </>
             )}
@@ -354,18 +359,28 @@ export default function ChannelDetailPage({
             Shorts in this period
           </h2>
           <p className="text-[12px] text-muted-foreground">
-            {threshold === null ? (
+            {metrics.hits.judged === 0 ? (
               <>
                 {metrics.totalShorts} Shorts ·{" "}
-                <span className="text-warning">{UNCONFIGURED_THRESHOLD_LABEL}</span>
+                <span className="text-warning">
+                  {metrics.hits.excluded > 0
+                    ? `none decided yet · ${metrics.hits.excluded} excluded`
+                    : UNCONFIGURED_RULE_LABEL}
+                </span>
               </>
             ) : (
               <>
                 {metrics.totalShorts} Shorts ·{" "}
-                <span className="text-success">{metrics.hitCount} hit</span> at{" "}
-                {formatCompactNumber(threshold)}+ views
-                {/* Say where the bar came from, so a channel judged at its
-                    niche's 750K is never mistaken for the 1M account default. */}
+                <span className="text-success">{metrics.hits.hits} hit</span> of{" "}
+                {metrics.hits.judged} decided
+                {metrics.hits.excluded > 0
+                  ? ` · ${metrics.hits.excluded} excluded`
+                  : ""}
+                {/* Where the DISPLAY BAR came from. It shades the views column
+                    and scales the ratio; it is no longer what "hit" above
+                    means, so the sentence no longer claims it is. */}
+                {" · bar "}
+                {threshold === null ? "not set" : `${formatCompactNumber(threshold)}+`}
                 {thresholdSource === "niche" && thresholdNicheName ? (
                   <span className="text-subtle-foreground">
                     {" "}

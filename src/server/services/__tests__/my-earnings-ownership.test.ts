@@ -96,7 +96,24 @@ vi.mock("@/server/audit/audit-service", () => ({ recordAudit: vi.fn() }));
 
 const { getMyEarnings, parseMyEarningsPeriod } = await import("../payroll-service");
 
-/** One employee, one niche, one Short that clears the bar. */
+/**
+ * The fixture Short resolves INSIDE the current month, whichever day this runs.
+ *
+ * A hit is now a threshold reached inside a window, and a run pays the Shorts
+ * whose window CLOSED inside the period — so a fixture pinned to "24 hours ago"
+ * no longer describes anything: on the 1st of a month that Short belongs to the
+ * previous period, and under any realistic window it would still be pending
+ * anyway. Publishing at the top of the month with a one-hour window puts both
+ * the publication and the close inside the period on every day of it.
+ */
+const MONTH_STARTS_AT = Date.UTC(
+  new Date().getUTCFullYear(),
+  new Date().getUTCMonth(),
+  1,
+);
+const FIXTURE_WINDOW_HOURS = 1;
+
+/** One employee, one niche, one Short that cleared the bar inside its window. */
 function inputsFor(userId: string, overrides: Record<string, unknown> = {}) {
   return {
     employees: [
@@ -121,15 +138,34 @@ function inputsFor(userId: string, overrides: Record<string, unknown> = {}) {
         channelId: "chan_1",
         channelName: "Northstar GTA",
         views: 2_000_000,
-        publishedAtMs: Date.now() - 24 * 60 * 60 * 1000,
+        publishedAtMs: MONTH_STARTS_AT,
         nicheIds: ["niche_gta"],
         isOwnChannel: true,
+        // The materialised evaluation. Without a reading from inside the window
+        // this Short would be an "unknown" — over the bar today with nothing to
+        // say when it got there — and an unknown never pays. That is the new
+        // rule working, and it is why every fixture that means "this one hit"
+        // has to say what was seen.
+        evaluation: {
+          nicheId: null,
+          thresholdApplied: null,
+          windowHoursApplied: null,
+          viewsAtWindow: 2_000_000,
+          observedAtHours: 0,
+        },
       },
     ],
     // No `organizationDefaultThreshold`: the payroll path no longer takes one.
-    // A niche's own `hitThreshold` is the only bar there is, and a null means
-    // there is none rather than "use the organization's".
-    niches: [{ id: "niche_gta", name: "GTA", hitThreshold: 1_000_000 }],
+    // A niche's own rule is the only one there is, and a null in either half
+    // means there is none rather than "use the organization's".
+    niches: [
+      {
+        id: "niche_gta",
+        name: "GTA",
+        hitThreshold: 1_000_000,
+        hitWindowHours: FIXTURE_WINDOW_HOURS,
+      },
+    ],
   };
 }
 
@@ -322,7 +358,7 @@ describe("the figure, and the reason behind it", () => {
     mocks.loadPayrollInputs.mockImplementation(async () => ({
       ...inputsFor(SAM),
       // Nobody has said what a hit means in this niche, so nothing in it is one.
-      niches: [{ id: "niche_gta", name: "GTA", hitThreshold: null }],
+      niches: [{ id: "niche_gta", name: "GTA", hitThreshold: null, hitWindowHours: FIXTURE_WINDOW_HOURS }],
     }));
 
     const earnings = await getMyEarnings({ period: { kind: "current" } });
@@ -342,7 +378,7 @@ describe("the figure, and the reason behind it", () => {
   it("tells the employee a zero bonus is a missing setting, not their work", async () => {
     mocks.loadPayrollInputs.mockImplementation(async () => ({
       ...inputsFor(SAM),
-      niches: [{ id: "niche_gta", name: "GTA", hitThreshold: null }],
+      niches: [{ id: "niche_gta", name: "GTA", hitThreshold: null, hitWindowHours: FIXTURE_WINDOW_HOURS }],
     }));
 
     const earnings = await getMyEarnings({ period: { kind: "current" } });
@@ -350,18 +386,21 @@ describe("the figure, and the reason behind it", () => {
     // Every niche they are on is unconfigured, so nothing about them can be
     // measured at all. The page leads with that rather than with a zero.
     expect(earnings.noMeasurableNiche).toBe(true);
+    // `missing` names the half that is absent. A niche can now be unscoreable
+    // for having no window as easily as for having no bar, and "unconfigured"
+    // on its own would send them to the wrong field.
     expect(earnings.skippedNiches).toEqual([
-      { nicheId: "niche_gta", nicheName: "GTA", shortCount: 1 },
+      { nicheId: "niche_gta", nicheName: "GTA", missing: "threshold", shortCount: 1 },
     ]);
 
     const notices = earnings.notices.join(" ");
     expect(notices).toMatch(/no hit threshold set/i);
     expect(notices).toMatch(/administrator/i);
-    // The sentence that would be a lie here: there was no threshold to cross.
-    expect(notices).not.toMatch(/crossed its threshold/i);
+    // The sentence that would be a lie here: there was no threshold to reach.
+    expect(notices).not.toMatch(/reached its threshold/i);
   });
 
-  it("still says 'nothing crossed the bar' when the bar exists", async () => {
+  it("still says 'nothing reached the bar' when the bar exists", async () => {
     mocks.loadPayrollInputs.mockImplementation(async () => ({
       ...inputsFor(SAM),
       shorts: [],
@@ -370,7 +409,10 @@ describe("the figure, and the reason behind it", () => {
     const earnings = await getMyEarnings({ period: { kind: "current" } });
 
     expect(earnings.noMeasurableNiche).toBe(false);
-    expect(earnings.notices.join(" ")).toMatch(/crossed its threshold/i);
+    // "Crossed its threshold" was the old sentence and it is now half a claim:
+    // a Short can cross the threshold and still not be a hit, which is the
+    // entire change. The notice names the window too.
+    expect(earnings.notices.join(" ")).toMatch(/reached its threshold inside the window/i);
   });
 
   it("explains a zero caused by having no niches, rather than reporting nothing", async () => {
@@ -399,8 +441,8 @@ describe("the figure, and the reason behind it", () => {
       ...inputsFor(SAM),
       shorts: [],
       niches: [
-        { id: "niche_gta", name: "GTA", hitThreshold: 1_000_000 },
-        { id: "niche_rdr", name: "RDR", hitThreshold: 500_000 },
+        { id: "niche_gta", name: "GTA", hitThreshold: 1_000_000, hitWindowHours: FIXTURE_WINDOW_HOURS },
+        { id: "niche_rdr", name: "RDR", hitThreshold: 500_000, hitWindowHours: FIXTURE_WINDOW_HOURS },
       ],
     }));
 

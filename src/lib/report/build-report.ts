@@ -16,6 +16,7 @@ import {
   type OutlierShort,
 } from "@/lib/analytics";
 import { calculateTrend, previousRange, type Trend } from "@/lib/analytics/trends";
+import type { HitRateSummary } from "@/lib/analytics/hit-rate";
 import { baselineRangeFor } from "@/hooks/use-shorts-feed";
 import type { ChannelDTO, DatasetDTO, NicheDTO } from "@/lib/dto";
 import { BRAND } from "@/lib/brand";
@@ -72,13 +73,30 @@ export interface ReportData {
   readonly comparisonRange: DateRange;
   readonly periodLabel: string;
   readonly nicheName: string | null;
+  /**
+   * The view bar the report's tables were SHADED and SORTED with.
+   *
+   * No longer the definition of a hit, and the cover says so. A hit is each
+   * Short's own niche threshold reached inside that niche's window, decided per
+   * Short and stored — a single report can therefore contain Shorts judged by
+   * four different rules, which is exactly why one number on the cover can no
+   * longer be labelled "hit threshold".
+   */
   readonly threshold: number;
   /**
-   * Whether this threshold is the niche configured default or an account-wide
-   * one. Printed on the cover so a GTA report at 1M and an RDR report at 750K
-   * are never mistaken for the same measurement.
+   * Where that bar came from: the niche's configured default, an account-wide
+   * one, or a manual override for this report.
    */
   readonly thresholdSource: "niche" | "account" | "override";
+  /**
+   * The portfolio's verdicts, and what the headline rate left out.
+   *
+   * Printed beside the rate rather than kept for a footnote. A PDF is the
+   * artefact that outlives every screen — it gets forwarded, quoted and read
+   * six months later by somebody who cannot click a tooltip — so the exclusions
+   * have to be on the page or they are gone.
+   */
+  readonly hits: HitRateSummary;
 
   readonly summary: readonly ReportSummaryMetric[];
   readonly marketShare: MarketShare;
@@ -170,9 +188,14 @@ export function buildReport(options: BuildReportOptions): ReportData {
     {
       key: "hitRate",
       label: "Hit rate",
-      value: current.hitRate,
+      value: current.hits.rate,
       format: "percent",
-      trend: calculateTrend(current.hitRate, previous.hitRate, {
+      // Both sides of the comparison are windowed rates over decided Shorts, so
+      // the movement is finally a statement about the work. Under the old rule
+      // the previous period was systematically flattered — its Shorts had had a
+      // full extra period to accumulate views — and this pill reported a
+      // decline on every healthy channel.
+      trend: calculateTrend(current.hits.rate, previous.hits.rate, {
         direction: "higherIsBetter",
         unit: "percentagePoints",
       }),
@@ -242,7 +265,7 @@ export function buildReport(options: BuildReportOptions): ReportData {
           direction: "higherIsBetter",
           unit: "relativePercent",
         }),
-        hitRateTrend: calculateTrend(metrics.hitRate, prior.hitRate, {
+        hitRateTrend: calculateTrend(metrics.hits.rate, prior.hits.rate, {
           direction: "higherIsBetter",
           unit: "percentagePoints",
         }),
@@ -298,6 +321,7 @@ export function buildReport(options: BuildReportOptions): ReportData {
     nicheName,
     threshold,
     thresholdSource: options.thresholdSource ?? "account",
+    hits: current.hits,
     summary,
     marketShare,
     marketShareTrend,
@@ -371,13 +395,41 @@ function buildInsights(input: {
   }
 
   // Hit rate movement, and how it sits against the market.
-  if (input.current.hitRate !== null && input.previous.hitRate !== null) {
-    const delta = input.current.hitRate - input.previous.hitRate;
+  if (input.current.hits.rate !== null && input.previous.hits.rate !== null) {
+    const delta = input.current.hits.rate - input.previous.hits.rate;
     if (Math.abs(delta) >= 0.5) {
       out.push(
-        `Hit rate ${delta > 0 ? "increased" : "decreased"} by ${Math.abs(delta).toFixed(1)} percentage points, to ${fmtPct(input.current.hitRate)}.`,
+        `Hit rate ${delta > 0 ? "increased" : "decreased"} by ${Math.abs(delta).toFixed(1)} percentage points, to ${fmtPct(input.current.hits.rate)}, over ${input.current.hits.judged} decided Shorts.`,
       );
     }
+  }
+
+  /*
+   * The exclusions get a sentence of their own when they are large enough to
+   * change how the rate should be read.
+   *
+   * Stated as a fact rather than a hedge, and only when it is material — the
+   * threshold is "the excluded population is at least as big as the decided
+   * one", which on this account is the normal state and not an edge case. An
+   * insight list that omitted this would be describing 40 Shorts and letting
+   * the reader assume 400.
+   */
+  const excluded = input.current.hits.tally;
+  const undecided = excluded.pending + excluded.unknown;
+  if (input.current.hits.judged > 0 && undecided >= input.current.hits.judged) {
+    const parts: string[] = [];
+    if (excluded.pending > 0) parts.push(`${excluded.pending} still inside their hit window`);
+    if (excluded.unknown > 0) {
+      parts.push(`${excluded.unknown} with no view history recorded during it`);
+    }
+    out.push(
+      `The hit rate above is over ${input.current.hits.judged} decided Shorts. A further ${undecided} are not counted in either half — ${parts.join(" and ")}.`,
+    );
+  }
+  if (excluded.unscoreable > 0) {
+    out.push(
+      `${excluded.unscoreable} Shorts could not be judged at all: their channels sit in no niche with both a view threshold and a hit window set.`,
+    );
   }
 
   const hitRateMetric = input.comparison.metrics.find((m) => m.key === "hitRate");

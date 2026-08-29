@@ -411,7 +411,7 @@ function Header({ report }: { report: ReportData }) {
         </Text>
         <Text style={{ fontSize: 7.5, color: C.subtle, marginTop: 2 }}>
           {report.nicheName ? `${report.nicheName} · ` : ""}
-          {report.periodLabel} · hit ≥{compact(report.threshold)}
+          {report.periodLabel} · bar {compact(report.threshold)}
         </Text>
       </View>
     </View>
@@ -473,7 +473,13 @@ export function ReportDocument({ report }: { report: ReportData }) {
               <Text style={s.coverMetaValue}>{report.nicheName ?? "All niches"}</Text>
             </View>
             <View>
-              <Text style={s.coverMetaLabel}>HIT THRESHOLD</Text>
+              {/* NOT "HIT THRESHOLD" ANY MORE. A hit is each Short's own niche
+                  threshold reached inside that niche's window, so a report
+                  spanning four niches contains Shorts judged four ways and no
+                  single number on a cover can name the rule. What this figure
+                  genuinely is, and all it ever affects now, is which Shorts the
+                  tables highlight. */}
+              <Text style={s.coverMetaLabel}>VIEW BAR (DISPLAY)</Text>
               <Text style={s.coverMetaValue}>{compact(report.threshold)} views</Text>
               <Text style={{ fontSize: 6.6, color: C.subtle, marginTop: 2 }}>
                 {report.thresholdSource === "niche"
@@ -481,6 +487,29 @@ export function ReportDocument({ report }: { report: ReportData }) {
                   : report.thresholdSource === "override"
                     ? "Manual override for this report"
                     : "Account default"}
+              </Text>
+            </View>
+            <View>
+              {/* The exclusions, on the cover, in the artefact that outlives
+                  every screen. A PDF gets forwarded and read six months later
+                  by somebody who cannot hover a tooltip, so "22% over 40
+                  decided" has to be legible without one. */}
+              <Text style={s.coverMetaLabel}>HIT RATE BASIS</Text>
+              <Text style={s.coverMetaValue}>
+                {report.hits.judged} decided of{" "}
+                {report.hits.judged + report.hits.excluded} Shorts
+              </Text>
+              <Text style={{ fontSize: 6.6, color: C.subtle, marginTop: 2 }}>
+                {report.hits.tally.pending > 0
+                  ? `${report.hits.tally.pending} still in window · `
+                  : ""}
+                {report.hits.tally.unknown > 0
+                  ? `${report.hits.tally.unknown} unrecorded · `
+                  : ""}
+                {report.hits.tally.unscoreable > 0
+                  ? `${report.hits.tally.unscoreable} no rule`
+                  : ""}
+                {report.hits.excluded === 0 ? "Nothing excluded" : ""}
               </Text>
             </View>
             <View>
@@ -708,7 +737,7 @@ function ChannelRow({ row }: { row: ReportChannelRow }) {
         {compact(row.metrics.totalViews)}
       </Text>
       <Text style={{ ...s.tCell, flex: 1, textAlign: "right" }}>
-        {pct(row.metrics.hitRate)}
+        {pct(row.metrics.hits.rate)}
       </Text>
       <Text style={{ ...s.tCell, flex: 1, textAlign: "right" }}>
         {compact(row.metrics.medianViews)}

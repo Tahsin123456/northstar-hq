@@ -4,7 +4,12 @@ import type { ChannelMetrics } from "@/lib/analytics/types";
 import type { ChannelDTO, NicheRefDTO, OwnershipType } from "@/lib/dto";
 import { filterRowsByScope, untaggedChannelCount } from "@/hooks/use-channel-analytics";
 import { DEFAULT_SORT, sortRows } from "@/lib/sorting";
-import { DAY_MS, daysAgo, makeShort } from "@/lib/analytics/__tests__/factories";
+import {
+  DAY_MS,
+  daysAgo,
+  makeHit,
+  makeMiss,
+} from "@/lib/analytics/__tests__/factories";
 
 /**
  * Niche and ownership scoping.
@@ -68,7 +73,21 @@ function makeRow(options: {
   return {
     channel,
     metrics: calculateChannelMetrics({
-      videos: views.map((v, i) => makeShort({ views: v, publishedAt: daysAgo(i + 1, NOW) })),
+      /*
+       * Decided Shorts, hit where they cleared a million.
+       *
+       * This file is about SCOPE — which rows a niche or ownership filter
+       * admits — and the hit rate is only here so the scoped summary has
+       * something to be right about. Giving the fixtures verdicts keeps that
+       * intact: without them every Short would be unscoreable and the summary
+       * would be null everywhere, which would make these assertions pass for a
+       * reason that has nothing to do with scoping.
+       */
+      videos: views.map((v, i) =>
+        v >= 1_000_000
+          ? makeHit({ views: v, publishedAt: daysAgo(i + 1, NOW) })
+          : makeMiss({ views: v, publishedAt: daysAgo(i + 1, NOW) }),
+      ),
       range: range(30),
       threshold: 1_000_000,
     }),
