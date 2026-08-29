@@ -101,12 +101,18 @@ const NAV_SECTIONS: NavSection[] = [
     label: "Business",
     items: [
       {
-        // Everyone's, and only ever their own row. Listed unconditionally
-        // because every role holds `earnings.view_own` — the `requires` below
-        // would be a filter that never filters, which reads as though it might.
+        // An employee's own pay, and only ever their own row.
+        //
+        // This was listed unconditionally, on the reasoning that every role held
+        // `earnings.view_own` so a filter here would never filter. That stopped
+        // being true when the permission was withheld from Admin — an admin
+        // reads the whole payroll next door, so a personal earnings page would
+        // be a narrower version of a screen they already have. Without the gate
+        // they kept a nav entry to a page that answers 403.
         href: "/earnings",
         label: "Your Earnings",
         icon: Coins,
+        requires: ["earnings.view_own"],
       },
       {
         href: "/finance",

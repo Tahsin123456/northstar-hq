@@ -70,10 +70,15 @@ export const PERMISSIONS = [
    * the caller and nobody else, and the service behind it takes the user id
    * from the session with no parameter that could redirect it.
    *
-   * Held by every role, which is also why it is not grantable: an employee
-   * asking what they earned is not a privilege an administrator hands out, and
-   * a checklist entry that is already ticked for everyone would only suggest it
-   * could be un-ticked. It cannot — grants are additive.
+   * Held by every EMPLOYEE role, and deliberately not by Admin — see
+   * `WITHHELD_FROM_ADMIN`. An admin reads the whole payroll, of which their own
+   * row is one line; a personal earnings page would be a smaller version of a
+   * screen they already have.
+   *
+   * Not grantable, for the same reason it is not a privilege: an employee
+   * asking what they earned is not something an administrator hands out, and a
+   * checklist entry already ticked for every role that should have it would
+   * only suggest it could be un-ticked. It cannot — grants are additive.
    */
   "earnings.view_own",
 
@@ -152,17 +157,25 @@ export interface RoleDefinition {
   readonly contentScope: "shorts" | "longs" | "all";
 }
 
-/** Everything an admin can do — kept as a derived list so it cannot drift. */
+/**
+ * Every capability there is, derived so it cannot drift from the list above.
+ *
+ * The Admin role is this MINUS `WITHHELD_FROM_ADMIN` — see the note there. It
+ * is spelled as a subtraction rather than a hand-written list so a permission
+ * added later still reaches Admin without anybody remembering to add it.
+ */
 const ALL_PERMISSIONS: readonly Permission[] = PERMISSIONS;
 
 /**
- * Held by every role, without exception.
+ * Held by every EMPLOYEE role, without exception. Admin is the one role that
+ * does not take it — see `WITHHELD_FROM_ADMIN`.
  *
  * Spread explicitly into each definition below rather than folded into the
  * research baseline, because it is not research: a Long Form Editor who never
  * opens a Shorts dashboard still has a salary and is still entitled to see it.
- * `src/lib/auth/__tests__/permissions.test.ts` pins that every entry in ROLES
- * carries it, so a role added later cannot quietly ship without it.
+ * `src/lib/auth/__tests__/permissions.test.ts` pins that every EMPLOYEE role
+ * carries it, so a role added later cannot quietly ship without it — and that
+ * Admin does not, so the exception cannot be undone by accident either.
  */
 const SELF_SERVICE: readonly Permission[] = ["earnings.view_own"];
 
@@ -179,13 +192,33 @@ const RESEARCH_BASELINE: readonly Permission[] = [
 /** What a department head needs on top of the research baseline. */
 const HEAD_OPERATIONS: readonly Permission[] = ["channels.manage", "niches.manage", "sync.trigger"];
 
+/**
+ * The one capability an Admin deliberately does NOT hold.
+ *
+ * `earnings.view_own` draws a personal pay page: your salary, your hit bonus,
+ * your history. An Admin already has Admin → Payroll, which is the same figures
+ * for everybody including themselves, so the personal page would be a second,
+ * narrower answer to a question they can already ask better — and a nav entry
+ * that promises something the screen beside it does more of.
+ *
+ * Subtracted from `ALL_PERMISSIONS` by name rather than by hand-listing the
+ * rest, so a permission added later still reaches Admin automatically. "Admin
+ * has everything" remains the rule; this is its one stated exception, and
+ * stating it here is what stops it being rediscovered as a bug.
+ */
+const WITHHELD_FROM_ADMIN: readonly Permission[] = ["earnings.view_own"];
+
+const ADMIN_PERMISSIONS: readonly Permission[] = ALL_PERMISSIONS.filter(
+  (permission) => !WITHHELD_FROM_ADMIN.includes(permission),
+);
+
 export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
   admin: {
     id: "admin",
     label: "Admin",
     description:
-      "Full access, including payroll, finance, user administration, YouTube connections and system settings.",
-    permissions: ALL_PERMISSIONS,
+      "Full access, including payroll, finance, user administration, YouTube connections and system settings. Sees the whole payroll rather than a personal earnings page.",
+    permissions: ADMIN_PERMISSIONS,
     nicheScoped: false,
     contentScope: "all",
   },
@@ -355,9 +388,11 @@ const NON_GRANTABLE: readonly Permission[] = [
   // themselves without limit, so it may only arrive with the Admin role.
   "users.manage",
   // Excluded for the opposite reason to everything else on this list: every
-  // role already holds it, so offering it as a checkbox would imply it could be
-  // cleared. Grants are additive — unticking it would change nothing — and a
-  // control that cannot do what it appears to do is worse than no control.
+  // role that should have it already does, so offering it as a checkbox would
+  // imply it could be cleared. Grants are additive — unticking it would change
+  // nothing — and a control that cannot do what it appears to do is worse than
+  // no control. It is also the one thing an Admin cannot grant themselves back;
+  // see WITHHELD_FROM_ADMIN.
   "earnings.view_own",
   // Payroll carries every colleague's salary. It is grantable in principle but
   // deliberately not from the ordinary permission checklist — widening someone

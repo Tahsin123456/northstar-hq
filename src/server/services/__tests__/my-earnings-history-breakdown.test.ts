@@ -251,7 +251,7 @@ describe("whose month is explained", () => {
 
   it("follows the session when it changes, and never an argument", async () => {
     mocks.actor.userId = DANA;
-    mocks.actor.role = "admin";
+    mocks.actor.role = "head_of_shorts";
 
     const breakdown = await getMyEarningsHistoryBreakdown({ year: 2026, month: 8 });
 
@@ -262,7 +262,7 @@ describe("whose month is explained", () => {
   it("scopes to the session's organization, so the same id elsewhere is invisible", async () => {
     // May 2026 exists for this user id — in another workspace. An admin here is
     // still nobody there.
-    mocks.actor.role = "admin";
+    mocks.actor.role = "head_of_shorts";
 
     await expect(getMyEarningsHistoryBreakdown({ year: 2026, month: 5 })).rejects.toThrow(
       /could not be found/i,

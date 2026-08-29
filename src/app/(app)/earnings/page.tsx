@@ -1,15 +1,18 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { CalendarRange, ChevronRight, Info, Lock, Target } from "lucide-react";
 import { PageContainer, PageHeader } from "@/components/layout/app-shell";
 import { ErrorState } from "@/components/common/error-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useSession } from "@/components/providers/session-provider";
 import {
   formatUtcDay,
   fromUtcDayInputValue,
@@ -79,6 +82,45 @@ import { cn } from "@/lib/utils";
  * posts, and no hook that writes — the only control is which window to look at.
  */
 export default function EarningsPage() {
+  const session = useSession();
+
+  /*
+   * An admin has no personal earnings page, on purpose.
+   *
+   * `earnings.view_own` is withheld from the Admin role — they read Admin →
+   * Payroll, which is every row including their own, so this would be a
+   * narrower answer to a question they can already ask better. The sidebar
+   * entry is gated on the same permission, so this is only reachable by typing
+   * the URL; without it that lands on the API's 403 rendered as an error, which
+   * says something went wrong when nothing did.
+   *
+   * An affordance, not the boundary: the route refuses regardless.
+   */
+  if (!session.can("earnings.view_own")) {
+    return (
+      <PageContainer>
+        <Card>
+          <EmptyState
+            icon={<Lock />}
+            title="This page is for employees"
+            description="Administrators read the whole payroll instead — your own row is on it, alongside everybody else's."
+            action={
+              session.can("payroll.view") ? (
+                <Button asChild variant="primary" size="sm">
+                  <Link href="/admin/payroll">Open Payroll</Link>
+                </Button>
+              ) : undefined
+            }
+          />
+        </Card>
+      </PageContainer>
+    );
+  }
+
+  return <MyEarnings />;
+}
+
+function MyEarnings() {
   const [period, setPeriod] = React.useState<EarningsPeriodQuery>({ kind: "current" });
   const { data, isLoading, error, refetch } = useMyEarnings(period);
 
@@ -86,7 +128,12 @@ export default function EarningsPage() {
     <PageContainer className="flex max-w-2xl flex-col gap-5">
       <PageHeader
         title="Your Earnings"
-        description="How much you are paid, and why. Only you and an administrator can see this page."
+        // "on the payroll", not "this page": an administrator no longer has a
+        // personal earnings screen at all, so promising they can see this one
+        // would be describing a route that answers 403 for them. What is still
+        // true — and the thing an employee actually wants to know — is that
+        // their figures are not private from the person who sets them.
+        description="How much you are paid, and why. Nobody else sees this page; your figures appear on the payroll an administrator runs."
       />
 
       <PeriodPicker period={period} onChange={setPeriod} />

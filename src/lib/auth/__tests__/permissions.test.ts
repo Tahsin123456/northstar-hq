@@ -21,9 +21,20 @@ import {
  */
 
 describe("role catalogue", () => {
-  it("gives the admin every permission", () => {
+  /**
+   * Admin holds everything except the personal earnings page.
+   *
+   * Written as "all but this one named exception" rather than a list, so a
+   * permission added to the catalogue tomorrow fails here unless it genuinely
+   * reaches Admin — which is the property the subtraction in `permissions.ts`
+   * exists to keep. The exception itself is argued at `WITHHELD_FROM_ADMIN` and
+   * pinned again under `earnings.view_own` below.
+   */
+  it("gives the admin every permission but the personal earnings page", () => {
     for (const permission of PERMISSIONS) {
-      expect(can({ role: "admin" }, permission)).toBe(true);
+      expect(can({ role: "admin" }, permission), permission).toBe(
+        permission !== "earnings.view_own",
+      );
     }
   });
 
@@ -114,8 +125,26 @@ describe("what each role may do", () => {
  * cannot find out what they are owed.
  */
 describe("earnings.view_own", () => {
-  it.each(ROLES)("is held by %s — everybody can see their own pay", (role) => {
+  const EMPLOYEE_ROLES = ROLES.filter((role) => role !== "admin");
+
+  it.each(EMPLOYEE_ROLES)("is held by %s — every employee can see their own pay", (role) => {
     expect(can({ role }, "earnings.view_own")).toBe(true);
+  });
+
+  /**
+   * The exception, pinned so it cannot be undone by accident.
+   *
+   * Admin is `ALL_PERMISSIONS` minus this one. Since the subtraction is the
+   * only thing standing between an admin and a personal earnings page — and
+   * since "admin has everything" is the obvious thing for somebody to restore
+   * while tidying — the absence is asserted rather than assumed.
+   *
+   * They lose nothing: Admin → Payroll is the same figures for the whole team,
+   * their own row included, which is why the personal page was withheld.
+   */
+  it("is NOT held by admin — they read the whole payroll instead", () => {
+    expect(can({ role: "admin" }, "earnings.view_own")).toBe(false);
+    expect(can({ role: "admin" }, "payroll.view")).toBe(true);
   });
 
   it("does not carry payroll with it", () => {

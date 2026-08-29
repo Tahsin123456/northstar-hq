@@ -26,7 +26,7 @@ export const dynamic = "force-dynamic";
  *                    estimate: a range that is not a calendar month is not a
  *                    payroll period and can never be finalized.
  *
- * `earnings.view_own` is held by every role and is deliberately NOT
+ * `earnings.view_own` is held by every employee role and is deliberately NOT
  * `payroll.view`, which is the whole company's pay and belongs to admins. It is
  * checked here before anything touches the database, and again inside the
  * service as the backstop for any future non-route caller.

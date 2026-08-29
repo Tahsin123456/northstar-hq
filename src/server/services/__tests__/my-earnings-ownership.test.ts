@@ -163,7 +163,7 @@ describe("whose earnings are returned", () => {
     // The only thing that can move the subject is who is signed in. Dana's
     // session gets Dana's row; nothing about the call site changed.
     mocks.actor.userId = DANA;
-    mocks.actor.role = "admin";
+    mocks.actor.role = "head_of_shorts";
 
     await getMyEarnings({ period: { kind: "current" } });
 
@@ -200,9 +200,9 @@ describe("whose earnings are returned", () => {
 
   it("never widens the payroll load to the whole team", async () => {
     // The admin dashboard calls the same loader with no `onlyUserId` and gets
-    // everybody. This path must always narrow, whoever is asking — an admin
-    // opening their own earnings screen is still asking about themselves.
-    mocks.actor.role = "admin";
+    // everybody. This path must always narrow — the personal screen is about
+    // one person by construction, not by the caller's restraint.
+    mocks.actor.role = "head_of_shorts";
 
     await getMyEarnings({ period: { kind: "current" } });
 
@@ -210,11 +210,30 @@ describe("whose earnings are returned", () => {
     expect(options?.onlyUserId).toBe(SAM);
   });
 
+  /**
+   * An admin cannot reach this path at all, and that is deliberate.
+   *
+   * They read Admin → Payroll, which is every row including their own, so a
+   * personal earnings page would be a narrower answer to a question they can
+   * already ask better. `earnings.view_own` is withheld from the Admin role for
+   * exactly that reason — see `WITHHELD_FROM_ADMIN` — and the refusal is
+   * asserted here because a service that silently returned an admin's own row
+   * would look correct while contradicting the nav they are actually shown.
+   */
+  it("refuses an admin outright rather than narrowing them to their own row", async () => {
+    mocks.actor.role = "admin";
+
+    await expect(getMyEarnings({ period: { kind: "current" } })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(mocks.loadPayrollInputs).not.toHaveBeenCalled();
+  });
+
   it("refuses a caller who holds no permission at all", async () => {
     mocks.actor.role = "nobody_at_all";
     mocks.actor.grants = [];
     // `roleDefinition` fails closed to the least-privileged role, which does
-    // hold `earnings.view_own` — every role does. So the meaningful assertion is
+    // hold `earnings.view_own` — every employee role does. So the assertion is
     // the opposite one: an unknown role gets its OWN row and nothing wider.
     await expect(getMyEarnings({ period: { kind: "current" } })).resolves.toBeTruthy();
     const options = mocks.loadPayrollInputs.mock.calls[0]?.[2] as { onlyUserId?: string };

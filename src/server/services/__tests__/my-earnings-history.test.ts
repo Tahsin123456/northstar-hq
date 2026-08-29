@@ -259,7 +259,7 @@ describe("whose history is returned", () => {
   it("follows the session when it changes, and never a caller's argument", async () => {
     // The only thing that can move the subject is who is signed in.
     mocks.actor.userId = DANA;
-    mocks.actor.role = "admin";
+    mocks.actor.role = "head_of_shorts";
 
     const { rows } = await getMyEarningsHistory();
 
@@ -292,15 +292,30 @@ describe("whose history is returned", () => {
     expect(JSON.stringify(whereOf())).not.toContain(DANA);
   });
 
-  it("narrows to the caller even when the caller is an admin", async () => {
-    // An admin opening their own earnings screen is still asking about
-    // themselves. The whole-company view is `payroll.view`, on another endpoint.
-    mocks.actor.role = "admin";
+  it("narrows to the caller, whichever employee is asking", async () => {
+    // The whole-company view is `payroll.view`, on another endpoint entirely.
+    mocks.actor.role = "short_form_clip_producer";
 
     await getMyEarningsHistory();
 
     expect(whereOf().userId).toBe(SAM);
   });
+
+  /**
+   * An admin cannot reach this path at all, and that is deliberate.
+   *
+   * They read Admin → Payroll, which is every row including their own, so a
+   * personal earnings screen would be a narrower answer to a question they can
+   * already ask better. `earnings.view_own` is withheld from the Admin role for
+   * exactly that reason — see `WITHHELD_FROM_ADMIN`.
+   */
+  it("refuses an admin outright rather than narrowing them to their own row", async () => {
+    mocks.actor.role = "admin";
+
+    await expect(getMyEarningsHistory()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(mocks.findMany).not.toHaveBeenCalled();
+  });
+
 });
 
 describe("the page parser refuses to carry a person", () => {
