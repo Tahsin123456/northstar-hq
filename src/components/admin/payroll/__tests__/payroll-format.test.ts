@@ -9,11 +9,13 @@ import {
   formatRunTotal,
   formatRunTotalWithRecords,
   formatUtcDay,
+  fromUtcDayInputValue,
   isStoredRecord,
   periodSentence,
   periodState,
   periodWindowSentence,
   subtotalsByCurrency,
+  toUtcDayInputValue,
 } from "../payroll-format";
 import type {
   PayrollPeriodHeaderDTO,
@@ -112,6 +114,58 @@ describe("formatUtcDay", () => {
 
   it("does not fall over on a value that is not a date", () => {
     expect(formatUtcDay(Number.NaN)).toBe("—");
+  });
+});
+
+/**
+ * The date-picker pair, which the Earnings screen's custom range is built on.
+ *
+ * The bug being pinned is silent by construction: a range picked as 1 August
+ * and sent as a local-midnight bound arrives at a UTC-labelling server as
+ * 31 July, and every figure that comes back is a correct answer to the wrong
+ * question. There is no error, and the numbers look plausible — so the only
+ * thing that can catch it is an assertion about the boundary itself.
+ */
+describe("UTC day input values", () => {
+  it("round-trips a day without drifting across midnight", () => {
+    const day = Date.UTC(2026, 7, 1);
+    expect(toUtcDayInputValue(day)).toBe("2026-08-01");
+    expect(fromUtcDayInputValue("2026-08-01")).toBe(day);
+  });
+
+  it("reads the string as UTC, never as local time", () => {
+    // The whole point. `new Date("2026-08-01")` is already UTC, but
+    // `new Date(2026, 7, 1)` — the shape `src/lib/date-range.ts` deliberately
+    // uses — is local, and would be 21:00 on 31 July for a viewer in UTC+3.
+    // Pinned against an explicit Zulu instant rather than `Date.UTC`, so the
+    // assertion is not the implementation restated.
+    expect(fromUtcDayInputValue("2026-08-01")).toBe(
+      Date.parse("2026-08-01T00:00:00.000Z"),
+    );
+    expect(new Date(fromUtcDayInputValue("2026-08-01")!).getUTCDate()).toBe(1);
+  });
+
+  it("survives the exclusive end bound the API and the field disagree about", () => {
+    // A range whose last included day is 31 August is stored as 1 September:
+    // the field has to show the day before the bound, and the bound has to be
+    // the day after the field.
+    const endsAt = Date.UTC(2026, 8, 1);
+    const lastDay = endsAt - 86_400_000;
+    expect(toUtcDayInputValue(lastDay)).toBe("2026-08-31");
+    expect(fromUtcDayInputValue("2026-08-31")! + 86_400_000).toBe(endsAt);
+  });
+
+  it("returns null for a field that is empty, partial or impossible", () => {
+    expect(fromUtcDayInputValue("")).toBeNull();
+    expect(fromUtcDayInputValue("2026-08")).toBeNull();
+    expect(fromUtcDayInputValue("not a date")).toBeNull();
+    // `Date.UTC(2026, 1, 31)` rolls forward to 3 March rather than refusing.
+    // Without the round-trip check this would be a silent March.
+    expect(fromUtcDayInputValue("2026-02-31")).toBeNull();
+  });
+
+  it("gives an empty string rather than throwing on a bad timestamp", () => {
+    expect(toUtcDayInputValue(Number.NaN)).toBe("");
   });
 });
 

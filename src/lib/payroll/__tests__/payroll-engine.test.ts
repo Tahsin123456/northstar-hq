@@ -14,18 +14,19 @@ import {
 
 /**
  * Payroll is the one calculation here that moves money, so these tests are
- * written against the brief's own worked examples and against the specific ways
- * a bonus could be paid twice.
+ * written against the brief's own worked examples, against the specific ways a
+ * bonus could be paid twice, and against the way one used to be paid for a hit
+ * nobody had defined.
  */
 
 const NICHES: PayrollNiche[] = [
   { id: "gta", name: "GTA", hitThreshold: 1_000_000 },
   { id: "rdr", name: "Red Dead Redemption", hitThreshold: 750_000 },
   { id: "tlou", name: "The Last of Us", hitThreshold: 500_000 },
-  { id: "science", name: "Science", hitThreshold: null }, // inherits the org default
+  // Nobody has said what a hit is here. Nothing in it can be one.
+  { id: "science", name: "Science", hitThreshold: null },
 ];
 
-const ORG_DEFAULT = 1_000_000;
 const AUGUST = periodForMonth(2026, 8);
 
 const employee = (overrides: Partial<PayrollEmployee> = {}): PayrollEmployee => ({
@@ -64,7 +65,6 @@ const run = (emp: PayrollEmployee, shorts: PayrollShort[]) =>
     shorts,
     niches: NICHES,
     period: AUGUST,
-    organizationDefaultThreshold: ORG_DEFAULT,
   });
 
 describe("the brief's worked example", () => {
@@ -127,17 +127,6 @@ describe("the niche threshold decides the hit", () => {
     expect(result.hits.map((h) => h.nicheId).sort()).toEqual(["rdr", "tlou"]);
   });
 
-  it("falls back to the organization default for an unconfigured niche", () => {
-    const shorts = [
-      short({ nicheIds: ["science"], views: 1_200_000 }),
-      short({ nicheIds: ["science"], views: 900_000 }),
-    ];
-    const result = run(employee({ nicheIds: ["science"] }), shorts);
-
-    expect(result.hitCount).toBe(1);
-    expect(result.hits[0]?.thresholdApplied).toBe(ORG_DEFAULT);
-  });
-
   it("counts a Short sitting exactly on the threshold", () => {
     // Inclusive at the boundary, matching isHit everywhere else in the app.
     const result = run(employee(), [short({ nicheIds: ["rdr"], views: 750_000 })]);
@@ -152,6 +141,165 @@ describe("the niche threshold decides the hit", () => {
     expect(result.hits.map((h) => h.thresholdApplied).sort((a, b) => a - b)).toEqual([
       500_000, 750_000,
     ]);
+  });
+});
+
+/**
+ * =========================================================================
+ * AN UNCONFIGURED NICHE PAYS NOTHING, AND SAYS SO
+ * =========================================================================
+ *
+ * This block replaces a test that asserted the opposite — "falls back to the
+ * organization default for an unconfigured niche" — which encoded the bug
+ * rather than a rule. The product had already been made honest everywhere else:
+ * a niche with a null `hitThreshold` resolves to "unconfigured", the dashboard
+ * prints "Hit rate threshold: Not configured", and the report dialog refuses to
+ * generate. Payroll alone went on borrowing the organization's 1,000,000 and
+ * paying a real bonus for hits the product had just said it could not measure.
+ *
+ * The old test could not be weakened into agreement because it asserted the
+ * exact behaviour being removed. It is gone, and these stand in its place: the
+ * Short is not counted, it is REPORTED as skipped with its niche named, and a
+ * Short in a configured niche is untouched.
+ */
+describe("an unconfigured niche cannot produce a hit", () => {
+  it("does not count a Short whose niche has no threshold", () => {
+    // Both of these cleared the old organization default of 1,000,000 and paid
+    // a bonus. Nobody ever chose that bar for Science.
+    const shorts = [
+      short({ nicheIds: ["science"], views: 1_200_000 }),
+      short({ nicheIds: ["science"], views: 5_000_000 }),
+    ];
+
+    const result = run(employee({ nicheIds: ["science"] }), shorts);
+
+    expect(result.hitCount).toBe(0);
+    expect(result.hitBonusMinor).toBe(0);
+    expect(result.byNiche).toEqual([]);
+    expect(result.totalMinor).toBe(400_000); // salary only
+  });
+
+  it("reports the skipped Shorts, naming the niche responsible", () => {
+    const shorts = [
+      short({ nicheIds: ["science"], views: 1_200_000 }),
+      short({ nicheIds: ["science"], views: 5_000_000 }),
+    ];
+
+    const result = run(employee({ nicheIds: ["science"] }), shorts);
+
+    // The whole point of the second half of the fix: a bonus that quietly
+    // shrinks is indistinguishable from a bug, so the calculation has to be
+    // able to say what it could not judge and why.
+    expect(result.skippedNiches).toEqual([
+      { nicheId: "science", nicheName: "Science", shortCount: 2 },
+    ]);
+  });
+
+  it("leaves a configured niche completely unaffected", () => {
+    const shorts = [
+      short({ nicheIds: ["science"], views: 5_000_000 }), // no bar — skipped
+      short({ nicheIds: ["rdr"], views: 900_000 }), // over 750K — paid
+      short({ nicheIds: ["rdr"], views: 700_000 }), // under 750K — a real miss
+    ];
+
+    const result = run(employee({ nicheIds: ["science", "rdr"] }), shorts);
+
+    expect(result.hitCount).toBe(1);
+    expect(result.hits[0]?.nicheId).toBe("rdr");
+    expect(result.hits[0]?.thresholdApplied).toBe(750_000);
+    expect(result.hitBonusMinor).toBe(1_000);
+
+    // The Short that genuinely missed RDR's bar is not "skipped" — it was
+    // judged, and it lost. Only Science, which could not be judged at all, is
+    // reported, and only the Short that is actually in it.
+    expect(result.skippedNiches).toEqual([
+      { nicheId: "science", nicheName: "Science", shortCount: 1 },
+    ]);
+  });
+
+  it("does not report a Short that earned through another niche", () => {
+    // Filed under both. It cleared GTA's bar and was paid, so calling it
+    // "not considered" would overstate what the missing Science bar cost.
+    const result = run(employee({ nicheIds: ["gta", "science"] }), [
+      short({ nicheIds: ["gta", "science"], views: 2_000_000 }),
+    ]);
+
+    expect(result.hitCount).toBe(1);
+    expect(result.hits[0]?.nicheId).toBe("gta");
+    expect(result.skippedNiches).toEqual([]);
+  });
+
+  it("reports nothing for somebody who could not have earned a bonus anyway", () => {
+    // No per-hit rate: this person's bonus is zero for a reason that has
+    // nothing to do with a threshold, and an alarm here would point at the
+    // wrong problem.
+    const result = run(employee({ nicheIds: ["science"], hitPaymentMinor: 0 }), [
+      short({ nicheIds: ["science"], views: 5_000_000 }),
+    ]);
+
+    expect(result.skippedNiches).toEqual([]);
+  });
+
+  it("counts each skipped Short once, however many rows it arrives in", () => {
+    const duplicated = short({ videoId: "same", nicheIds: ["science"], views: 5_000_000 });
+    const result = run(employee({ nicheIds: ["science"] }), [
+      duplicated,
+      { ...duplicated },
+      { ...duplicated },
+    ]);
+
+    expect(result.skippedNiches[0]?.shortCount).toBe(1);
+  });
+
+  it("ignores Shorts outside the period and off owned channels", () => {
+    const result = run(employee({ nicheIds: ["science"] }), [
+      short({ nicheIds: ["science"], views: 5_000_000, publishedAtMs: Date.UTC(2026, 6, 20) }),
+      short({ nicheIds: ["science"], views: 5_000_000, isOwnChannel: false }),
+      short({ nicheIds: ["science"], views: 5_000_000 }), // August, owned
+    ]);
+
+    // Drawn from exactly the population the bonus loop considers. A report over
+    // a wider set would answer a question nobody asked.
+    expect(result.skippedNiches[0]?.shortCount).toBe(1);
+  });
+
+  it("counts distinct Shorts across the run, not the sum of everyone's", () => {
+    // Two people on the same unconfigured niche see the same Shorts go
+    // uncounted. Adding their figures would tell an admin twice as many Shorts
+    // were affected as exist.
+    const shorts = [
+      short({ nicheIds: ["science"], views: 5_000_000 }),
+      short({ nicheIds: ["science"], views: 4_000_000 }),
+    ];
+
+    const team = calculatePayrollRun({
+      employees: [
+        employee({ userId: "u1", nicheIds: ["science"] }),
+        employee({ userId: "u2", name: "Alex", nicheIds: ["science"] }),
+      ],
+      shorts,
+      niches: NICHES,
+      period: AUGUST,
+    });
+
+    expect(team.skippedNiches).toEqual([
+      { nicheId: "science", nicheName: "Science", shortCount: 2 },
+    ]);
+    // Salary only, for both.
+    expect(team.totalMinor).toBe(800_000);
+  });
+
+  it("says nothing about an unconfigured niche nobody is assigned to", () => {
+    // It costs no money, so it is not this banner's business — the niches list
+    // is where an unassigned one gets chased.
+    const team = calculatePayrollRun({
+      employees: [employee({ nicheIds: ["gta"] })],
+      shorts: [short({ nicheIds: ["science"], views: 5_000_000 })],
+      niches: NICHES,
+      period: AUGUST,
+    });
+
+    expect(team.skippedNiches).toEqual([]);
   });
 });
 
@@ -275,7 +423,6 @@ describe("employment dates", () => {
       shorts: [],
       niches: NICHES,
       period: AUGUST,
-      organizationDefaultThreshold: ORG_DEFAULT,
     });
 
     expect(team.calculations).toHaveLength(1);
@@ -294,7 +441,6 @@ describe("the team run", () => {
       shorts,
       niches: NICHES,
       period: AUGUST,
-      organizationDefaultThreshold: ORG_DEFAULT,
     });
 
     // John: 400,000 + 10 x 1,000 = 410,000. Alex: 200,000 + 10 x 500 = 205,000.
@@ -313,7 +459,6 @@ describe("the team run", () => {
       shorts: [one],
       niches: NICHES,
       period: AUGUST,
-      organizationDefaultThreshold: ORG_DEFAULT,
     });
 
     expect(team.totalMinor).toBe(1_500);

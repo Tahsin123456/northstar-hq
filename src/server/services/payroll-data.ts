@@ -7,7 +7,6 @@ import type {
   PayrollPeriodWindow,
   PayrollShort,
 } from "@/lib/payroll/payroll-engine";
-import { getOrgSettings } from "./user-service";
 
 /**
  * =========================================================================
@@ -44,42 +43,60 @@ import { getOrgSettings } from "./user-service";
  * first, in the route handler, before it ever gets here.
  */
 
-/** Exactly the arguments `calculatePayrollRun` takes. */
+/**
+ * Exactly the arguments `calculatePayrollRun` takes.
+ *
+ * THERE IS NO ORGANIZATION DEFAULT THRESHOLD HERE, AND THAT IS THE POINT. This
+ * module used to hand the engine `settings.defaultThreshold` to fall back on
+ * for a niche that had never been configured, which is how an unconfigured
+ * niche came to pay real bonuses for hits the rest of the product said it could
+ * not measure. A null `hitThreshold` now means "not measurable" in payroll
+ * exactly as it does on the dashboard, so there is no number to pass and
+ * nothing for a future edit to reach for.
+ */
 export interface PayrollInputs {
   readonly employees: readonly PayrollEmployee[];
   readonly shorts: readonly PayrollShort[];
   readonly niches: readonly PayrollNiche[];
-  readonly organizationDefaultThreshold: number;
+}
+
+/**
+ * Narrows a load to one person.
+ *
+ * `onlyUserId` exists for the employee's own earnings screen, which needs
+ * exactly one line and has no business pulling the team's salaries into the
+ * process that serves it. It changes WHICH employees are loaded and nothing
+ * else — the niches, the Shorts and the threshold are identical, so the engine
+ * sees the same world it would have seen on the admin run and produces the same
+ * figure. That identity is the whole point: two gatherers would be two answers.
+ *
+ * It is NOT an authorization control. The caller decides whose id goes in here,
+ * and the only caller that passes one takes it from the session.
+ */
+export interface PayrollInputOptions {
+  readonly onlyUserId?: string;
 }
 
 /**
  * Everything the payroll engine needs for one organization and one period.
  *
- * Four reads that do not depend on each other run together; the Shorts query
+ * Three reads that do not depend on each other run together; the Shorts query
  * waits only because it needs the set of owned channels first.
  */
 export async function loadPayrollInputs(
   organizationId: string,
   period: PayrollPeriodWindow,
+  options: PayrollInputOptions = {},
 ): Promise<PayrollInputs> {
-  const [settings, members, niches, ownedChannels] = await Promise.all([
-    getOrgSettings(organizationId),
-    loadEmployeeMembers(organizationId),
+  const [members, niches, ownedChannels] = await Promise.all([
+    loadEmployeeMembers(organizationId, options.onlyUserId),
     loadNiches(organizationId),
     loadOwnedChannels(organizationId),
   ]);
 
   const shorts = await loadShorts(ownedChannels, period);
 
-  return {
-    employees: members,
-    shorts,
-    niches,
-    // The canonical org-wide fallback for a niche that has not set its own bar.
-    // Payroll reads the same field the dashboard, the charts and the PDF read;
-    // there is no separate "payroll threshold" and there must never be one.
-    organizationDefaultThreshold: settings.defaultThreshold,
-  };
+  return { employees: members, shorts, niches };
 }
 
 // ---------------------------------------------------------------------------
@@ -105,11 +122,18 @@ export async function loadPayrollInputs(
  * applies — not by whether their login still works. Someone who left on the
  * 20th is paid for August and cannot sign in; those are different facts.
  */
-async function loadEmployeeMembers(organizationId: string): Promise<PayrollEmployee[]> {
+async function loadEmployeeMembers(
+  organizationId: string,
+  onlyUserId?: string,
+): Promise<PayrollEmployee[]> {
   const members = await prisma.organizationMember.findMany({
     where: {
       organizationId,
       user: { employeeProfile: { is: { organizationId } } },
+      // Narrowed only when a caller asked for one person. `organizationId` is
+      // still in the clause above it, so a user id from another workspace
+      // matches nothing rather than reaching across the tenancy line.
+      ...(onlyUserId ? { userId: onlyUserId } : {}),
     },
     select: {
       role: true,
@@ -174,9 +198,9 @@ async function loadEmployeeMembers(organizationId: string): Promise<PayrollEmplo
  * All of them, not only those attached to owned channels: the engine looks
  * niches up by id from two directions — the employee's assignments and the
  * channel's — and a missing entry would silently drop a hit that should have
- * paid. `hitThreshold` stays nullable all the way through; the engine resolves
- * null against the organization default, so the two possible meanings of "no
- * threshold set" never collapse into one here.
+ * paid. `hitThreshold` stays nullable all the way through, and the engine reads
+ * a null as "nothing here can be a hit" rather than resolving it to anything —
+ * so the column is carried, never coerced.
  */
 async function loadNiches(organizationId: string): Promise<PayrollNiche[]> {
   return prisma.niche.findMany({

@@ -10,6 +10,7 @@ import type { AuditAction } from "@/lib/audit/actions";
 import { roleDefinition } from "@/lib/auth/permissions";
 import { MAX_MONEY_MINOR } from "@/lib/finance/money";
 import {
+  calculateEmployeePayroll,
   calculatePayrollRun,
   payDateFor,
   periodContaining,
@@ -19,6 +20,7 @@ import {
   type PayrollCalculation,
   type PayrollPeriodWindow,
   type QualifyingHit,
+  type SkippedNiche,
 } from "@/lib/payroll/payroll-engine";
 import { loadPayrollInputs } from "./payroll-data";
 import { getOrgSettings, getScope } from "./user-service";
@@ -47,6 +49,25 @@ import { getOrgSettings, getScope } from "./user-service";
  * reason and gets audit actions of its own — two of them, because correcting a
  * figure before it is paid and correcting one after the money left are
  * different events to have to find again.
+ *
+ * AN UNCONFIGURED NICHE PAYS NOTHING, AND THAT CHANGE IS NOT RETROACTIVE
+ * A niche with no `hitThreshold` produces no hits, in payroll as everywhere
+ * else — the engine's own note says why. Two consequences land in this file.
+ *
+ * First, the reduction is announced: a run reports `skippedNiches` — which
+ * niches had no bar and how many Shorts that left unjudged — the draft period
+ * carries it to the screen an admin reads before finalizing, and the
+ * finalization's audit entry carries it into the record, in its summary and its
+ * metadata. PayrollRecord has no column for it and the schema is not ours to
+ * change, so the audit entry is where the reason survives the run.
+ *
+ * Second, NOTHING ALREADY FINALIZED MOVES. A frozen period is read back from
+ * storage, and the branch in `buildPeriodDTO` is the only thing deciding that —
+ * so a period finalized under the old organization-default fallback keeps every
+ * figure it was finalized with, hits included. Those bonuses were paid; they
+ * are documents now. The new rule applies to runs computed from here on, and a
+ * frozen figure that somebody decides was wrong is corrected the way every
+ * other one is: an `adjustRecord` carrying a reason, on one person's record.
  *
  * EVERY RESPONSE CARRIES THE BREAKDOWN
  * No function here returns a bare total. A payroll figure that cannot be taken
@@ -88,6 +109,27 @@ export interface PayrollNicheLineDTO {
   /** The employee's per-hit rate, in minor units. */
   readonly hitPaymentMinor: number;
   readonly bonusMinor: number;
+}
+
+/**
+ * A niche that had Shorts in it and no threshold to judge them by.
+ *
+ * The engine's `SkippedNiche` as it crosses the wire — the same three fields,
+ * restated here so a client is not importing the engine's own vocabulary.
+ *
+ * WHY A PAYROLL RUN REPORTS THIS AT ALL. An unconfigured niche produces no
+ * hits, which is correct and is what the rest of the product already says. But
+ * it also means somebody is paid less than they would have been under the old
+ * fallback, for a reason that is a configuration gap rather than their work. A
+ * reduction with no reason attached is the failure this DTO exists to prevent:
+ * an admin sees which niches and how many Shorts before they finalize, and the
+ * same figures go into the audit entry so the reason survives the run.
+ */
+export interface PayrollSkippedNicheDTO {
+  readonly nicheId: string;
+  readonly nicheName: string;
+  /** Distinct Shorts in this niche that no threshold could judge. */
+  readonly shortCount: number;
 }
 
 /** One Short that earned a bonus, as it stood when it was counted. */
@@ -199,6 +241,20 @@ export interface PayrollPeriodHeaderDTO {
 export interface PayrollPeriodDTO extends PayrollPeriodHeaderDTO {
   readonly totals: PayrollTotalsDTO;
   readonly records: readonly PayrollRecordDTO[];
+  /**
+   * Niches this run could not judge, and how many Shorts that left uncounted.
+   *
+   * ONLY EVER POPULATED FOR A DRAFT, and deliberately so. A finalized period is
+   * read back from storage rather than recalculated, and PayrollRecord has no
+   * column for this — inventing one by re-running the engine over today's
+   * niches would be exactly the retroactive recalculation the rest of this file
+   * refuses. The reason a frozen run skipped something lives in its
+   * `payroll.period_finalized` audit entry, written at the moment it was true.
+   *
+   * Empty is the ordinary case: every niche somebody is assigned to has a
+   * threshold, so nothing was skipped.
+   */
+  readonly skippedNiches: readonly PayrollSkippedNicheDTO[];
 }
 
 /** A period without the per-employee detail — the history list. */
@@ -444,6 +500,1026 @@ export async function listPeriods(): Promise<readonly PayrollPeriodSummaryDTO[]>
 }
 
 // ---------------------------------------------------------------------------
+// READ: your own earnings
+//
+// The one thing in this file an employee can reach. Everything above is
+// `payroll.view` — the whole company's pay in one table — and nothing below
+// this block may ever be wired to `earnings.view_own`.
+//
+// THE OWNERSHIP GUARANTEE
+// `getMyEarnings` takes a period and nothing else. There is no `userId`
+// parameter to pass, no field on the options object to set, and no schema key
+// that would accept one, so a query string or a request body has nothing to
+// aim at. The subject is read once, from `getScope()`, which resolves the
+// session cookie. Adding a way to ask about somebody else would mean adding a
+// parameter — a visible change to a signature this comment sits on, not a
+// forgotten `??` in a where clause.
+// ---------------------------------------------------------------------------
+
+/** Which window the employee asked about. Never *whose* window. */
+export type EarningsPeriodKind = "current" | "previous" | "custom";
+
+export interface EarningsPeriodSelection {
+  readonly kind: EarningsPeriodKind;
+  /** Custom only. Inclusive. */
+  readonly startsAtMs?: number;
+  /** Custom only. Exclusive, like every other window here. */
+  readonly endsAtMs?: number;
+}
+
+/**
+ * A custom range is capped at two years.
+ *
+ * The Shorts query underneath is bounded by `publishedAt`, so an unbounded
+ * range is a table scan over every Short the organization has ever owned, run
+ * from an endpoint every employee holds. Two years is longer than any pay
+ * question anybody actually asks and short enough to stay an indexed read.
+ */
+const MAX_CUSTOM_RANGE_MS = 731 * 24 * 60 * 60 * 1000;
+
+/**
+ * Where the bar a hit was judged against came from.
+ *
+ *   "niche"        — the niche sets its own `hitThreshold`. There is a bar, and
+ *                    this is it.
+ *   "unconfigured" — the niche has no threshold, so there is no bar and nothing
+ *                    in it can be a hit. `thresholdApplied` is null, because
+ *                    there is genuinely no number to print. This used to read
+ *                    "organization", meaning the org default had been
+ *                    substituted — which paid bonuses against a bar nobody had
+ *                    chosen. Worth saying out loud on a payslip: "0 hits" and
+ *                    "nobody has told us what a hit means here" look identical
+ *                    and are completely different problems.
+ *   "as_finalized" — a frozen record. The threshold is the number recorded at
+ *                    the run; where it came from is not stored, and guessing
+ *                    from today's configuration would be a lie about a document
+ *                    whose whole value is that it cannot move.
+ */
+export type EarningsThresholdSource = "niche" | "unconfigured" | "as_finalized";
+
+export interface MyEarningsNicheLineDTO {
+  readonly nicheId: string | null;
+  readonly nicheName: string;
+  /**
+   * Null only for "unconfigured", where there is no bar to state.
+   *
+   * A zero would be worse than useless here — it reads as "every Short is a
+   * hit" — and the organization default would be the original bug wearing a
+   * different label.
+   */
+  readonly thresholdApplied: number | null;
+  readonly thresholdSource: EarningsThresholdSource;
+  readonly hitCount: number;
+  /** The employee's own per-hit rate, in minor units. */
+  readonly hitPaymentMinor: number;
+  readonly bonusMinor: number;
+}
+
+export interface MyEarningsPeriodDTO {
+  readonly kind: EarningsPeriodKind;
+  /** "August 2025", or "2025-08-01 to 2025-08-14" for a custom range. */
+  readonly label: string;
+  readonly startsAt: number;
+  /** Exclusive. */
+  readonly endsAt: number;
+  readonly hasEnded: boolean;
+}
+
+export interface MyEarningsDTO {
+  readonly period: MyEarningsPeriodDTO;
+
+  /**
+   * Whether this figure is settled.
+   *
+   *   "finalized" — read verbatim from the stored PayrollRecord. This is what
+   *                 was owed; nothing recalculates it.
+   *   "estimate"  — the engine, run just now against view counts that are still
+   *                 moving. It will change, and the UI must say so.
+   */
+  readonly basis: "finalized" | "estimate";
+  /** Null for a custom range, which is not a payroll period and never will be. */
+  readonly periodStatus: PayrollPeriodStatus | null;
+  readonly paymentStatus: PayrollPaymentStatus | null;
+  readonly paidAt: number | null;
+
+  /** False when the caller has no EmployeeProfile — they are not on payroll. */
+  readonly onPayroll: boolean;
+
+  readonly baseSalaryMinor: number;
+  readonly hitPaymentMinor: number;
+  readonly hitCount: number;
+  readonly hitBonusMinor: number;
+  /**
+   * An administrator's correction to a frozen figure, with its reason.
+   *
+   * Shown rather than hidden because the alternative is a total that does not
+   * equal base + bonus and cannot be explained — the exact unaccountable number
+   * the rest of this service exists to avoid. It is the employee's own pay, and
+   * the reason was written to justify a change to it.
+   */
+  readonly adjustmentMinor: number;
+  readonly adjustmentReason: string | null;
+  readonly totalMinor: number;
+  readonly currency: string;
+
+  readonly byNiche: readonly MyEarningsNicheLineDTO[];
+  readonly hits: readonly PayrollHitDTO[];
+
+  /**
+   * Their own Shorts that could not be counted, and the niches responsible.
+   *
+   * Empty on a finalized record: that figure is a document, and what today's
+   * configuration would have skipped says nothing about what was owed then.
+   */
+  readonly skippedNiches: readonly PayrollSkippedNicheDTO[];
+
+  /**
+   * True when this person is on niches but NONE of them has a threshold.
+   *
+   * The state requirement 3 of the brief is about. It is not "you earned
+   * nothing": no hit could be counted for them at all, so the bonus is zero for
+   * a reason nobody at their level can act on. Computed on the server rather
+   * than derived from `byNiche` on each screen, because it decides the headline
+   * sentence and a headline derived independently in two places is a headline
+   * that eventually disagrees with the rows under it.
+   */
+  readonly noMeasurableNiche: boolean;
+
+  /**
+   * Why the figure is what it is, in plain English.
+   *
+   * Never empty when the bonus is zero. "0 hits" is a fact with at least five
+   * different causes — no niche assignments, no per-hit rate, no threshold of
+   * its own, not employed yet, genuinely nothing cleared the bar — and an
+   * employee reading a zero is owed the one that applies to them rather than
+   * being left to guess or to ask an admin.
+   */
+  readonly notices: readonly string[];
+}
+
+/**
+ * The query for GET /api/me/earnings.
+ *
+ * `.strict()` is the load-bearing part. The route builds the object from three
+ * named parameters, so nothing else can arrive — and if a future edit widened
+ * it to pass the whole query object through, a stray `userId` would be a parse
+ * error here rather than a field somebody downstream might read.
+ */
+const myEarningsQuerySchema = z
+  .object({
+    period: z.enum(["current", "previous", "custom"]).default("current"),
+    startsAt: z.coerce.number().int().optional(),
+    endsAt: z.coerce.number().int().optional(),
+  })
+  .strict();
+
+/** Turns raw query parameters into a selection, or a 400. */
+export function parseMyEarningsPeriod(raw: {
+  readonly period?: string | null;
+  readonly startsAt?: string | null;
+  readonly endsAt?: string | null;
+}): EarningsPeriodSelection {
+  // Absent parameters arrive as null from URLSearchParams; Zod's `.default()`
+  // and `.optional()` both key off `undefined`, and `Number(null)` is 0, so
+  // normalising here is what stops a missing parameter becoming 1 Jan 1970.
+  const parsed = myEarningsQuerySchema.safeParse({
+    period: raw.period ?? undefined,
+    startsAt: raw.startsAt ?? undefined,
+    endsAt: raw.endsAt ?? undefined,
+  });
+
+  if (!parsed.success) {
+    throw errors.invalidInput("That is not a period this screen can show.");
+  }
+
+  const { period, startsAt, endsAt } = parsed.data;
+
+  if (period !== "custom") {
+    if (startsAt !== undefined || endsAt !== undefined) {
+      throw errors.invalidInput(
+        "A date range only applies to a custom period. Send period=custom, or drop the dates.",
+      );
+    }
+    return { kind: period };
+  }
+
+  if (startsAt === undefined || endsAt === undefined) {
+    throw errors.invalidInput("A custom period needs both a start and an end date.");
+  }
+  if (endsAt <= startsAt) {
+    throw errors.invalidInput("The end of a custom period must come after its start.");
+  }
+  if (endsAt - startsAt > MAX_CUSTOM_RANGE_MS) {
+    throw errors.invalidInput("A custom period can cover at most two years.");
+  }
+
+  const startYear = new Date(startsAt).getUTCFullYear();
+  const endYear = new Date(endsAt).getUTCFullYear();
+  if (
+    !Number.isFinite(startYear) ||
+    !Number.isFinite(endYear) ||
+    startYear < MIN_PERIOD_YEAR ||
+    endYear > MAX_PERIOD_YEAR
+  ) {
+    throw errors.invalidInput("That date range is outside the years this app covers.");
+  }
+
+  return { kind: "custom", startsAtMs: startsAt, endsAtMs: endsAt };
+}
+
+/**
+ * What the signed-in employee earned in one period.
+ *
+ * Reuses the payroll engine rather than approximating it: the same
+ * `calculateEmployeePayroll` the admin run calls, over inputs gathered by the
+ * same `loadPayrollInputs`, narrowed to one person. So the number here and the
+ * number on the payroll screen are the same number — if they could differ, one
+ * of them would be wrong and the employee would have no way to tell which.
+ *
+ * A finalized period does not run the engine at all. It returns the stored
+ * PayrollRecord, because that is what was actually owed, and a recalculation
+ * against today's view counts would quietly contradict a payslip.
+ */
+export async function getMyEarnings(options: {
+  readonly period: EarningsPeriodSelection;
+}): Promise<MyEarningsDTO> {
+  // The backstop behind the route's own check. `earnings.view_own`, never
+  // `payroll.view` — this function must stay reachable by an ordinary employee
+  // and must never become a way to read anybody else.
+  await requirePermission("earnings.view_own");
+
+  // THE SUBJECT, RESOLVED ONCE, FROM THE SESSION. `options` carries a window
+  // and nothing else; there is no identity anywhere in this function's inputs.
+  const { organizationId, userId } = await getScope();
+
+  const window = resolveEarningsWindow(options.period);
+
+  // A calendar month can be finalized. A custom range is not a payroll period
+  // and cannot be, so it never looks for a row to freeze against.
+  const row =
+    options.period.kind === "custom" ? null : await loadPeriodRow(organizationId, window);
+
+  if (row && isFrozen(row.status)) {
+    const stored = await prisma.payrollRecord.findFirst({
+      // Both halves matter. `userId` is the ownership filter; `period` re-states
+      // the organization even though `row.id` was already resolved inside it,
+      // so the scope survives any future refactor of how the row arrives.
+      where: { periodId: row.id, userId, period: { organizationId } },
+      select: RECORD_SELECT,
+    });
+
+    if (stored) return fromStoredRecord(window, options.period.kind, row.status, stored);
+
+    // Finalized, but this person has no line in it: they were not employed
+    // during the month, or had no employee profile when it was frozen. Saying
+    // so is the point — a silent zero would read as "you earned nothing".
+    return await emptyEarnings(organizationId, window, options.period.kind, {
+      basis: "finalized",
+      periodStatus: toPeriodStatus(row.status),
+      notices: [
+        `${window.label} is finalized and you have no record in it, so nothing was owed to you for that period.`,
+      ],
+    });
+  }
+
+  return calculateMyEarnings(organizationId, userId, window, options.period.kind, row);
+}
+
+/** The window an employee asked for, as the engine understands windows. */
+interface EarningsWindow extends PayrollPeriodWindow {
+  readonly label: string;
+}
+
+function resolveEarningsWindow(selection: EarningsPeriodSelection): EarningsWindow {
+  if (selection.kind === "custom") {
+    // `startsAtMs`/`endsAtMs` are guaranteed present by `parseMyEarningsPeriod`;
+    // the fallbacks exist only to keep this total for a hand-built selection.
+    const startsAtMs = selection.startsAtMs ?? Date.now();
+    const endsAtMs = selection.endsAtMs ?? Date.now();
+    const start = new Date(startsAtMs);
+
+    return {
+      // Carried for shape only. NOTHING looks a period row up from a custom
+      // range — `getMyEarnings` short-circuits that above — so these two fields
+      // never address a month. The engine reads only the millisecond bounds.
+      year: start.getUTCFullYear(),
+      month: start.getUTCMonth() + 1,
+      startsAtMs,
+      endsAtMs,
+      label: `${isoDay(startsAtMs)} to ${isoDay(endsAtMs - 1)}`,
+    };
+  }
+
+  const current = periodContaining(Date.now());
+  const period = selection.kind === "previous" ? previousPeriod(current) : current;
+  return { ...period, label: periodLabel(period) };
+}
+
+function isoDay(atMs: number): string {
+  return new Date(atMs).toISOString().slice(0, 10);
+}
+
+/** The live estimate: the engine, over current view counts, for one person. */
+async function calculateMyEarnings(
+  organizationId: string,
+  userId: string,
+  window: EarningsWindow,
+  kind: EarningsPeriodKind,
+  row: StoredPeriod | null,
+): Promise<MyEarningsDTO> {
+  const periodStatus = kind === "custom" ? null : toPeriodStatus(row?.status ?? "open");
+
+  const inputs = await loadPayrollInputs(organizationId, window, { onlyUserId: userId });
+  const employee = inputs.employees[0];
+
+  if (!employee) {
+    return await emptyEarnings(organizationId, window, kind, {
+      basis: "estimate",
+      periodStatus,
+      notices: [
+        "You do not have an employee profile yet, so no pay is calculated for you. An administrator sets one up under Admin → Employees.",
+      ],
+    });
+  }
+
+  const calculation = calculateEmployeePayroll({
+    employee,
+    shorts: inputs.shorts,
+    niches: inputs.niches,
+    period: window,
+  });
+
+  const byNiche = buildAssignedNicheLines(employee, inputs.niches, calculation.byNiche);
+
+  // "On niches, and not one of them has a bar." Deliberately not the same test
+  // as `skippedNiches.length > 0`: somebody can have one configured niche and
+  // one unconfigured one, which is a partial loss to mention rather than the
+  // total blank this flag turns the page into.
+  const noMeasurableNiche =
+    byNiche.length > 0 && byNiche.every((line) => line.thresholdSource === "unconfigured");
+
+  return {
+    period: toPeriodDTO(window, kind),
+    basis: "estimate",
+    periodStatus,
+    // A draft has no payment: there is no record to mark paid.
+    paymentStatus: null,
+    paidAt: null,
+    onPayroll: true,
+    baseSalaryMinor: calculation.baseSalaryMinor,
+    hitPaymentMinor: calculation.hitPaymentMinor,
+    hitCount: calculation.hitCount,
+    hitBonusMinor: calculation.hitBonusMinor,
+    adjustmentMinor: 0,
+    adjustmentReason: null,
+    totalMinor: calculation.totalMinor,
+    currency: calculation.currency,
+    byNiche,
+    hits: calculation.hits.map((hit) => ({
+      videoId: hit.videoId,
+      videoTitle: hit.title,
+      channelId: hit.channelId,
+      channelName: hit.channelName,
+      nicheId: hit.nicheId,
+      nicheName: hit.nicheName,
+      thresholdAtRun: hit.thresholdApplied,
+      viewCountAtRun: hit.views,
+      publishedAt: hit.publishedAtMs,
+    })),
+    skippedNiches: calculation.skippedNiches.map(toSkippedNicheDTO),
+    noMeasurableNiche,
+    notices: estimateNotices(window, employee, calculation, byNiche, noMeasurableNiche),
+  };
+}
+
+/** The engine's report, as it crosses the wire. Field-for-field. */
+function toSkippedNicheDTO(skipped: SkippedNiche): PayrollSkippedNicheDTO {
+  return {
+    nicheId: skipped.nicheId,
+    nicheName: skipped.nicheName,
+    shortCount: skipped.shortCount,
+  };
+}
+
+/**
+ * One line per niche the person is ASSIGNED to, not one per niche that paid.
+ *
+ * The engine's own breakdown lists only niches that produced a hit, which is
+ * right for an admin comparing totals and wrong here: an employee looking at
+ * their bonus needs to see the niche that earned them nothing, and why. A niche
+ * missing from the list is indistinguishable from a niche they were never put
+ * on, and those are somebody else's mistake to fix.
+ *
+ * A niche they are assigned to that has since been deleted is dropped: there is
+ * no threshold to report and no name to show.
+ */
+function buildAssignedNicheLines(
+  employee: { readonly nicheIds: readonly string[]; readonly hitPaymentMinor: number },
+  niches: readonly { id: string; name: string; hitThreshold: number | null }[],
+  earned: readonly { nicheId: string; hitCount: number; bonusMinor: number }[],
+): MyEarningsNicheLineDTO[] {
+  const nicheById = new Map(niches.map((niche) => [niche.id, niche]));
+  const earnedByNiche = new Map(earned.map((line) => [line.nicheId, line]));
+
+  const lines: MyEarningsNicheLineDTO[] = [];
+
+  for (const nicheId of employee.nicheIds) {
+    const niche = nicheById.get(nicheId);
+    if (!niche) continue;
+
+    const line = earnedByNiche.get(nicheId);
+
+    lines.push({
+      nicheId: niche.id,
+      nicheName: niche.name,
+      // The same resolution the engine performs, from the same field, so the
+      // number shown is the number the bonus was judged against — and the null
+      // is carried rather than filled in, because the engine judged nothing.
+      thresholdApplied: niche.hitThreshold,
+      thresholdSource: niche.hitThreshold === null ? "unconfigured" : "niche",
+      hitCount: line?.hitCount ?? 0,
+      hitPaymentMinor: employee.hitPaymentMinor,
+      bonusMinor: line?.bonusMinor ?? 0,
+    });
+  }
+
+  // Most-earning first, then by name — the ordering the admin breakdown uses,
+  // so the same figures read the same way on both screens.
+  return lines.sort((a, b) => b.bonusMinor - a.bonusMinor || a.nicheName.localeCompare(b.nicheName));
+}
+
+/** Why an estimate came out the way it did. */
+function estimateNotices(
+  window: EarningsWindow,
+  employee: {
+    readonly nicheIds: readonly string[];
+    readonly hitPaymentMinor: number;
+    readonly joinedOnMs: number | null;
+    readonly employmentEndedOnMs: number | null;
+  },
+  calculation: PayrollCalculation,
+  byNiche: readonly MyEarningsNicheLineDTO[],
+  noMeasurableNiche: boolean,
+): string[] {
+  const notices: string[] = [];
+
+  if (!calculation.employedDuringPeriod) {
+    notices.push(
+      `Your employment dates do not overlap ${window.label}, so nothing is calculated for it.`,
+    );
+    return notices;
+  }
+
+  notices.push(
+    Date.now() >= window.endsAtMs
+      ? `${window.label} has ended but has not been finalized yet, so this is still an estimate and can change.`
+      : `${window.label} is still in progress. Views are still climbing, so this figure is an estimate and will change.`,
+  );
+
+  if (employee.nicheIds.length === 0) {
+    notices.push(
+      "You are not assigned to any niches, so no hit can be credited to you. Hit bonuses are paid per niche.",
+    );
+  } else if (employee.hitPaymentMinor <= 0) {
+    notices.push(
+      "Your per-hit rate is not set, so hits earn no bonus. An administrator sets it on your employee profile.",
+    );
+  }
+
+  // A niche with no threshold is not producing an honest zero, it is producing
+  // an unanswered question — and until somebody answers it, no Short in that
+  // niche can be counted at all. Named per niche, with the number of the
+  // person's own Shorts it cost them, because "12 of your Shorts" is what makes
+  // this a thing worth chasing rather than a note to skim.
+  const skippedByNicheId = new Map(
+    calculation.skippedNiches.map((skipped) => [skipped.nicheId, skipped.shortCount]),
+  );
+
+  for (const line of byNiche) {
+    if (line.thresholdSource !== "unconfigured") continue;
+
+    const shortCount = line.nicheId === null ? 0 : (skippedByNicheId.get(line.nicheId) ?? 0);
+    notices.push(
+      shortCount > 0
+        ? `${line.nicheName} has no hit threshold set, so nothing in it can count as a hit — ${formatCount(shortCount, "of your Shorts in it was", "of your Shorts in it were")} not counted this period. An administrator sets the threshold; once it is set, Shorts in this niche count from the next period onwards.`
+        : `${line.nicheName} has no hit threshold set, so nothing in it can count as a hit. An administrator sets the threshold; until then this niche cannot earn you a bonus.`,
+    );
+  }
+
+  // THE ORDER MATTERS. "Nothing crossed its threshold" is a true and useful
+  // sentence when there IS a threshold, and a lie when there is not — there was
+  // no bar to cross. Somebody whose every niche is unconfigured gets the
+  // sentence that names the actual problem instead.
+  if (noMeasurableNiche) {
+    notices.push(
+      "None of the niches you are on has a hit threshold set, so no hit can be counted for you at all. This is a setting an administrator has to fill in — it is not a reflection of your work, and your normal pay is unaffected.",
+    );
+  } else if (
+    calculation.hitCount === 0 &&
+    employee.nicheIds.length > 0 &&
+    employee.hitPaymentMinor > 0
+  ) {
+    notices.push(
+      "No Short on your niches has crossed its threshold in this period yet, so there is no hit bonus.",
+    );
+  }
+
+  return notices;
+}
+
+/** "1 of your Shorts was" / "12 of your Shorts were". */
+function formatCount(count: number, singular: string, plural: string): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? singular : plural}`;
+}
+
+/** A finalized record, exactly as it was written. */
+function fromStoredRecord(
+  window: EarningsWindow,
+  kind: EarningsPeriodKind,
+  status: string,
+  record: StoredRecord,
+): MyEarningsDTO {
+  // `toRecordDTO` is the same mapper the admin screens use — including the
+  // per-niche regrouping — so a payslip and this screen cannot disagree about
+  // a figure that is, by then, a fact.
+  const dto = toRecordDTO(record);
+
+  const notices: string[] = [
+    `${window.label} is finalized. These are the figures recorded at the time and they do not change, even as views keep climbing.`,
+  ];
+  if (dto.paymentStatus === "paid") {
+    notices.push("This period has been marked paid.");
+  }
+  if (dto.adjustmentMinor !== 0) {
+    notices.push(
+      dto.adjustmentReason
+        ? `An administrator adjusted this record: ${dto.adjustmentReason}`
+        : "An administrator adjusted this record.",
+    );
+  }
+
+  return {
+    period: toPeriodDTO(window, kind),
+    basis: "finalized",
+    periodStatus: toPeriodStatus(status),
+    paymentStatus: dto.paymentStatus,
+    paidAt: dto.paidAt,
+    onPayroll: true,
+    baseSalaryMinor: dto.baseSalaryMinor,
+    hitPaymentMinor: dto.hitPaymentMinor,
+    hitCount: dto.hitCount,
+    hitBonusMinor: dto.hitBonusMinor,
+    adjustmentMinor: dto.adjustmentMinor,
+    adjustmentReason: dto.adjustmentReason,
+    totalMinor: dto.totalMinor,
+    currency: dto.currency,
+    byNiche: toFinalizedNicheLines(dto.byNiche),
+    hits: dto.hits,
+    // Both empty, and not by omission. A frozen record is what was owed; what
+    // today's niche configuration would skip is a fact about today, and
+    // attaching it to a settled figure would invite exactly the retroactive
+    // reading this whole service refuses.
+    skippedNiches: [],
+    noMeasurableNiche: false,
+    notices,
+  };
+}
+
+/** A zero with a reason attached. Never a bare zero. */
+async function emptyEarnings(
+  organizationId: string,
+  window: EarningsWindow,
+  kind: EarningsPeriodKind,
+  outcome: {
+    readonly basis: "finalized" | "estimate";
+    readonly periodStatus: PayrollPeriodStatus | null;
+    readonly notices: readonly string[];
+  },
+): Promise<MyEarningsDTO> {
+  // Somebody with no employee profile has no currency of their own, and a zero
+  // still has to be labelled with something. The organization's base currency
+  // is the only defensible answer, the same one `totalsFrom` reaches for.
+  const settings = await getOrgSettings(organizationId);
+
+  return {
+    period: toPeriodDTO(window, kind),
+    basis: outcome.basis,
+    periodStatus: outcome.periodStatus,
+    paymentStatus: null,
+    paidAt: null,
+    onPayroll: false,
+    baseSalaryMinor: 0,
+    hitPaymentMinor: 0,
+    hitCount: 0,
+    hitBonusMinor: 0,
+    adjustmentMinor: 0,
+    adjustmentReason: null,
+    totalMinor: 0,
+    currency: settings.baseCurrency,
+    byNiche: [],
+    hits: [],
+    // Nobody on payroll, or no line in a frozen run. Either way there was no
+    // bonus to lose to a missing threshold, and the notice already says which.
+    skippedNiches: [],
+    noMeasurableNiche: false,
+    notices: outcome.notices,
+  };
+}
+
+function toPeriodDTO(window: EarningsWindow, kind: EarningsPeriodKind): MyEarningsPeriodDTO {
+  return {
+    kind,
+    label: window.label,
+    startsAt: window.startsAtMs,
+    endsAt: window.endsAtMs,
+    hasEnded: Date.now() >= window.endsAtMs,
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// READ: your own earnings history
+//
+// The list of months already settled. Same subject rule as `getMyEarnings`
+// above, restated here because this is the endpoint that returns MANY rows, and
+// a list is exactly the shape a missing ownership filter disappears into: one
+// row too many looks like a longer page, not like a breach.
+//
+// THE OWNERSHIP GUARANTEE, FOR A LIST
+// `getMyEarningsHistory` takes a page and nothing else. `MyEarningsHistoryPage`
+// has two numeric fields and no identity field, the schema behind it is
+// `.strict()`, and the route reads two named query parameters — so a `?userId=`
+// has nothing to bind to, a request body is never read at all, and a header is
+// never consulted. The subject is resolved once, from `getScope()`, which reads
+// the session cookie, and lands in the `where` clause beside the organization.
+// Asking about somebody else would require adding a parameter to this
+// signature, which is a visible change to the line this comment sits on.
+// ---------------------------------------------------------------------------
+
+/** Two years of months: far more than anybody scrolls, in one request. */
+const HISTORY_DEFAULT_LIMIT = 24;
+const HISTORY_MAX_LIMIT = 60;
+
+/** How much history to return. Never whose. */
+export interface MyEarningsHistoryPage {
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** One settled period, exactly as it was recorded. */
+export interface MyEarningsHistoryRowDTO {
+  readonly year: number;
+  /** 1-12. */
+  readonly month: number;
+  /** "August 2026". */
+  readonly label: string;
+
+  /**
+   * The period's own state. Always "finalized" or "paid" — an open period is a
+   * live calculation, not history, and is filtered out before it gets here.
+   */
+  readonly periodStatus: PayrollPeriodStatus;
+
+  /**
+   * THIS row's payment state, taken from the caller's own record rather than
+   * from the period around it.
+   *
+   * The two can legitimately disagree in the direction that matters:
+   * `markRecordPaid` settles one person at a time and only flips the period to
+   * "paid" once nobody is left pending. So a period still reading "finalized"
+   * can hold a record that really was paid, and reporting the period's status
+   * here would tell that person their money is still on its way.
+   */
+  readonly paymentStatus: PayrollPaymentStatus;
+
+  /**
+   * When the payment was actually recorded: `PayrollRecord.paidAt`, written in
+   * the same transaction that set `paymentStatus` to "paid".
+   *
+   * Null when nothing was recorded, and then this row is pending. It is never
+   * filled in from `scheduledPayOn` below — a date payroll was *due* is not
+   * evidence that money moved, and "Paid on 1 September" printed because a
+   * calendar said so is a claim this service has no basis for.
+   */
+  readonly paidAt: number | null;
+
+  /**
+   * `PayrollPeriod.payOn` — the first of the following month, fixed when the
+   * period was created. A schedule, not a payment. It is here so a pending row
+   * can say when the money is due without borrowing the vocabulary of a row
+   * that has already been settled.
+   */
+  readonly scheduledPayOn: number;
+
+  readonly baseSalaryMinor: number;
+  /** The per-hit rate this record was paid at, in minor units. */
+  readonly hitPaymentMinor: number;
+  readonly hitCount: number;
+  readonly hitBonusMinor: number;
+  /** An administrator's signed correction, shown rather than folded into the total. */
+  readonly adjustmentMinor: number;
+  readonly adjustmentReason: string | null;
+  readonly totalMinor: number;
+  readonly currency: string;
+}
+
+export interface MyEarningsHistoryDTO {
+  /** Newest period first. */
+  readonly rows: readonly MyEarningsHistoryRowDTO[];
+  readonly hasMore: boolean;
+  /** The offset to ask for next, or null at the end. Never an identity. */
+  readonly nextOffset: number | null;
+}
+
+/**
+ * The query for GET /api/me/earnings/history.
+ *
+ * `.strict()` for the same reason `myEarningsQuerySchema` is strict: the route
+ * builds this object from two named parameters, and if a future edit ever
+ * widened it to forward the whole query object, a stray `userId` would be a
+ * parse error here rather than a field somebody downstream might read.
+ */
+const myEarningsHistoryQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(HISTORY_MAX_LIMIT).default(HISTORY_DEFAULT_LIMIT),
+    offset: z.coerce.number().int().min(0).default(0),
+  })
+  .strict();
+
+/** Turns raw query parameters into a page, or a 400. */
+export function parseMyEarningsHistoryPage(raw: {
+  readonly limit?: string | null;
+  readonly offset?: string | null;
+}): MyEarningsHistoryPage {
+  // Absent parameters arrive as null from URLSearchParams, and `Number(null)`
+  // is 0 — which for `limit` would silently mean "give me nothing". Normalising
+  // to undefined is what lets Zod's `.default()` do its job.
+  const parsed = myEarningsHistoryQuerySchema.safeParse({
+    limit: raw.limit ?? undefined,
+    offset: raw.offset ?? undefined,
+  });
+
+  if (!parsed.success) {
+    throw errors.invalidInput("That is not a page of history this screen can show.");
+  }
+
+  return parsed.data;
+}
+
+/**
+ * Every finalized period the signed-in employee has a record in, newest first.
+ *
+ * READ, NEVER RECOMPUTED. Each row is the stored PayrollRecord as it was
+ * written at finalization. That is the whole point of the list: it is a run of
+ * documents, and re-running the engine over any of them would let this month's
+ * view counts quietly rewrite what March cost. Nothing here touches
+ * `loadPayrollInputs`.
+ *
+ * Open periods are excluded rather than shown as estimates. "History" is a
+ * claim about what was owed, and a month still being counted has no such
+ * figure — the live estimate is what `/api/me/earnings` is for.
+ */
+export async function getMyEarningsHistory(
+  page: MyEarningsHistoryPage = { limit: HISTORY_DEFAULT_LIMIT, offset: 0 },
+): Promise<MyEarningsHistoryDTO> {
+  // The backstop behind the route's own check, exactly as `getMyEarnings` has
+  // one. `earnings.view_own` — never `payroll.view`.
+  await requirePermission("earnings.view_own");
+
+  // THE SUBJECT, RESOLVED ONCE, FROM THE SESSION. `page` carries two numbers.
+  const { organizationId, userId } = await getScope();
+
+  const rows = await prisma.payrollRecord.findMany({
+    where: {
+      // The ownership filter. From the session, never from the request.
+      userId,
+      // PayrollRecord has no organizationId of its own — it hangs off the
+      // period, which does — so filtering on the relation IS the tenancy check,
+      // the same way `loadScopedRecord` does it. And `status` is what keeps an
+      // open month out: its figures are still moving, so it is not history.
+      period: { organizationId, status: { in: [...FROZEN_STATUSES] } },
+    },
+    // Newest first, by the period's calendar month rather than by any timestamp
+    // on the record: a backfill can finalize two periods in the same second,
+    // and August must still come after July.
+    orderBy: [{ period: { year: "desc" } }, { period: { month: "desc" } }],
+    skip: page.offset,
+    // One more row than asked for. Whether another page exists is then a
+    // property of what came back, rather than a second COUNT over the same
+    // index.
+    take: page.limit + 1,
+    select: HISTORY_SELECT,
+  });
+
+  const hasMore = rows.length > page.limit;
+
+  return {
+    rows: (hasMore ? rows.slice(0, page.limit) : rows).map(toHistoryRowDTO),
+    hasMore,
+    nextOffset: hasMore ? page.offset + page.limit : null,
+  };
+}
+
+function toHistoryRowDTO(record: StoredHistoryRecord): MyEarningsHistoryRowDTO {
+  const { period } = record;
+
+  return {
+    year: period.year,
+    month: period.month,
+    // The same label the payroll screens and the Telegram message use, so one
+    // month is called one thing everywhere.
+    label: periodLabel(periodForMonth(period.year, period.month)),
+    periodStatus: toPeriodStatus(period.status),
+    paymentStatus: settledPaymentStatus(record.paymentStatus, record.paidAt),
+    paidAt: record.paidAt?.getTime() ?? null,
+    scheduledPayOn: period.payOn.getTime(),
+    baseSalaryMinor: record.baseSalaryMinor,
+    hitPaymentMinor: record.hitPaymentMinor,
+    hitCount: record.hitCount,
+    hitBonusMinor: record.hitBonusMinor,
+    adjustmentMinor: record.adjustmentMinor,
+    adjustmentReason: record.adjustmentReason,
+    totalMinor: record.totalMinor,
+    currency: record.currency,
+  };
+}
+
+/**
+ * "Paid" only when the record says paid AND carries the date it happened.
+ *
+ * The flag and the timestamp are written together, in one transaction, by both
+ * `markRecordPaid` and `markPeriodPaid`, so they should never disagree. If they
+ * ever do — a hand-edited row, a restored backup, a future write path that
+ * forgets the timestamp — this list takes the quieter reading.
+ *
+ * That is deliberately NOT what `toRecordDTO` does for the admin screens, and
+ * the asymmetry is the point. An admin needs the raw flag in order to notice
+ * the inconsistency and fix it. An employee is being told that money left the
+ * company's account for them, and a status with no recorded payment behind it
+ * is not evidence that it did. Showing "pending" makes somebody ask a question;
+ * showing "paid" makes them stop asking.
+ */
+function settledPaymentStatus(status: string, paidAt: Date | null): PayrollPaymentStatus {
+  return toPaymentStatus(status) === "paid" && paidAt !== null ? "paid" : "pending";
+}
+
+// ---------------------------------------------------------------------------
+// READ: one settled month's per-niche breakdown
+//
+// The "why" behind a single row of the history list, fetched only when somebody
+// opens that row. It is a separate endpoint rather than a field on the list for
+// one reason: the breakdown is rebuilt from the stored PayrollHit rows, and
+// hydrating those for every month at once is what `HISTORY_SELECT` was
+// deliberately written to avoid. One month, on demand, is a handful of rows.
+//
+// SAME SUBJECT RULE AS THE LIST. The parameters are a year and a month. Neither
+// names a person, and the record is found by the session's user id — so this is
+// the list's ownership guarantee with a narrower window, not a second one.
+// ---------------------------------------------------------------------------
+
+/** Which month. Never whose. */
+export interface MyEarningsHistoryMonth {
+  readonly year: number;
+  /** 1-12. */
+  readonly month: number;
+}
+
+/**
+ * One settled month's hit bonus, explained.
+ *
+ * The figures are echoed back alongside the lines so the opened panel can be
+ * checked against the row that opened it without the caller holding both and
+ * hoping they match.
+ */
+export interface MyEarningsHistoryBreakdownDTO {
+  readonly year: number;
+  readonly month: number;
+  /** "August 2026", from the same labeller as the list row. */
+  readonly label: string;
+  readonly hitCount: number;
+  readonly hitBonusMinor: number;
+  readonly hitPaymentMinor: number;
+  readonly currency: string;
+
+  /**
+   * One line per niche that actually earned a hit that month.
+   *
+   * A niche the person is on TODAY but earned nothing in back then does not
+   * appear, and that is deliberate rather than an omission. These lines are
+   * rebuilt from the hits the run recorded; adding a zero row from today's
+   * assignments would describe the present in a panel about a settled document,
+   * and would put a niche somebody joined in November onto their March payslip.
+   * `fromStoredRecord` takes exactly the same view of a finalized period, so a
+   * month opened here and the same month opened through the period picker show
+   * the same lines.
+   */
+  readonly byNiche: readonly MyEarningsNicheLineDTO[];
+}
+
+/**
+ * The query for GET /api/me/earnings/history/[year]/[month].
+ *
+ * The year bound is not a validation nicety — it is what keeps the route from
+ * being a way to probe for rows by walking a range. Nothing outside a plausible
+ * payroll calendar can even reach the database.
+ */
+const myEarningsHistoryMonthSchema = z
+  .object({
+    year: z.coerce.number().int().min(2000).max(2200),
+    month: z.coerce.number().int().min(1).max(12),
+  })
+  .strict();
+
+/** Turns raw route segments into a month, or a 400. */
+export function parseMyEarningsHistoryMonth(raw: {
+  readonly year?: string | null;
+  readonly month?: string | null;
+}): MyEarningsHistoryMonth {
+  const parsed = myEarningsHistoryMonthSchema.safeParse({
+    year: raw.year ?? undefined,
+    month: raw.month ?? undefined,
+  });
+
+  if (!parsed.success) {
+    throw errors.invalidInput("That is not a month this screen can show.");
+  }
+
+  return parsed.data;
+}
+
+/**
+ * The per-niche hit lines behind one finalized month of the caller's own pay.
+ *
+ * READ, NEVER RECOMPUTED, for the same reason the list is: these are the hits
+ * the run recorded, with the threshold each was judged against as it stood at
+ * the time. The engine is not consulted, so today's thresholds cannot rewrite
+ * what March was worth.
+ *
+ * Refuses an open period the same way the list excludes one. A month still
+ * being counted has no settled breakdown, and the live estimate — with its
+ * unconfigured-niche warnings, which only make sense about the present — is
+ * what `/api/me/earnings` is for.
+ */
+export async function getMyEarningsHistoryBreakdown(
+  month: MyEarningsHistoryMonth,
+): Promise<MyEarningsHistoryBreakdownDTO> {
+  // The backstop behind the route's own check, exactly as the list has one.
+  await requirePermission("earnings.view_own");
+
+  // THE SUBJECT, RESOLVED ONCE, FROM THE SESSION. `month` carries two numbers.
+  const { organizationId, userId } = await getScope();
+
+  const record = await prisma.payrollRecord.findFirst({
+    where: {
+      // The ownership filter. From the session, never from the request.
+      userId,
+      // Tenancy and freezing both ride on the period relation, as they do in
+      // `getMyEarningsHistory` — PayrollRecord has no organizationId of its own.
+      period: {
+        organizationId,
+        year: month.year,
+        month: month.month,
+        status: { in: [...FROZEN_STATUSES] },
+      },
+    },
+    select: BREAKDOWN_SELECT,
+  });
+
+  if (!record) {
+    // One message for "no such month", "not your month" and "not settled yet".
+    // Distinguishing them would turn this into a way to learn whether a
+    // colleague was paid for a month the caller was not.
+    throw errors.notFound("month of pay");
+  }
+
+  return {
+    year: month.year,
+    month: month.month,
+    label: periodLabel(periodForMonth(month.year, month.month)),
+    hitCount: record.hitCount,
+    hitBonusMinor: record.hitBonusMinor,
+    hitPaymentMinor: record.hitPaymentMinor,
+    currency: record.currency,
+    byNiche: toFinalizedNicheLines(groupHitsByNiche(record.hits, record.hitPaymentMinor)),
+  };
+}
+
+/**
+ * A frozen period's niche lines, told apart from a live one's.
+ *
+ * `thresholdSource` is what the UI reads to decide whether a missing threshold
+ * is worth warning about. On a settled record it never is: every line here came
+ * from a hit, so a threshold was applied, and the only honest label is that this
+ * is how it was finalized. Shared with `fromStoredRecord` so the two finalized
+ * paths cannot drift into labelling the same record differently.
+ */
+function toFinalizedNicheLines(
+  lines: readonly PayrollNicheLineDTO[],
+): MyEarningsNicheLineDTO[] {
+  return lines.map((line) => ({ ...line, thresholdSource: "as_finalized" as const }));
+}
+
+// ---------------------------------------------------------------------------
 // WRITE: finalization
 // ---------------------------------------------------------------------------
 
@@ -549,7 +1625,6 @@ export async function finalizePeriodForOrganization(options: {
     shorts: inputs.shorts,
     niches: inputs.niches,
     period,
-    organizationDefaultThreshold: inputs.organizationDefaultThreshold,
   });
 
   const finalizedAt = new Date();
@@ -602,9 +1677,14 @@ export async function finalizePeriodForOrganization(options: {
     {
       action: "payroll.period_finalized",
       // Headcount and hits, never money. See src/lib/audit/actions.ts.
+      //
+      // The skipped niches make it into the SUMMARY as well as the metadata,
+      // because the summary is the line the audit list actually renders and
+      // this is the half of the event somebody would otherwise have to know to
+      // go looking for.
       summary: `Finalized ${label} payroll for ${run.calculations.length} ${
         run.calculations.length === 1 ? "employee" : "employees"
-      }`,
+      }${skippedSummarySuffix(run.skippedNiches)}`,
       targetType: "payroll_period",
       targetId: periodKey(year, month),
       targetLabel: label,
@@ -614,11 +1694,55 @@ export async function finalizePeriodForOrganization(options: {
         employeeCount: run.calculations.length,
         hitCount: run.calculations.reduce((sum, calculation) => sum + calculation.hitCount, 0),
         forced: options.force === true,
+        // WHY THE SKIPPED NICHES ARE WRITTEN HERE, AND ONLY HERE.
+        // PayrollRecord has no column for them and the schema is not ours to
+        // change, so this entry is the only place the reason survives the run.
+        // It has to: these figures are lower than they would have been under
+        // the old organization-default fallback, and "why was August smaller?"
+        // has to be answerable in November without re-deriving a period that is
+        // deliberately never recalculated.
+        //
+        // Counts and names, never money — the rule the whole payroll audit
+        // family follows. Flat primitives and a string array, because
+        // `sanitizeMetadata` keeps this log to shapes that cannot smuggle a row
+        // in; a nested object graph would be silently dropped.
+        //
+        // THE NAME LIST IS CAPPED AND THE COUNTS ARE NOT. That same sanitizer
+        // slices arrays at 20 entries, so a run that skipped more niches than
+        // that records the first 20 names and nothing about the rest — read a
+        // 20-name list as a sample, never as the whole of it. The two counts
+        // below are plain numbers and survive intact, which is what makes the
+        // magnitude of the reduction recoverable in November regardless.
+        skippedNicheCount: run.skippedNiches.length,
+        skippedShortCount: run.skippedNiches.reduce(
+          (sum, skipped) => sum + skipped.shortCount,
+          0,
+        ),
+        skippedNiches: run.skippedNiches.map(
+          (skipped) => `${skipped.nicheName} (${skipped.shortCount})`,
+        ),
       },
     },
   );
 
   return { periodId, alreadyFinalized: false, employeeCount: run.calculations.length };
+}
+
+/**
+ * The tail of a finalization's audit summary when something was skipped.
+ *
+ * Empty string in the ordinary case, so a run with every niche configured reads
+ * exactly as it always has.
+ */
+function skippedSummarySuffix(skipped: readonly SkippedNiche[]): string {
+  if (skipped.length === 0) return "";
+
+  const shortCount = skipped.reduce((sum, niche) => sum + niche.shortCount, 0);
+  const names = skipped.map((niche) => niche.nicheName).join(", ");
+
+  return ` — ${shortCount} ${shortCount === 1 ? "Short was" : "Shorts were"} not counted because ${
+    skipped.length === 1 ? "this niche has" : "these niches have"
+  } no hit threshold: ${names}`;
 }
 
 /**
@@ -1111,6 +2235,48 @@ const RECORD_SELECT = {
 
 type StoredRecord = Prisma.PayrollRecordGetPayload<{ select: typeof RECORD_SELECT }>;
 
+/**
+ * A history row: the money columns, plus the period they belong to.
+ *
+ * Deliberately NOT `RECORD_SELECT`. That one pulls every PayrollHit behind the
+ * record, which is right for one payslip and wrong for a list — two years of
+ * history would drag in every qualifying Short of two years to render 24
+ * summary lines. The Shorts behind a month are one request away on the earnings
+ * screen itself.
+ */
+const HISTORY_SELECT = {
+  baseSalaryMinor: true,
+  hitPaymentMinor: true,
+  hitCount: true,
+  hitBonusMinor: true,
+  adjustmentMinor: true,
+  adjustmentReason: true,
+  totalMinor: true,
+  currency: true,
+  paymentStatus: true,
+  paidAt: true,
+  period: { select: { year: true, month: true, status: true, payOn: true } },
+} as const;
+
+type StoredHistoryRecord = Prisma.PayrollRecordGetPayload<{ select: typeof HISTORY_SELECT }>;
+
+/**
+ * One settled month's hits, narrowed to what a per-niche line is made of.
+ *
+ * The three hit columns below are exactly what `groupHitsByNiche` reads. The
+ * title, channel, view count and publication date of every Short are not
+ * selected: this panel says "GTA — 12 hits at 100,000 views, $120", and pulling
+ * the Shorts themselves to render a summary of them would make opening a row
+ * cost as much as opening the payslip.
+ */
+const BREAKDOWN_SELECT = {
+  hitPaymentMinor: true,
+  hitCount: true,
+  hitBonusMinor: true,
+  currency: true,
+  hits: { select: { nicheId: true, nicheName: true, thresholdAtRun: true } },
+} as const;
+
 // ---------------------------------------------------------------------------
 // INTERNALS: assembling a period
 // ---------------------------------------------------------------------------
@@ -1174,14 +2340,18 @@ async function buildPeriodDTO(
 ): Promise<PayrollPeriodDTO> {
   const frozen = row !== null && isFrozen(row.status);
 
-  const records = frozen
-    ? await loadStoredRecords(row.id)
+  // A frozen period is read, never recomputed, so there is nothing to report
+  // about what today's configuration would skip — see the note on
+  // `PayrollPeriodDTO.skippedNiches`.
+  const { records, skippedNiches } = frozen
+    ? { records: await loadStoredRecords(row.id), skippedNiches: [] }
     : await calculateRecords(context.organizationId, period);
 
   return {
     ...buildHeader(context, period, row, !frozen),
     totals: totalsFrom(records, context.fallbackCurrency),
     records,
+    skippedNiches,
   };
 }
 
@@ -1206,7 +2376,10 @@ async function buildPeriodSummary(
           select: RECORD_TOTALS_SELECT,
         })
       ).map((record) => ({ ...record, paymentStatus: toPaymentStatus(record.paymentStatus) }))
-    : await calculateRecords(context.organizationId, period);
+    : // A summary is a row in a history list: totals only, no per-employee
+      // detail and no skipped-niche report. The detail view is where an admin
+      // reads why a run is smaller than they expected.
+      (await calculateRecords(context.organizationId, period)).records;
 
   return {
     ...buildHeader(context, period, row, !frozen),
@@ -1239,20 +2412,32 @@ function buildHeader(
   };
 }
 
-/** The live run: the engine, over current view counts. */
+/**
+ * The live run: the engine, over current view counts.
+ *
+ * Returns what the run could NOT judge alongside what it could. The two travel
+ * together because they are one answer — a total that silently omits the Shorts
+ * an unconfigured niche made unjudgeable is the exact figure this round of work
+ * exists to stop anybody paying from.
+ */
 async function calculateRecords(
   organizationId: string,
   period: PayrollPeriodWindow,
-): Promise<readonly PayrollRecordDTO[]> {
+): Promise<{
+  readonly records: readonly PayrollRecordDTO[];
+  readonly skippedNiches: readonly PayrollSkippedNicheDTO[];
+}> {
   const inputs = await loadPayrollInputs(organizationId, period);
   const run = calculatePayrollRun({
     employees: inputs.employees,
     shorts: inputs.shorts,
     niches: inputs.niches,
     period,
-    organizationDefaultThreshold: inputs.organizationDefaultThreshold,
   });
-  return run.calculations.map(toDraftRecordDTO);
+  return {
+    records: run.calculations.map(toDraftRecordDTO),
+    skippedNiches: run.skippedNiches.map(toSkippedNicheDTO),
+  };
 }
 
 async function loadStoredRecords(periodId: string): Promise<readonly PayrollRecordDTO[]> {
@@ -1367,9 +2552,18 @@ function toRecordDTO(record: StoredRecord): PayrollRecordDTO {
  * can be null (the niche was deleted since), which is why the name is the
  * fallback key: two hits credited to a since-deleted "GTA" still belong on one
  * line.
+ *
+ * The parameter is the three columns a line is built from rather than a whole
+ * `PayrollHitDTO`, so the employee's own breakdown can group a narrow projection
+ * of the hit rows through this one routine instead of hydrating every Short to
+ * reach a count. A full hit satisfies it, so the admin call site is unchanged.
  */
 function groupHitsByNiche(
-  hits: readonly PayrollHitDTO[],
+  hits: readonly {
+    readonly nicheId: string | null;
+    readonly nicheName: string;
+    readonly thresholdAtRun: number;
+  }[],
   hitPaymentMinor: number,
 ): PayrollNicheLineDTO[] {
   const buckets = new Map<
@@ -1448,9 +2642,19 @@ function totalsFrom(
 // INTERNALS: scoped reads, guards, audit
 // ---------------------------------------------------------------------------
 
+/**
+ * The statuses that mean "the figures are stored, not derived".
+ *
+ * One list, because `isFrozen` below and the `where` clause in
+ * `getMyEarningsHistory` are the same question asked in two places. A period
+ * that counted as frozen for one and not the other would be a month that either
+ * vanishes from somebody's history or turns up in it as a live estimate.
+ */
+const FROZEN_STATUSES = ["finalized", "paid"] as const;
+
 /** "finalized" and "paid" both mean the figures are stored, not derived. */
 function isFrozen(status: string): boolean {
-  return status === "finalized" || status === "paid";
+  return (FROZEN_STATUSES as readonly string[]).includes(status);
 }
 
 function toPeriodStatus(status: string): PayrollPeriodStatus {

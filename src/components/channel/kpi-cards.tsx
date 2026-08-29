@@ -15,6 +15,8 @@ import { Card } from "@/components/ui/card";
 import { InfoTip } from "@/components/ui/tooltip";
 import { Stat, TrendPill } from "@/components/metrics/stat";
 import { HitRateInfo } from "@/components/metrics/hit-rate-value";
+import { ThresholdNotConfigured } from "@/components/metrics/threshold-not-configured";
+import { UNCONFIGURED_THRESHOLD_EXPLANATION } from "@/lib/analytics/constants";
 
 /**
  * KPI strip for one channel.
@@ -33,11 +35,16 @@ export function KpiCards({
 }: {
   metrics: ChannelMetrics;
   trendDelta: number | null;
-  /** Stated on the card, because a hit means different things per niche. */
-  threshold: number;
+  /**
+   * Stated on the card, because a hit means different things per niche.
+   * `null` when the niche in view has none configured, in which case the
+   * headline reads "Not configured" rather than a percentage.
+   */
+  threshold: number | null;
   className?: string;
 }) {
-  const hasData = metrics.totalShorts > 0;
+  const isUnconfigured = threshold === null;
+  const hasData = !isUnconfigured && metrics.totalShorts > 0;
 
   return (
     <div className={className}>
@@ -46,40 +53,54 @@ export function KpiCards({
         <Card className="flex flex-col justify-between p-5">
           <div className="flex items-center gap-1">
             <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
-              Hit rate ≥{formatCompactNumber(threshold)}
+              {isUnconfigured ? "Hit rate" : `Hit rate ≥${formatCompactNumber(threshold)}`}
             </span>
             <HitRateInfo side="right" />
           </div>
 
           <div className="mt-3">
-            <div className="flex items-baseline gap-2.5">
-              <span
-                className={`tnum text-[40px] font-semibold leading-none tracking-tight ${
-                  hasData ? "text-foreground" : "text-subtle-foreground"
-                }`}
-              >
-                {hasData ? formatPercent(metrics.hitRate) : EM_DASH}
-              </span>
-              <TrendPill delta={trendDelta} />
-            </div>
+            {isUnconfigured ? (
+              /* The headline slot, filled with the truth rather than a figure.
+                 No trend pill and no bar: both would be drawing a shape for a
+                 measurement that does not exist. */
+              <>
+                <ThresholdNotConfigured size="xl" withTip={false} />
+                <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
+                  {UNCONFIGURED_THRESHOLD_EXPLANATION}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="flex items-baseline gap-2.5">
+                  <span
+                    className={`tnum text-[40px] font-semibold leading-none tracking-tight ${
+                      hasData ? "text-foreground" : "text-subtle-foreground"
+                    }`}
+                  >
+                    {hasData ? formatPercent(metrics.hitRate) : EM_DASH}
+                  </span>
+                  <TrendPill delta={trendDelta} />
+                </div>
 
-            <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-border">
-              <div
-                className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out"
-                style={{ width: `${Math.min(100, Math.max(0, metrics.hitRate ?? 0))}%` }}
-              />
-            </div>
+                <div className="mt-3 h-1 w-full overflow-hidden rounded-full bg-border">
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-500 ease-out"
+                    style={{ width: `${Math.min(100, Math.max(0, metrics.hitRate ?? 0))}%` }}
+                  />
+                </div>
 
-            <p className="tnum mt-2.5 text-[12px] text-muted-foreground">
-              {hasData ? (
-                <>
-                  {formatFraction(metrics.hitCount, metrics.totalShorts)} Shorts reached{" "}
-                  {formatCompactNumber(threshold)} views
-                </>
-              ) : (
-                "No Shorts uploaded in this period"
-              )}
-            </p>
+                <p className="tnum mt-2.5 text-[12px] text-muted-foreground">
+                  {hasData ? (
+                    <>
+                      {formatFraction(metrics.hitCount, metrics.totalShorts)} Shorts
+                      reached {formatCompactNumber(threshold)} views
+                    </>
+                  ) : (
+                    "No Shorts uploaded in this period"
+                  )}
+                </p>
+              </>
+            )}
           </div>
         </Card>
 

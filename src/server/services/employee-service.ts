@@ -2,7 +2,7 @@ import "server-only";
 
 import { z } from "zod";
 import { prisma } from "@/server/db";
-import { errors } from "@/server/errors";
+import { AppError, errors } from "@/server/errors";
 import { actorCan } from "@/server/auth/dal";
 import { revokeAllSessionsForUser } from "@/server/auth/session";
 import { listAuditEvents, recordAudit, type AuditEntryDTO } from "@/server/audit/audit-service";
@@ -116,6 +116,43 @@ export interface EmployeeListItemDTO {
   readonly invitedAt: number | null;
   /** ABSENT — not null — for a caller without payroll.view. */
   readonly pay?: EmployeePayDTO;
+}
+
+/**
+ * One row of the approvals queue.
+ *
+ * Deliberately NOT `EmployeeListItemDTO` narrowed to the pending ones. That
+ * type is a roster entry — status, last login, and behind `payroll.view` a
+ * salary — and none of it answers the question this screen asks, which is
+ * "should this person be let in?". What does answer it is who they say they
+ * are, what they were invited as, and who invited them; so those are the only
+ * fields here, and there is no `pay` key on this shape at all. An approvals
+ * queue cannot leak a figure it was never given a place to put.
+ *
+ * `status` is absent for the same reason: every row in this list is
+ * `pending_approval` by construction. A column that reads the same on every row
+ * is noise in a table whose whole job is to be scanned quickly.
+ */
+export interface PendingApprovalDTO {
+  readonly userId: string;
+  readonly name: string | null;
+  readonly email: string | null;
+  /** The role the invitation was issued for — what they will become on approval. */
+  readonly role: string;
+  readonly roleLabel: string;
+  readonly assignedNiches: readonly EmployeeNicheDTO[];
+  /**
+   * When they accepted the invitation and joined the queue.
+   *
+   * Null when no invitation row survives — a workspace's founding account, or
+   * an address that was invited and then re-invited under a different one. The
+   * UI must print an em dash rather than inventing a date.
+   */
+  readonly acceptedAt: number | null;
+  /** When the invitation itself was sent. */
+  readonly invitedAt: number | null;
+  /** The admin who sent it, by name, or null if that account is gone. */
+  readonly invitedBy: string | null;
 }
 
 export interface EmployeeAccountDTO {
@@ -347,6 +384,46 @@ export const updateEmployeePaySchema = z
 
 export type UpdateEmployeePayInput = z.infer<typeof updateEmployeePaySchema>;
 
+/**
+ * A ceiling on one batch, not a business rule.
+ *
+ * Each id in the list costs a compare-and-set, a session revocation and an
+ * audit write, and they run one after another (see `runApprovalBatch`). Fifty
+ * is comfortably more than any real onboarding wave and small enough that the
+ * request cannot be turned into a way to hold a connection open. An admin with
+ * more than fifty waiting can tick the next fifty.
+ */
+const MAX_BULK_APPROVALS = 50;
+
+/** POST /api/admin/approvals/approve. */
+export const bulkApprovalSchema = z.object({
+  userIds: z
+    .array(z.string().trim().min(1))
+    .min(1, "Select at least one account.")
+    .max(MAX_BULK_APPROVALS, `You can action ${MAX_BULK_APPROVALS} accounts at a time.`),
+});
+
+/** Long enough to say why, short enough that the audit metadata stays a log line. */
+const MAX_DENIAL_REASON_LENGTH = 500;
+
+/**
+ * POST /api/admin/approvals/deny.
+ *
+ * The reason is optional and stays optional all the way down: it is a courtesy
+ * to whoever reads the audit trail in six months, not a field to make somebody
+ * fill in before they can close a queue. An empty string normalises to absent
+ * so the log never carries `reason: ""`, which reads as "they gave a reason and
+ * it was nothing".
+ */
+export const bulkDenialSchema = bulkApprovalSchema.extend({
+  reason: z
+    .string()
+    .trim()
+    .max(MAX_DENIAL_REASON_LENGTH, "That reason is longer than the log can keep.")
+    .transform((value) => (value.length > 0 ? value : undefined))
+    .optional(),
+});
+
 // ---------------------------------------------------------------------------
 // READING MEMBERS AND THEIR PROFILES
 // ---------------------------------------------------------------------------
@@ -567,18 +644,34 @@ function toNicheDTOs(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** The invitation an account came in through, as far as it can be reconstructed. */
+interface InvitationContext {
+  readonly invitedAt: Date;
+  /** Set once the person has accepted and chosen a password. */
+  readonly acceptedAt: Date | null;
+  /** The admin who sent it, or null if that account has since been deleted. */
+  readonly invitedBy: string | null;
+}
+
 /**
- * When each of these people was invited, if an invitation row survives.
+ * The invitation behind each of these addresses, if a row survives.
  *
  * Matched on email rather than on a foreign key because that is the only link
  * there is: an `Invitation` is consumed into an `AppUser` at acceptance and
  * never points back. Addresses are normalised to lowercase on both sides — see
  * `normalizeEmail` in auth-service — so a plain `in` is a real match.
+ *
+ * ONE QUERY, TWO READERS. The Employees table wants only "when were they
+ * invited"; the approvals queue wants when they accepted and who invited them,
+ * because those are the two facts an admin uses to decide. Selecting all three
+ * here rather than writing a second, nearly identical query is what stops the
+ * two screens from disagreeing about which invitation a re-invited address
+ * came in on.
  */
-async function loadInvitedAt(
+async function loadInvitationContext(
   organizationId: string,
   emails: readonly string[],
-): Promise<Map<string, Date>> {
+): Promise<Map<string, InvitationContext>> {
   const wanted = emails.filter((email) => email.length > 0);
   if (wanted.length === 0) return new Map();
 
@@ -587,12 +680,35 @@ async function loadInvitedAt(
     // Ascending, so a re-invited address ends up mapped to its most recent
     // invitation rather than the first one anybody ever sent.
     orderBy: { createdAt: "asc" },
-    select: { email: true, createdAt: true },
+    select: {
+      email: true,
+      createdAt: true,
+      acceptedAt: true,
+      // The inviter's name, or their address if they never set one. Not the
+      // whole user row — this is a label to print, and nothing else on that
+      // record belongs on a screen about somebody else's account.
+      createdBy: { select: { name: true, email: true } },
+    },
   });
 
-  const byEmail = new Map<string, Date>();
-  for (const row of rows) byEmail.set(row.email, row.createdAt);
+  const byEmail = new Map<string, InvitationContext>();
+  for (const row of rows) {
+    byEmail.set(row.email, {
+      invitedAt: row.createdAt,
+      acceptedAt: row.acceptedAt,
+      invitedBy: row.createdBy?.name ?? row.createdBy?.email ?? null,
+    });
+  }
   return byEmail;
+}
+
+/** The `invitedAt` column of the Employees table, narrowed from the read above. */
+async function loadInvitedAt(
+  organizationId: string,
+  emails: readonly string[],
+): Promise<Map<string, Date>> {
+  const context = await loadInvitationContext(organizationId, emails);
+  return new Map([...context].map(([email, row]) => [email, row.invitedAt]));
 }
 
 /**
@@ -642,8 +758,9 @@ function isFrozenStatus(status: string): boolean {
  * puts it.
  *
  * THE LIVE BRANCH FETCHES ITS INPUTS ONCE
- * The Shorts, niches and threshold come from the shared gatherer in
- * payroll-data.ts and are reused for everybody. Two reasons, both structural:
+ * The Shorts and the niches — each carrying its own threshold, or the null that
+ * means it has none — come from the shared gatherer in payroll-data.ts and are
+ * reused for everybody. Two reasons, both structural:
  * the same Short can pay two different people, so a per-employee query would be
  * an N+1; and if the estimate used a different query from the finalized run,
  * the number an admin saw on Tuesday and the number they paid on the 1st could
@@ -666,10 +783,7 @@ async function estimateCurrentPeriod(
   const stored = await loadFrozenPeriodFigures(organizationId, period, rows);
   if (stored) return { period, isDraft: false, byUserId: stored };
 
-  const { niches, shorts, organizationDefaultThreshold } = await loadPayrollInputs(
-    organizationId,
-    period,
-  );
+  const { niches, shorts } = await loadPayrollInputs(organizationId, period);
 
   const byUserId = new Map<string, CurrentPeriodFigure>();
   for (const row of rows) {
@@ -678,7 +792,6 @@ async function estimateCurrentPeriod(
       shorts,
       niches,
       period,
-      organizationDefaultThreshold,
     });
 
     byUserId.set(row.userId, {
@@ -960,6 +1073,80 @@ export async function listEmployees(options: {
 }
 
 // ---------------------------------------------------------------------------
+// READ: the approvals queue
+// ---------------------------------------------------------------------------
+
+/**
+ * Everybody waiting behind the approval gate.
+ *
+ * A separate read from `listEmployees` rather than a filter over it, and the
+ * reason is cost rather than tidiness: the roster computes a live payroll
+ * estimate for every person on it — every Short published this month — and this
+ * queue needs none of that. Filtering the roster down to the pending rows would
+ * pay the whole bill to throw most of it away, on the one screen an admin is
+ * meant to be able to open, glance at and clear.
+ *
+ * OLDEST WAIT FIRST. Not by role, the way the roster sorts: this is a queue, and
+ * the person who has been unable to sign in the longest is the one whose day is
+ * being held up. Anybody whose acceptance date is unknown sorts to the bottom
+ * rather than to the top — an absent date is not evidence of a long wait.
+ */
+export async function listPendingApprovals(): Promise<PendingApprovalDTO[]> {
+  const { organizationId } = await getScope();
+
+  const members = await prisma.organizationMember.findMany({
+    // Filtered in the database, not in this process. A queue is normally a
+    // handful of rows out of a whole workspace, and `pending_approval` is the
+    // one status this screen exists for.
+    where: { organizationId, user: { status: "pending_approval" } },
+    select: {
+      userId: true,
+      role: true,
+      niches: { select: { nicheId: true } },
+      user: { select: { name: true, email: true } },
+    },
+  });
+
+  if (members.length === 0) return [];
+
+  const [nicheById, invitations] = await Promise.all([
+    loadNicheChips(organizationId),
+    loadInvitationContext(
+      organizationId,
+      members.map((member) => member.user.email ?? ""),
+    ),
+  ]);
+
+  return members
+    .map((member) => {
+      const invitation = invitations.get(member.user.email ?? "");
+      return {
+        userId: member.userId,
+        name: member.user.name,
+        email: member.user.email,
+        role: member.role,
+        roleLabel: roleDefinition(member.role).label,
+        assignedNiches: toNicheDTOs(
+          member.niches.map((niche) => niche.nicheId),
+          nicheById,
+        ),
+        acceptedAt: invitation?.acceptedAt?.getTime() ?? null,
+        invitedAt: invitation?.invitedAt.getTime() ?? null,
+        invitedBy: invitation?.invitedBy ?? null,
+      } satisfies PendingApprovalDTO;
+    })
+    .sort((a, b) => {
+      // Number.MAX_SAFE_INTEGER, not 0: an unknown acceptance date has to sort
+      // *last*, and treating null as the epoch would put it first — presenting
+      // the row we know least about as the most urgent one on the screen.
+      const waitA = a.acceptedAt ?? Number.MAX_SAFE_INTEGER;
+      const waitB = b.acceptedAt ?? Number.MAX_SAFE_INTEGER;
+      if (waitA !== waitB) return waitA - waitB;
+      return displayName(a).localeCompare(displayName(b));
+    });
+}
+
+// ---------------------------------------------------------------------------
 // READ: one person's profile
 // ---------------------------------------------------------------------------
 
@@ -1032,17 +1219,39 @@ async function loadProfileActivity(
   userId: string,
   includePay: boolean,
 ): Promise<AuditEntryDTO[]> {
+  // ONE ANSWER, USED TWICE. Whether this reader may see the amounts decides
+  // both whether the pay entry appears at all and whether it arrives with its
+  // figures — and the two must not be able to disagree. They did: the
+  // allow-list widened on `includePay` while `listAuditEvents` was called
+  // without a money-access flag, which defaults to none, so `stripMoneyKeys`
+  // emptied the very entry the branch exists to show. A payroll.view admin read
+  // a salary change with no salary in it here, and the same change with its
+  // figures through /api/admin/audit.
+  //
+  // `payroll.view` is resolved from the SESSION, exactly as that route resolves
+  // it — never from a parameter, so nothing a caller supplies can turn the
+  // redaction off. It is AND-ed with `includePay` rather than replacing it: the
+  // route already resolved the same permission the same way, and keeping both
+  // means this can only ever narrow what the old code showed.
+  const seesAmounts = includePay && (await actorCan("payroll.view"));
+
   const allowed = new Set<string>(PROFILE_ACTIVITY_ACTIONS);
   // `employee.pay_updated` carries the amounts in its metadata — see the note
   // on `updateEmployeePay`. It belongs on an admin's timeline, but only for a
   // reader already entitled to the figures; this feed must not become the back
   // door into payroll.
-  if (includePay) allowed.add("employee.pay_updated");
+  if (seesAmounts) allowed.add("employee.pay_updated");
 
   const page = await listAuditEvents({
     organizationId,
     actorUserId: userId,
     limit: PROFILE_ACTIVITY_SCAN,
+    // `finance.view` is deliberately false rather than resolved. Nothing under
+    // `finance.` is on `PROFILE_ACTIVITY_ACTIONS`, so no finance figure can
+    // reach this feed to be unlocked — and asking for a permission this read
+    // has no use for is how the single "may see money" flag became a key to
+    // two different ledgers in the first place.
+    moneyAccess: { "payroll.view": seesAmounts, "finance.view": false },
   });
 
   return page.entries
@@ -1536,10 +1745,17 @@ export async function approveEmployee(
  * deleting the row would erase the decision along with its subject. A
  * deactivated account cannot authenticate, and an admin who changes their mind
  * can reactivate it from the Users screen.
+ *
+ * THE REASON IS FOR THE LOG, NOT FOR THE PERSON. It goes into the audit
+ * summary and metadata, where an admin reading the trail later can see why the
+ * decision was made. Nothing mails it to the rejected account: telling somebody
+ * "you were turned down because X" is a conversation a human being should have,
+ * and a system that sends it automatically has made that choice for them.
  */
 export async function rejectEmployee(
   userId: string,
   request: Request,
+  options: { reason?: string } = {},
 ): Promise<EmployeeApprovalResult> {
   const { organizationId, actor } = await getScope();
   const member = await requireMember(organizationId, userId);
@@ -1570,6 +1786,13 @@ export async function rejectEmployee(
 
   const label = displayName({ name: member.name, email: member.email, userId });
 
+  // Trimmed and emptiness-checked again here rather than trusted from the
+  // schema: this function is called directly by the per-row action on the
+  // Employees page as well as through the bulk route, and a summary ending in a
+  // dangling em dash is how "the reason is optional" leaks into the log.
+  const reason = options.reason?.trim();
+  const hasReason = reason !== undefined && reason.length > 0;
+
   await recordAudit(
     {
       organizationId,
@@ -1579,13 +1802,165 @@ export async function rejectEmployee(
     },
     {
       action: "employee.rejected",
-      summary: `Rejected the pending account for ${label}`,
+      summary: hasReason
+        ? `Rejected the pending account for ${label} — ${reason}`
+        : `Rejected the pending account for ${label}`,
       targetType: "user",
       targetId: userId,
       targetLabel: label,
-      metadata: { role: member.role, sessionsRevoked: outcome.sessionsRevoked },
+      metadata: {
+        role: member.role,
+        sessionsRevoked: outcome.sessionsRevoked,
+        // Spread rather than assigned, so an unexplained denial has no `reason`
+        // key at all instead of one holding null — the same distinction the pay
+        // block draws one screen over.
+        ...(hasReason ? { reason } : {}),
+      },
     },
   );
 
   return { userId, status: "deactivated", name: member.name, email: member.email };
+}
+
+// ---------------------------------------------------------------------------
+// WRITE: the same gate, in batches
+// ---------------------------------------------------------------------------
+
+/**
+ * What happened to one account in a batch.
+ *
+ * `error` carries an `AppError.userMessage` — a sentence written for a person,
+ * the same text the single-account routes return — and never an exception's own
+ * message, which can name a table, a column or a query. See `refusalMessage`.
+ */
+export interface BulkApprovalOutcome {
+  readonly userId: string;
+  readonly ok: boolean;
+  readonly name: string | null;
+  readonly email: string | null;
+  /** Why this one did not apply. Null on success. */
+  readonly error: string | null;
+}
+
+export interface BulkApprovalResult {
+  readonly results: readonly BulkApprovalOutcome[];
+  readonly succeeded: number;
+  readonly failed: number;
+}
+
+/**
+ * Runs one decision over a list of accounts, and does not stop at the first
+ * refusal.
+ *
+ * WHY PARTIAL SUCCESS IS THE CONTRACT
+ * Onboarding happens in waves, and the realistic failure is not "the database
+ * is down" — it is one row in the batch that a colleague approved thirty
+ * seconds ago in another tab. Aborting on that would throw away nine good
+ * approvals to report one stale id, and the admin would have no way to tell
+ * which of the ten actually landed. So every id is attempted, every outcome is
+ * named, and the caller is told exactly which ones need looking at.
+ *
+ * SEQUENTIAL, NOT `Promise.all`. Each iteration is a compare-and-set, a session
+ * revocation inside a transaction and an audit write. Firing fifty of those at
+ * once would open fifty connections from one HTTP request to write rows that
+ * nobody is waiting on in parallel — and would interleave the audit entries into
+ * an order that no longer matches the order the admin ticked the boxes.
+ *
+ * NOT A TRANSACTION EITHER, for the same reason partial success is the
+ * contract: `approveEmployee` and `rejectEmployee` each audit their own
+ * decision, and rolling nine of them back because the tenth was stale would
+ * un-approve people an admin has been told were approved.
+ */
+async function runApprovalBatch(
+  userIds: readonly string[],
+  decide: (userId: string) => Promise<EmployeeApprovalResult>,
+): Promise<BulkApprovalResult> {
+  // Deduplicated so a list that names the same person twice cannot produce one
+  // success and one "already decided" failure for the same account — which
+  // would be entirely this function's own doing.
+  const unique = [...new Set(userIds)];
+
+  const results: BulkApprovalOutcome[] = [];
+  for (const userId of unique) {
+    try {
+      const applied = await decide(userId);
+      results.push({
+        userId,
+        ok: true,
+        name: applied.name,
+        email: applied.email,
+        error: null,
+      });
+    } catch (error) {
+      results.push({
+        userId,
+        ok: false,
+        // The account could not be read, or could not be changed; either way
+        // this response is not the place to guess at a name for it.
+        name: null,
+        email: null,
+        error: refusalMessage(error),
+      });
+    }
+  }
+
+  return {
+    results,
+    succeeded: results.filter((result) => result.ok).length,
+    failed: results.filter((result) => !result.ok).length,
+  };
+}
+
+/**
+ * The sentence to show for one failed member of a batch.
+ *
+ * An `AppError` was constructed with a `userMessage` for exactly this purpose,
+ * so it is safe to pass on. Anything else is an unexpected throw whose message
+ * is written for a developer, and it is replaced wholesale rather than trimmed.
+ *
+ * IT IS LOGGED HERE BECAUSE NOTHING ELSE WILL. Catching the error is what makes
+ * partial success possible, and it also means `handleMutation`'s 5xx logging
+ * never sees this one — so a batch could quietly swallow a real fault. The log
+ * line follows `describeWriteFailure` in audit-service: error name and first
+ * line only, never the object. A PrismaClientValidationError renders the
+ * rejected call into its own text, `data` included, and a server log outlives
+ * the request and answers to nobody's permissions.
+ */
+function refusalMessage(error: unknown): string {
+  if (error instanceof AppError) return error.userMessage;
+
+  const described =
+    error instanceof Error
+      ? `${error.name}: ${error.message.split("\n")[0] ?? ""}`
+      : "non-Error thrown";
+  console.error("[approvals] unexpected failure while deciding one account —", described);
+
+  return "Something went wrong with this account. Try it on its own to see why.";
+}
+
+/** Approve several accounts, reporting each one separately. */
+export async function approveEmployees(
+  userIds: readonly string[],
+  request: Request,
+): Promise<BulkApprovalResult> {
+  return runApprovalBatch(userIds, (userId) => approveEmployee(userId, request));
+}
+
+/**
+ * Deny several accounts, reporting each one separately.
+ *
+ * One reason for the whole batch, because that is what the dialog asks for and
+ * what is true: an admin clearing five requests in one action had one thought
+ * about all five. It is written into each denial's own audit entry rather than
+ * into a single batch record, so a person's account still carries its own
+ * complete decision when somebody looks it up a year later.
+ */
+export async function denyEmployees(
+  userIds: readonly string[],
+  request: Request,
+  options: { reason?: string } = {},
+): Promise<BulkApprovalResult> {
+  return runApprovalBatch(userIds, (userId) =>
+    rejectEmployee(userId, request, { reason: options.reason }),
+  );
 }

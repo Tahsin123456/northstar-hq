@@ -35,6 +35,7 @@ import {
   auditActionLabel,
   shouldRecordNetworkContext,
 } from "@/lib/audit/actions";
+import { formatMoney } from "@/lib/finance/money";
 import { EM_DASH, formatDateTime, formatNumber, formatRelativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -469,16 +470,22 @@ function AuditEntryDetail({ entry }: { entry: AuditEntryDTO }) {
               server wrote, and prettifying the field names would misrepresent
               what is actually stored. */}
           <dl className="mt-2 grid gap-x-6 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-3">
-            {metadata.map(([key, value]) => (
-              <div key={key} className="flex min-w-0 gap-2">
-                <dt className="shrink-0 font-mono text-[11px] text-subtle-foreground">
-                  {key}
-                </dt>
-                <dd className="min-w-0 break-words text-[12px] text-muted-foreground">
-                  {formatMetadataValue(value)}
-                </dd>
-              </div>
-            ))}
+            {metadata.map(([key, value]) => {
+              const amount = readableAmount(key, value, entry.metadata);
+              return (
+                <div key={key} className="flex min-w-0 gap-2">
+                  <dt className="shrink-0 font-mono text-[11px] text-subtle-foreground">
+                    {key}
+                  </dt>
+                  <dd className="min-w-0 break-words text-[12px] text-muted-foreground">
+                    {formatMetadataValue(value)}
+                    {amount ? (
+                      <span className="ml-1.5 text-subtle-foreground">({amount})</span>
+                    ) : null}
+                  </dd>
+                </div>
+              );
+            })}
           </dl>
         </div>
       ) : null}
@@ -505,6 +512,50 @@ function Th({ children, className }: { children: React.ReactNode; className?: st
       </span>
     </th>
   );
+}
+
+/**
+ * Minor-unit amounts, matching the naming convention the server redacts on.
+ *
+ * Numbers only: a redacted entry has the key DELETED rather than nulled, so
+ * anything that reaches here is a figure this reader is entitled to.
+ */
+const MINOR_UNIT_KEY = /minor/i;
+
+/**
+ * The readable form of a stored amount — `410000` shown as `($4,100.00)`.
+ *
+ * THIS IS NOW THE ONLY PLACE THE FIGURE APPEARS. Finance summaries used to
+ * carry a formatted amount in their prose, and the prose is returned to
+ * everyone holding `audit.view` — a wider group than `finance.view`. The
+ * amount moved out of the sentence and lives only in the metadata, which the
+ * server strips per entry for a reader without the matching permission. So the
+ * amount a permitted reader is entitled to has to be legible HERE, or the fix
+ * would have cost them the figure rather than moving it behind a permission.
+ *
+ * The raw value stays in place beside it, in keeping with the note above about
+ * showing what the server actually wrote — this is a gloss, not a replacement.
+ * The currency comes from the entry's own metadata, since a formatted amount
+ * with the wrong currency would be worse than the integer.
+ */
+function readableAmount(
+  key: string,
+  value: unknown,
+  metadata: Record<string, unknown> | null,
+): string | null {
+  if (typeof value !== "number" || !MINOR_UNIT_KEY.test(key)) return null;
+
+  // Each amount is paired with the code it was recorded in: the converted
+  // figure with `baseCurrency`, a pre-edit figure with `previousCurrency`, and
+  // everything else with `currency`.
+  const lower = key.toLowerCase();
+  const paired = lower.includes("base")
+    ? metadata?.baseCurrency
+    : lower.includes("previous")
+      ? (metadata?.previousCurrency ?? metadata?.currency)
+      : metadata?.currency;
+
+  return typeof paired === "string" && paired ? formatMoney(value, paired) : null;
 }
 
 /** Metadata is `unknown` by type and JSON by origin — rendered, never guessed at. */

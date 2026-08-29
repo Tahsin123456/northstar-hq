@@ -52,10 +52,19 @@ function useInvalidateNicheCatalogue() {
   }, [invalidateDataset, queryClient]);
 }
 
+/**
+ * Takes a payload rather than a bare name, because an Admin creating a niche
+ * may set its hit threshold in the same step.
+ *
+ * Callers without `settings.manage` pass `{ name }` and nothing else — the
+ * field is not merely hidden from them, it is absent from the request, which is
+ * what makes the server's refusal a real boundary rather than a formality.
+ */
 export function useCreateNiche() {
   const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
-    mutationFn: (name: string) => api.createNiche(name),
+    mutationFn: (payload: { name: string; hitThreshold?: number }) =>
+      api.createNiche(payload),
     onSuccess: () => invalidate(),
   });
 }

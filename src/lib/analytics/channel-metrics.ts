@@ -24,6 +24,13 @@ const MS_PER_WEEK = 604_800_000;
  * returns a complete metric set, with `null` wherever a statistic genuinely
  * does not exist. Every dashboard cell, KPI card and comparison row is derived
  * from this one function, so the numbers cannot drift between views.
+ *
+ * A `null` threshold is one of those "genuinely does not exist" cases, and it
+ * is handled here rather than at each call site for the same reason: this is
+ * the one place hit rate is computed, so it is the one place that can guarantee
+ * an unconfigured niche never produces a rate. Everything that does not depend
+ * on a threshold — uploads, views, medians, consistency — is still computed in
+ * full, because none of it was ever in doubt.
  */
 export function calculateChannelMetrics(
   input: ChannelMetricsInput,
@@ -56,7 +63,10 @@ export function calculateChannelMetrics(
 
     totalShorts,
     hitCount,
-    hitRate: calculateHitRate(hitCount, totalShorts),
+    // `calculateHitRate(0, 38)` is a perfectly good 0% — which is exactly the
+    // wrong answer here. With no threshold configured, 38 Shorts did not all
+    // miss; there was no line for them to miss.
+    hitRate: threshold === null ? null : calculateHitRate(hitCount, totalShorts),
 
     totalViews,
     averageViews: averageViews === null ? null : roundTo(averageViews, 0),

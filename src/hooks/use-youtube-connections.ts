@@ -4,6 +4,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { ADMIN_KEY } from "./use-admin";
+import { FINANCE_KEY } from "./use-finance";
 
 /**
  * Connected Google accounts.
@@ -79,6 +80,42 @@ export function useDisconnectYouTube() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: YOUTUBE_CONNECTIONS_KEY }),
         queryClient.invalidateQueries({ queryKey: ADMIN_KEY }),
+      ]);
+    },
+  });
+}
+
+/**
+ * Read YouTube revenue now instead of waiting for the scheduler.
+ *
+ * Invalidates the connection list because the run rewrites the very fields the
+ * screen is showing — revenue status, monetisation, the error and the next-sync
+ * time — so leaving the cached copy would show yesterday's verdict beside a
+ * toast describing today's.
+ *
+ * The finance namespace goes with it: a successful run writes monthly entries
+ * into the ledger, and an admin who syncs and then opens Finance should not
+ * find the month missing because the cache predates the import. Invalidating
+ * one and not the other is how two screens end up disagreeing about the same
+ * month.
+ *
+ * Resolves with the run's summary rather than throwing on a partial failure —
+ * a connection outside the Partner Programme is a normal outcome, not an error
+ * — so the caller has to read `errors` to report honestly.
+ *
+ * The variable is the connection to read, or `null` for all of them. It is a
+ * mutation VARIABLE rather than a hook argument on purpose: each card mounts
+ * its own instance, so `isPending` belongs to the button that was pressed and a
+ * shared hook cannot leave every other card spinning.
+ */
+export function useSyncYouTubeRevenue() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (connectionId?: string | null) => api.syncYouTubeRevenue(connectionId),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: YOUTUBE_CONNECTIONS_KEY }),
+        queryClient.invalidateQueries({ queryKey: FINANCE_KEY }),
       ]);
     },
   });

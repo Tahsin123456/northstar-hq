@@ -12,8 +12,9 @@ export const dynamic = "force-dynamic";
 
 export function GET() {
   return handle(async () => {
-    // Collections are how the research board is organised; listing them is
-    // reading, not curating.
+    // Collections are how a research board is organised; listing them is
+    // reading, not curating. They are personal, like the saves they hold, so
+    // the service returns the caller's folders.
     await requirePermission("analytics.view");
 
     return { collections: await listCollections() };
@@ -22,7 +23,7 @@ export function GET() {
 
 export function POST(request: Request) {
   return handleMutation(request, async () => {
-    // A new folder is a change to the shared research board.
+    // A new folder is a change to the caller's own research board.
     await requirePermission("research.write");
 
     const parsed = createCollectionSchema.safeParse(await readJson(request));

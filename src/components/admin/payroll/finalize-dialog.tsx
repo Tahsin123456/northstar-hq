@@ -17,6 +17,7 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatNumber, pluralize } from "@/lib/format";
 import { useFinalizePeriod } from "@/hooks/use-payroll";
+import { SkippedNichesSummary } from "./skipped-niches-notice";
 import { formatRunTotalWithRecords, periodSentence, periodWindowSentence } from "./payroll-format";
 import type { PayrollPeriodDTO } from "@/server/services/payroll-service";
 
@@ -42,6 +43,13 @@ import type { PayrollPeriodDTO } from "@/server/services/payroll-service";
  * here as a deliberate second decision rather than hidden behind a retry: the
  * checkbox is the admin saying "yes, close the books early", which is a real
  * instruction and not a mistake to route around.
+ *
+ * THE UNCONFIGURED-NICHE CASE
+ * Shorts in a niche with no hit threshold cannot be judged and therefore earn
+ * nobody a bonus. That is correct, and it is also the one thing on this dialog
+ * that will quietly cost a colleague money — so it is stated before the
+ * confirm button rather than discovered on a payslip. Freezing the month is
+ * what makes it permanent; until then the fix is a number in a settings dialog.
  */
 export function FinalizeDialog({
   period,
@@ -156,6 +164,14 @@ function FinalizeForm({
             The original calculation stays visible beside it.
           </p>
         </div>
+
+        {/*
+          Above the unfinished-month checkbox, because it is the more surprising
+          of the two. "The month is not over" is a fact the admin already knows;
+          "these Shorts earned nothing because nobody set a threshold" is one
+          they may be about to freeze without knowing it.
+        */}
+        <SkippedNichesSummary skippedNiches={period.skippedNiches} />
 
         {needsForce ? (
           <div className="flex gap-3 rounded-lg border border-warning/30 bg-warning-subtle px-4 py-3">

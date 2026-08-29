@@ -135,3 +135,33 @@ export function trackedChannelNicheFilter(
 
   return { niches: { some: { nicheId: { in: [...visible] } } } };
 }
+
+/**
+ * The `where` fragment that narrows NICHES themselves to the visible set.
+ *
+ * A sibling of the channel filter above, for any query that lists or resolves
+ * niche rows directly rather than reaching them through a channel. Content
+ * types no longer need it — they are flat org-wide tags again, owned by the
+ * organization rather than by a niche — but the narrowing itself is not
+ * content-type-specific and belongs beside the other two.
+ *
+ * Fail-closed on the empty case, identically to `trackedChannelNicheFilter`.
+ */
+export function nicheFilter(visible: VisibleNiches): Prisma.NicheWhereInput {
+  if (visible === null) return {};
+  if (visible.length === 0) return { id: { in: [] } };
+  return { id: { in: [...visible] } };
+}
+
+/**
+ * The same narrowing expressed against a row that POINTS AT a niche.
+ *
+ * For rows that carry a `nicheId` column of their own — `Note.nicheId` today.
+ * Spelled as its own helper so the fail-closed empty case is written once
+ * rather than re-derived at each query — a hand-rolled `nicheId: { in: visible
+ * }` that forgets `visible === null` would silently show a Head nothing at all.
+ */
+export function nicheIdFilter(visible: VisibleNiches): { nicheId?: { in: string[] } } {
+  if (visible === null) return {};
+  return { nicheId: { in: [...visible] } };
+}

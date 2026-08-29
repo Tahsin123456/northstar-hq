@@ -1,5 +1,6 @@
 import type {
   Channel,
+  ContentType,
   Niche,
   OrganizationSettings,
   TrackedChannel,
@@ -8,11 +9,14 @@ import type {
 } from "@prisma/client";
 import type {
   ChannelDTO,
+  ContentTypeDTO,
+  ContentTypeRefDTO,
   ExcludedVideoDTO,
   NicheDTO,
   NicheRefDTO,
+  OrganizationSettingsDTO,
   OwnershipType,
-  SettingsDTO,
+  PersonalSettingsDTO,
   VideoDTO,
 } from "@/lib/dto";
 import { isOwnershipType } from "@/lib/dto";
@@ -44,14 +48,77 @@ export function toNicheRefDTO(niche: Pick<Niche, "id" | "name" | "colorIndex">):
   return { id: niche.id, name: niche.name, colorIndex: niche.colorIndex };
 }
 
-export function toNicheDTO(niche: Niche, channelCount: number): NicheDTO {
+/**
+ * The author columns a niche's byline needs.
+ *
+ * Structural rather than the Prisma user type: callers select three columns,
+ * and typing the parameter as the whole `AppUser` would invite one of them to
+ * hand over a row carrying a password hash.
+ */
+type NicheAuthorRow = { name: string | null; email: string | null } | null | undefined;
+
+/**
+ * `createdBy` is optional so the many places that map a niche without joining
+ * its author keep working unchanged. The byline is then `null` — which the UI
+ * renders as "Unknown", never as a blank that reads like an anonymous row.
+ */
+export function toNicheDTO(
+  niche: Niche,
+  channelCount: number,
+  createdBy?: NicheAuthorRow,
+): NicheDTO {
   return {
     ...toNicheRefDTO(niche),
     slug: niche.slug,
     hitThreshold: niche.hitThreshold,
     sortOrder: niche.sortOrder,
     channelCount,
+    createdById: niche.createdById,
+    // Name, then email, then nothing. A person who has not set a display name
+    // is still a person, and "Created by" followed by a blank reads as
+    // anonymous — the exact thing attribution exists to prevent.
+    createdByName: createdBy ? (createdBy.name ?? createdBy.email ?? null) : null,
     createdAt: niche.createdAt.getTime(),
+  };
+}
+
+export function toContentTypeRefDTO(
+  contentType: Pick<ContentType, "id" | "name" | "colorIndex">,
+): ContentTypeRefDTO {
+  return {
+    id: contentType.id,
+    name: contentType.name,
+    colorIndex: contentType.colorIndex,
+  };
+}
+
+/**
+ * The full catalogue entry, with its usage count.
+ *
+ * The count is a parameter rather than a field read off the row because it is
+ * the answer to a filtered question — this organization's videos — that only
+ * the query knows how to ask. Passing it in keeps the one place that decides
+ * what "in use" means (content-type-service) from being quietly duplicated
+ * here.
+ *
+ * BOTH counts, because a tag attaches to both a channel and a Short and the
+ * two are independent facts. A tag with 40 Shorts and no channels is a live
+ * vocabulary; one with 6 channels and no Shorts is an expectation nobody has
+ * yet checked. Reporting only one of them would hide whichever the reader
+ * happened to need.
+ */
+export function toContentTypeDTO(
+  contentType: ContentType,
+  counts: { videoCount: number; channelCount: number },
+): ContentTypeDTO {
+  return {
+    ...toContentTypeRefDTO(contentType),
+    slug: contentType.slug,
+    sortOrder: contentType.sortOrder,
+    isActive: contentType.isActive,
+    videoCount: counts.videoCount,
+    channelCount: counts.channelCount,
+    createdAt: contentType.createdAt.getTime(),
   };
 }
 
@@ -68,12 +135,23 @@ function toOwnershipType(value: string | null | undefined): OwnershipType {
   return isOwnershipType(value) ? value : "competitor";
 }
 
-/** The tracking-row shape `toChannelDTO` needs, including its niche join rows. */
+/** The tracking-row shape `toChannelDTO` needs, including its join rows. */
 export type TrackedChannelProjection = Pick<
   TrackedChannel,
   "label" | "addedAt" | "isActive" | "ownershipType"
 > & {
   niches?: Array<{ niche: Pick<Niche, "id" | "name" | "colorIndex"> }>;
+  /**
+   * The channel's content-type tags.
+   *
+   * Optional like `niches` and unlike the video side's, and the difference is
+   * the tenancy: `ChannelContentType` hangs off `TrackedChannel`, which is
+   * already this organization's row, so a query that omits the relation is
+   * simply not asking about tags. `VideoContentType` hangs off a globally
+   * shared `Video`, where the same omission would silently publish another
+   * team's Short as unclassified — which is why that one is required.
+   */
+  contentTypes?: Array<{ contentTypeId: string }>;
 };
 
 export function toChannelDTO(
@@ -105,9 +183,17 @@ export function toChannelDTO(
     addedAt: tracked?.addedAt.getTime() ?? channel.createdAt.getTime(),
     isActive: tracked?.isActive ?? false,
     ownershipType: toOwnershipType(tracked?.ownershipType),
+    // Sorted by name because the join rows come back in insertion order, so
+    // without this the chips on a channel silently reshuffle whenever somebody
+    // re-saves the assignment.
     niches: (tracked?.niches ?? [])
       .map((assignment) => toNicheRefDTO(assignment.niche))
       .sort((a, b) => a.name.localeCompare(b.name)),
+    // Sorted for the same reason the video side is: stable chip order, and a
+    // stable array for the client memos that key on it.
+    contentTypeIds: (tracked?.contentTypes ?? [])
+      .map((assignment) => assignment.contentTypeId)
+      .sort(),
   };
 }
 
@@ -126,7 +212,20 @@ export type VideoProjection = Pick<
   | "classification"
   | "classificationConfidence"
   | "isAvailable"
->;
+> & {
+  /**
+   * The caller's own content-type assignments for this video.
+   *
+   * REQUIRED, not optional like the join rows on `TrackedChannelProjection`.
+   * `Video` is a global, deduplicated row shared between organizations, so
+   * these join rows only mean anything once they have been narrowed to one
+   * tenant — and an optional field defaulting to `[]` would let a query that
+   * forgot the relation ship "this Short has no content types" to a team that
+   * had classified it, which reads as data loss rather than as a missing
+   * include. Making it required turns that omission into a compile error.
+   */
+  contentTypes: Array<{ contentTypeId: string }>;
+};
 
 export function toVideoDTO(video: VideoProjection): VideoDTO {
   return {
@@ -142,6 +241,9 @@ export function toVideoDTO(video: VideoProjection): VideoDTO {
     classification: video.classification,
     classificationConfidence: video.classificationConfidence,
     isAvailable: video.isAvailable,
+    // Sorted so a re-save cannot reorder the chips on a Short, and so a
+    // client memoising on this array does not invalidate for no reason.
+    contentTypeIds: video.contentTypes.map((row) => row.contentTypeId).sort(),
   };
 }
 
@@ -173,21 +275,46 @@ export function toExcludedVideoDTO(video: ExcludedVideoProjection): ExcludedVide
 }
 
 /**
- * The two settings rows -> one flat DTO.
+ * What every member may see: their own preferences, plus the two org-wide
+ * defaults the dashboard is drawn with.
  *
- * Settings are stored in two tables because they have two different owners: a
- * sort direction is nobody else's business, while the hit threshold and the
- * sync cadence are numbers the whole team argues about and must therefore be
- * singular. The *client* has no stake in that split — the Settings page renders
- * one form — so the seam is closed here rather than pushed into every component
- * and hook. Which table a field came from is visible in this function alone.
+ * This used to be one flat DTO carrying every field on OrganizationSettings,
+ * on the reasoning that the client had no stake in which table a field came
+ * from. It turned out to have one: the payload went to everyone holding
+ * `analytics.view`, so the sync cadence and the lookback window — organization
+ * configuration an employee has no screen for — travelled with the two numbers
+ * they actually need. The seam is now open on purpose, and it is a permission
+ * boundary rather than a storage detail.
+ *
+ * The two organization fields here are deliberate and minimal: without them a
+ * chart cannot pick a threshold or a period, and `(app)/layout.tsx` already
+ * hands both to the browser to seed `FiltersProvider`. They are read-only in
+ * this direction — `toOrganizationSettingsDTO` is the only way to see the rest,
+ * and writing any of them goes through `settings.manage`.
  */
-export function toSettingsDTO(
+export function toPersonalSettingsDTO(
   userSettings: UserSettings,
   orgSettings: OrganizationSettings,
-): SettingsDTO {
+): PersonalSettingsDTO {
   return {
-    // Team-wide: changing any of these changes a number somebody else sees.
+    defaultSortKey: userSettings.defaultSortKey,
+    defaultSortDirection: userSettings.defaultSortDirection,
+    defaultThreshold: orgSettings.defaultThreshold,
+    defaultPeriodDays: orgSettings.defaultPeriodDays,
+  };
+}
+
+/**
+ * The whole organization row. `settings.manage` only.
+ *
+ * Fields are listed one by one rather than spread, so a column added to
+ * OrganizationSettings later does not arrive in a payload by default — the same
+ * reasoning the payroll queries use for salaries.
+ */
+export function toOrganizationSettingsDTO(
+  orgSettings: OrganizationSettings,
+): OrganizationSettingsDTO {
+  return {
     defaultThreshold: orgSettings.defaultThreshold,
     defaultPeriodDays: orgSettings.defaultPeriodDays,
     lookbackDays: orgSettings.lookbackDays,
@@ -195,8 +322,7 @@ export function toSettingsDTO(
     snapshotIntervalMinutes: orgSettings.snapshotIntervalMinutes,
     shortsProbeEnabled: orgSettings.shortsProbeEnabled,
     autoRefreshEnabled: orgSettings.autoRefreshEnabled,
-    // Personal: display preferences that cannot move anyone else's numbers.
-    defaultSortKey: userSettings.defaultSortKey,
-    defaultSortDirection: userSettings.defaultSortDirection,
+    baseCurrency: orgSettings.baseCurrency,
+    companyName: orgSettings.companyName,
   };
 }

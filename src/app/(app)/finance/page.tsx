@@ -117,7 +117,17 @@ export default function FinancePage() {
             netMinor={data.summary.netMinor}
             margin={data.summary.margin}
             currency={data.baseCurrency}
+            estimatedRevenueMinor={data.estimated.revenueMinor}
           />
+
+          {data.estimated.revenueMinor > 0 ? (
+            <EstimateNotice
+              estimatedRevenueMinor={data.estimated.revenueMinor}
+              revenueMinor={data.summary.revenueMinor}
+              entryCount={data.estimated.entryCount}
+              currency={data.baseCurrency}
+            />
+          ) : null}
 
           {data.truncated ? <TruncationNotice /> : null}
 
@@ -246,20 +256,45 @@ function KpiRow({
   netMinor,
   margin,
   currency,
+  estimatedRevenueMinor,
 }: {
   revenueMinor: number;
   expenseMinor: number;
   netMinor: number;
   margin: number | null;
   currency: string;
+  /** A share of `revenueMinor`, never an addition to it. */
+  estimatedRevenueMinor: number;
 }) {
+  const hasEstimate = estimatedRevenueMinor > 0;
+
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <Card className="p-4">
         <Stat
           label="Revenue"
           value={formatMoney(revenueMinor, currency)}
-          caption="Money in"
+          /*
+           * The caveat is attached to the tile, not only to the note below it.
+           * A KPI tile is the part of this page that gets screenshotted into a
+           * deck, and a figure that travels without the sentence qualifying it
+           * is how an estimate becomes a commitment in somebody else's meeting.
+           */
+          caption={
+            hasEstimate
+              ? `Money in · ${formatMoney(estimatedRevenueMinor, currency)} of it estimated`
+              : "Money in"
+          }
+          hint={
+            hasEstimate ? (
+              <InfoTip>
+                Part of this total is imported from YouTube, which reports estimates and
+                revises them at month end. It is counted here in full because it is the
+                best figure available — but it has not settled, so it should not be read as
+                cash in the bank.
+              </InfoTip>
+            ) : undefined
+          }
         />
       </Card>
 
@@ -328,6 +363,68 @@ function TruncationNotice() {
           the charts and the per-channel table are built from the entries that fit, so
           they understate every line they show. Narrow the period to bring them back into
           agreement.
+        </p>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Part of the revenue above has not settled, and every figure derived from it
+ * inherits that.
+ *
+ * The four tiles cannot each carry this without turning into a paragraph, and
+ * the one that matters most is not the revenue tile at all — it is net profit,
+ * which is the number somebody makes a decision on. Saying it once, directly
+ * under the row, qualifies all four at the point they are read.
+ *
+ * Rendered only when there is an estimate in the period. A permanent "some of
+ * this may be estimated" would be noise on the majority of periods and would
+ * teach people to look past exactly the sentence that matters on the periods
+ * where it is true. Nothing on screen means nothing estimated — a claim this
+ * page can make, because the figure comes from the same exact aggregate as the
+ * totals rather than from the capped entry list.
+ *
+ * Not dismissible, for the same reason the truncation notice is not: the
+ * qualification holds for as long as the figures are on screen.
+ */
+function EstimateNotice({
+  estimatedRevenueMinor,
+  revenueMinor,
+  entryCount,
+  currency,
+}: {
+  estimatedRevenueMinor: number;
+  revenueMinor: number;
+  entryCount: number;
+  currency: string;
+}) {
+  // Guarded rather than assumed: a share of nothing is not 100%, and this note
+  // must not be the one place on the page that invents a number.
+  const share = revenueMinor > 0 ? (estimatedRevenueMinor / revenueMinor) * 100 : null;
+
+  return (
+    <Card className="flex items-start gap-3 border-warning/25 bg-warning-subtle p-4">
+      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" />
+      <div className="min-w-0 text-[12px] leading-relaxed text-muted-foreground">
+        <p className="font-medium text-foreground">
+          <span className="tnum">{formatMoney(estimatedRevenueMinor, currency)}</span> of this
+          period&rsquo;s revenue is an estimate, not settled cash
+          {share === null ? "" : <> &mdash; {formatPercent(share, 1)} of the total</>}.
+        </p>
+        <p className="mt-1">
+          It comes from {formatNumber(entryCount)}{" "}
+          {entryCount === 1 ? "entry" : "entries"} imported automatically from YouTube, which
+          reports estimated earnings and revises them at month end — sometimes weeks later.
+          The figure is included in revenue, net profit and margin above because it is the
+          best number available, but those three move when YouTube adjusts it.{" "}
+          {/* No `?kind=revenue`: the ledger's filters are component state, not
+              URL parameters, and a query string it ignores would be a link that
+              quietly does not do what it says. */}
+          <Link href="/finance/entries" className="text-accent underline-offset-4 hover:underline">
+            See which entries
+          </Link>{" "}
+          — imported rows are chipped &ldquo;YouTube&rdquo; and marked &ldquo;Est&rdquo;.
         </p>
       </div>
     </Card>

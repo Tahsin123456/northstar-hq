@@ -8,7 +8,8 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ShortCard, ShortCardHeader } from "./short-card";
-import { ShortNotesDialog } from "@/components/notes/notes-panel";
+import { ShortDetailDialog, type ShortDetailTarget } from "./short-detail-dialog";
+import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
 
 /**
  * The shared feed body used by Winners, Outliers and any other ranked list.
@@ -34,10 +35,33 @@ export function ShortsFeed({
   emptyDescription?: React.ReactNode;
   limit?: number;
 }) {
-  const [noteTarget, setNoteTarget] = React.useState<FeedShort | null>(null);
+  const [openShort, setOpenShort] = React.useState<FeedShort | null>(null);
   const noteCounts = dataset?.noteCounts.videos ?? {};
+  // Resolved here, once, and handed down exactly like `noteCount` already is —
+  // a scored feed row carries the analytics engine's projection of a video,
+  // which deliberately knows nothing about this organization's labels.
+  const contentTypeIndex = useVideoContentTypeIndex();
 
   const visible = React.useMemo(() => shorts.slice(0, limit), [shorts, limit]);
+
+  // The feed's own row shape flattened into what a single-Short view needs.
+  // Built here rather than inside the dialog so the dialog stays usable from
+  // Saved, whose rows are a different type describing the same Short.
+  const detailTarget = React.useMemo<ShortDetailTarget | null>(
+    () =>
+      openShort
+        ? {
+            videoId: openShort.video.id,
+            youtubeVideoId: openShort.video.youtubeVideoId,
+            title: openShort.video.title,
+            channelId: openShort.channel.id,
+            channelName: openShort.channel.displayName,
+            channelAvatarUrl: openShort.channel.avatarUrl,
+            niches: openShort.niches,
+          }
+        : null,
+    [openShort],
+  );
 
   if (loading) {
     return (
@@ -86,7 +110,8 @@ export function ShortsFeed({
               short={short}
               rank={showRank ? index + 1 : undefined}
               noteCount={noteCounts[short.video.id] ?? 0}
-              onAddNote={setNoteTarget}
+              contentTypeIds={contentTypeIndex.get(short.video.id) ?? NO_CONTENT_TYPES}
+              onOpenShort={setOpenShort}
             />
           ))}
         </div>
@@ -99,12 +124,13 @@ export function ShortsFeed({
         ) : null}
       </Card>
 
-      <ShortNotesDialog
-        videoId={noteTarget?.video.id ?? null}
-        videoTitle={noteTarget?.video.title ?? ""}
-        open={noteTarget !== null}
+      {/* The one place a Short is looked at on its own: notes, plus its niche
+          and content type, changeable without leaving the feed. */}
+      <ShortDetailDialog
+        short={detailTarget}
+        open={openShort !== null}
         onOpenChange={(open) => {
-          if (!open) setNoteTarget(null);
+          if (!open) setOpenShort(null);
         }}
       />
     </>

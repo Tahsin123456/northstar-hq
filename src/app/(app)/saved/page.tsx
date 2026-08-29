@@ -42,16 +42,39 @@ import { FieldHint, Input, Label } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchInput } from "@/components/dashboard/search-input";
+import {
+  DATE_FILTER_IDS,
+  DATE_FILTER_LABELS,
+  FilterMenu,
+  resolveDateFilter,
+  type DateFilterId,
+  type ResolvedDateFilter,
+} from "@/components/common/filter-menu";
 import { NicheChips } from "@/components/niches/niche-chip";
-import { ShortNotesDialog } from "@/components/notes/notes-panel";
+import { ContentTypeControl } from "@/components/content-types/content-type-control";
+import {
+  ShortDetailDialog,
+  type ShortDetailTarget,
+} from "@/components/shorts/short-detail-dialog";
+import { useSession } from "@/components/providers/session-provider";
 import { useDataset } from "@/hooks/use-dataset";
+import { useEmployees } from "@/hooks/use-employees";
+import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
 import {
   useCreateCollection,
   useDeleteCollection,
+  useRemoveOrphanedSave,
   useRenameCollection,
+  useSavedShorts,
   useUnsaveShort,
 } from "@/hooks/use-research";
-import type { CollectionDTO, SavedShortDTO } from "@/lib/dto";
+import {
+  AUTHOR_ME,
+  UNKNOWN_AUTHOR_LABEL,
+  type CollectionDTO,
+  type SavedShortDTO,
+} from "@/lib/dto";
+import type { SavedShortsQuery } from "@/server/services/research-service";
 import {
   EM_DASH,
   formatCompactNumber,
@@ -70,23 +93,124 @@ import { cn } from "@/lib/utils";
  * 4.8M tells a director their instinct was right, which is the feedback loop
  * that makes the whole workflow worth maintaining.
  */
+/** What the server is asked to sort the board by, for each choice the menu offers. */
+type SortChoice = "newest" | "oldest" | "saver";
+
+const SORT_LABELS: Record<SortChoice, string> = {
+  newest: "Newest first",
+  oldest: "Oldest first",
+  saver: "By saver",
+};
+
+const SORT_QUERY: Record<SortChoice, Pick<SavedShortsQuery, "sort" | "direction">> = {
+  newest: { sort: "saved", direction: "desc" },
+  oldest: { sort: "saved", direction: "asc" },
+  saver: { sort: "saver", direction: "asc" },
+};
+
 export default function SavedPage() {
-  const { data, isLoading, error, refetch } = useDataset();
+  // The dataset still supplies the FURNITURE around the board — the
+  // collections the chips are drawn from, the note counts behind each row's
+  // badge, the live content types. The rows themselves now come from their own
+  // request, because they are the part a filter narrows; see `useSavedShorts`.
+  const {
+    data,
+    error: datasetError,
+    refetch: refetchDataset,
+  } = useDataset();
+  // The board is this person's shortlist. An admin's payload also carries the
+  // team's, each row already labelled with its owner by the server — so the
+  // only thing left to decide here is which rows this person may act on.
+  const session = useSession();
+  const viewerId = session.user.id;
+  const isAdmin = session.can("users.manage");
+
   const [query, setQuery] = React.useState("");
   const [activeCollection, setActiveCollection] = React.useState<string | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
-  const [noteTarget, setNoteTarget] = React.useState<SavedShortDTO | null>(null);
+  const [openShort, setOpenShort] = React.useState<SavedShortDTO | null>(null);
+  const [saverFilter, setSaverFilter] = React.useState<string>("all");
+  const [dateFilter, setDateFilter] = React.useState<ResolvedDateFilter>({ id: "all" });
+  const [sort, setSort] = React.useState<SortChoice>("newest");
+
+  /**
+   * Everything the server is being asked, in one object — the request and the
+   * query key both, so the two cannot describe different boards.
+   */
+  const params = React.useMemo<SavedShortsQuery>(
+    () => ({
+      savedById: saverFilter === "all" ? undefined : saverFilter,
+      savedAfter: dateFilter.since,
+      ...SORT_QUERY[sort],
+    }),
+    [saverFilter, dateFilter, sort],
+  );
+
+  const {
+    data: savedData,
+    isLoading,
+    isFetching,
+    error: savedError,
+    refetch: refetchSaved,
+  } = useSavedShorts(params);
+
+  /**
+   * Either request failing is a failed page.
+   *
+   * The board is two reads now, and a half-rendered Saved page is worse than an
+   * error: with the dataset down, the collection chips vanish and every row's
+   * note badge reads zero — a board that looks complete and quietly
+   * under-reports. Retrying refetches both, since whichever one failed, the
+   * other is cheap and already cached.
+   */
+  const error = savedError ?? datasetError;
+  const refetch = React.useCallback(() => {
+    void refetchSaved();
+    void refetchDataset();
+  }, [refetchSaved, refetchDataset]);
 
   // Memoised so the fallback [] is not a fresh reference on every render,
   // which would defeat the search memo below.
-  const saved = React.useMemo(() => data?.savedShorts ?? [], [data]);
+  const saved = React.useMemo(() => savedData?.saved ?? [], [savedData]);
   const collections = React.useMemo(() => data?.collections ?? [], [data]);
   const noteCounts = data?.noteCounts.videos ?? {};
+  // `SavedShortDTO` is a historical record of a bookmark and carries no content
+  // types of its own — nor should it, since a label applied tomorrow is not a
+  // fact about the moment the Short was saved. It is resolved live from the
+  // dataset instead, by the same index every other surface uses.
+  const contentTypeIndex = useVideoContentTypeIndex();
+
+  // A saved row flattened into what the single-Short view needs. The dialog
+  // reads the labels live from the dataset itself, so nothing here goes stale
+  // when the content type is changed inside it.
+  const detailTarget = React.useMemo<ShortDetailTarget | null>(
+    () =>
+      openShort
+        ? {
+            videoId: openShort.videoId,
+            youtubeVideoId: openShort.youtubeVideoId,
+            title: openShort.title,
+            channelId: openShort.channelId,
+            channelName: openShort.channelName,
+            channelAvatarUrl: openShort.channelAvatarUrl,
+            niches: openShort.niches,
+          }
+        : null,
+    [openShort],
+  );
 
   /**
    * Global search across the research library: title, channel, niche,
-   * collection name. This is the thing that keeps the library useful once it
-   * outgrows a single screen.
+   * collection name — plus the collection chip. This is the thing that keeps
+   * the library useful once it outgrows a single screen.
+   *
+   * THESE TWO STAY IN THE BROWSER, and deliberately, for the same reason the
+   * notes log keeps its text search here. Saver and date decide WHICH ROWS ARE
+   * SENT — "Hana's saves" must not arrive as everybody's board with the rest
+   * hidden — so they are query parameters. Search and the collection chip only
+   * refine rows the server has already decided this person may read, they can
+   * never widen that set, and both have to feel instant. If search ever needs to
+   * reach text the payload does not carry, it becomes a parameter like the rest.
    */
   const filtered = React.useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -109,6 +233,31 @@ export default function SavedPage() {
       return haystack.includes(needle);
     });
   }, [saved, collections, query, activeCollection]);
+
+  /**
+   * How many of the rows ON THE BOARD sit in each collection.
+   *
+   * Counted from the rows rather than read from `CollectionDTO.itemCount`,
+   * which is the whole folder's size. With a saver or date filter on, the two
+   * disagree — a chip reading "Ideas 12" above two visible rows is a number
+   * that describes a board nobody is looking at. Unfiltered they are the same
+   * figure, so this costs nothing and removes the case where it is wrong.
+   */
+  const countsByCollection = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of saved) {
+      for (const id of item.collectionIds) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    return counts;
+  }, [saved]);
+
+  const hasServerFilters = saverFilter !== "all" || dateFilter.id !== "all";
+
+  const clearFilters = React.useCallback(() => {
+    setSaverFilter("all");
+    setDateFilter({ id: "all" });
+    setActiveCollection(null);
+  }, []);
 
   if (error) {
     return (
@@ -135,7 +284,11 @@ export default function SavedPage() {
 
       {isLoading ? (
         <Skeleton className="h-64 w-full rounded-lg" />
-      ) : saved.length === 0 ? (
+      ) : saved.length === 0 && !hasServerFilters ? (
+        // Only when the board is GENUINELY empty. With a saver or date filter
+        // on, an empty answer has to keep the filter bar on screen — otherwise
+        // the controls that produced the emptiness disappear with the rows and
+        // the only way back is a page reload.
         <Card>
           <EmptyState
             icon={<Bookmark />}
@@ -165,12 +318,24 @@ export default function SavedPage() {
                 <CollectionChip
                   key={collection.id}
                   label={collection.name}
-                  count={collection.itemCount}
+                  count={countsByCollection.get(collection.id) ?? 0}
                   active={activeCollection === collection.id}
                   onClick={() =>
                     setActiveCollection(activeCollection === collection.id ? null : collection.id)
                   }
                   collection={collection}
+                  // ATTRIBUTED, NOT HIDDEN. An admin's board carries the team's
+                  // folders, and filtering by one is a genuine read — the rows
+                  // it reveals are real and each names who saved it. What made
+                  // the chip wrong was silence: a bare "Ideas 12" next to rows
+                  // that say "Saved by Hana" claims the folder is yours, and
+                  // two people can both have an "Ideas". So the chip says whose
+                  // it is, which is the same answer the row beside it gives.
+                  owner={
+                    collection.createdById === viewerId
+                      ? null
+                      : (collection.createdByName ?? UNKNOWN_AUTHOR_LABEL)
+                  }
                 />
               ))}
             </div>
@@ -184,27 +349,82 @@ export default function SavedPage() {
             />
           </div>
 
+          {/* Who saved it, when, and in what order — the three questions that
+              turn an admin's merged board from a wall into something readable.
+              They go to the server; see the note on `filtered`. */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* ADMINS ONLY, unlike the notes log's author filter beside it, and
+                the difference is real rather than an oversight. A saved Short
+                has no shared mode — a member's board is only ever their own —
+                so "Anyone" and "Mine" would name the same board and the menu
+                would be a control that does nothing. The notes log offers it to
+                everybody because a colleague's shared note genuinely can be
+                sitting in their list. */}
+            {isAdmin ? (
+              <SaverFilterMenu current={saverFilter} onChange={setSaverFilter} />
+            ) : null}
+
+            <FilterMenu
+              label="Saved"
+              value={DATE_FILTER_LABELS[dateFilter.id]}
+              options={DATE_FILTER_IDS.map((id) => ({ id, label: DATE_FILTER_LABELS[id] }))}
+              current={dateFilter.id}
+              // Resolved in the handler, never during render, so the cut-off is
+              // fixed at the moment the range is chosen — see `resolveDateFilter`.
+              onChange={(value) => setDateFilter(resolveDateFilter(value as DateFilterId))}
+            />
+
+            <FilterMenu
+              label="Sort"
+              value={SORT_LABELS[sort]}
+              options={(["newest", "oldest", "saver"] as SortChoice[]).map((id) => ({
+                id,
+                label: SORT_LABELS[id],
+              }))}
+              current={sort}
+              onChange={(value) => setSort(value as SortChoice)}
+            />
+
+            {hasServerFilters || activeCollection ? (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="text-[11px] text-accent transition-colors hover:text-accent-hover"
+              >
+                Clear filters
+              </button>
+            ) : null}
+          </div>
+
           {filtered.length === 0 ? (
             <Card>
               <EmptyState
                 icon={<Search />}
                 title="Nothing matches"
-                description="Search looks at the title, channel, niche and collection name."
+                description="Search looks at the title, channel, niche and collection name. The saver and date filters are applied before that, on the server."
                 action={
                   <Button
                     variant="secondary"
                     onClick={() => {
                       setQuery("");
-                      setActiveCollection(null);
+                      clearFilters();
                     }}
                   >
-                    Clear filters
+                    Clear everything
                   </Button>
                 }
               />
             </Card>
           ) : (
-            <Card className="overflow-hidden">
+            // Dimmed rather than replaced while the next answer is in flight:
+            // the rows on screen are still true, they are simply about to be
+            // asked again with a slightly different question.
+            <Card
+              className={cn(
+                "overflow-hidden transition-opacity duration-150",
+                isFetching && "opacity-60",
+              )}
+            >
               <div className="flex items-center gap-3 border-b border-border bg-surface-sunken px-4 py-2 text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
                 <span className="w-10 shrink-0" />
                 <span className="min-w-0 flex-1">Short</span>
@@ -222,7 +442,9 @@ export default function SavedPage() {
                     item={item}
                     collections={collections}
                     noteCount={noteCounts[item.videoId] ?? 0}
-                    onAddNote={() => setNoteTarget(item)}
+                    contentTypeIds={contentTypeIndex.get(item.videoId) ?? NO_CONTENT_TYPES}
+                    isMine={item.savedById === viewerId}
+                    onOpenShort={() => setOpenShort(item)}
                   />
                 ))}
               </div>
@@ -232,15 +454,69 @@ export default function SavedPage() {
       )}
 
       <CreateCollectionDialog open={createOpen} onOpenChange={setCreateOpen} />
-      <ShortNotesDialog
-        videoId={noteTarget?.videoId ?? null}
-        videoTitle={noteTarget?.title ?? ""}
-        open={noteTarget !== null}
+      <ShortDetailDialog
+        short={detailTarget}
+        open={openShort !== null}
         onOpenChange={(open) => {
-          if (!open) setNoteTarget(null);
+          if (!open) setOpenShort(null);
         }}
       />
     </PageContainer>
+  );
+}
+
+/**
+ * Filter the board by who saved it — rendered only for an admin.
+ *
+ * The roster it draws needs `users.manage`, which is the same permission that
+ * makes this board hold more than one person's saves in the first place. The
+ * caller gates the render; the `enabled` here is what stops the request being
+ * made from a mounted-then-hidden copy.
+ *
+ * A MENU IS AN AFFORDANCE, NOT THE BOUNDARY. `listSavedShorts` ANDs whatever is
+ * asked for with the ownership filter, so a member who hand-writes a
+ * colleague's id into the query string gets the empty answer that contradiction
+ * deserves — not their colleague's library. Pinned in
+ * `saved-short-filters.test.ts`.
+ *
+ * "Mine" resolves against the SESSION server-side, so it cannot be aimed at
+ * somebody else however the request is written.
+ */
+function SaverFilterMenu({
+  current,
+  onChange,
+}: {
+  current: string;
+  onChange: (value: string) => void;
+}) {
+  const { data } = useEmployees();
+  const employees = React.useMemo(() => data?.employees ?? [], [data]);
+
+  const options = React.useMemo(
+    () => [
+      { id: "all", label: "Anyone" },
+      { id: AUTHOR_ME, label: "Mine" },
+      ...employees.map((employee) => ({
+        id: employee.userId,
+        label: employee.name ?? employee.email ?? "Unnamed",
+      })),
+    ],
+    [employees],
+  );
+
+  const value =
+    current === "all"
+      ? "Anyone"
+      : (options.find((option) => option.id === current)?.label ?? "Anyone");
+
+  return (
+    <FilterMenu
+      label="Saved by"
+      value={value}
+      options={options}
+      current={current}
+      onChange={onChange}
+    />
   );
 }
 
@@ -250,12 +526,19 @@ function CollectionChip({
   active,
   onClick,
   collection,
+  owner = null,
 }: {
   label: string;
   count: number;
   active: boolean;
   onClick: () => void;
   collection?: CollectionDTO;
+  /**
+   * Whose folder this is — null when it is the viewer's own, which is the case
+   * that needs no label. Everything else is somebody named, or `a deleted
+   * account` for a folder whose owner has left.
+   */
+  owner?: string | null;
 }) {
   const [renameOpen, setRenameOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
@@ -267,6 +550,10 @@ function CollectionChip({
           type="button"
           onClick={onClick}
           aria-pressed={active}
+          // Spelled out for the screen reader rather than left to the visible
+          // fragments, which read as three unrelated words in a row.
+          aria-label={owner ? `${label}, ${owner}, ${count} saved` : undefined}
+          title={owner ? `${label} — ${owner}` : undefined}
           className={cn(
             "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12px] font-medium transition-colors duration-150",
             active
@@ -276,6 +563,14 @@ function CollectionChip({
           )}
         >
           {label}
+          {owner ? (
+            <span
+              aria-hidden
+              className="max-w-[90px] truncate font-normal text-subtle-foreground"
+            >
+              · {owner}
+            </span>
+          ) : null}
           <span className="tnum text-[11px] text-subtle-foreground">{count}</span>
         </button>
 
@@ -284,7 +579,13 @@ function CollectionChip({
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
-                aria-label={`Manage ${collection.name}`}
+                // The owner travels into the label too: renaming or deleting a
+                // colleague's folder is oversight an admin has, but not one
+                // they should exercise by mistake on a chip they read as their
+                // own.
+                aria-label={
+                  owner ? `Manage ${collection.name} (${owner})` : `Manage ${collection.name}`
+                }
                 className="absolute right-1 rounded p-0.5 text-subtle-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/chip:opacity-100 data-[state=open]:opacity-100"
               >
                 <MoreHorizontal className="size-3" />
@@ -327,14 +628,38 @@ function SavedRow({
   item,
   collections,
   noteCount,
-  onAddNote,
+  contentTypeIds,
+  isMine,
+  onOpenShort,
 }: {
   item: SavedShortDTO;
   collections: readonly CollectionDTO[];
   noteCount: number;
-  onAddNote: () => void;
+  contentTypeIds: readonly string[];
+  /**
+   * Whether this row is the viewer's own save.
+   *
+   * False only on an admin's board, where the server hands back the whole
+   * team's. Un-saving is "remove mine" server-side, so offering that button on
+   * a colleague's row would be a control that silently does nothing.
+   *
+   * False is not the same as "somebody else's", though — see `isOrphaned`
+   * below. A save whose owner has been deleted is nobody's, and it gets a
+   * removal of its own rather than no removal at all.
+   */
+  isMine: boolean;
+  onOpenShort: () => void;
 }) {
   const unsave = useUnsaveShort();
+  const clearOrphan = useRemoveOrphanedSave();
+
+  // A THIRD CASE, not a variant of "not mine". `savedById` is `SetNull`, so a
+  // save whose owner's account has gone arrives with no id and no name: the
+  // byline test below found nothing to print and the ownership test below that
+  // found nobody to offer the button to, which left a row with no label and no
+  // control — one nobody could read and nobody could clear.
+  const isOrphaned = item.savedById === null;
+  const savedBy = isMine ? null : (item.savedByName ?? UNKNOWN_AUTHOR_LABEL);
 
   const growth = item.currentViews - item.viewsAtSave;
   const growthPct =
@@ -394,6 +719,13 @@ function SavedRow({
 
           <NicheChips niches={item.niches} limit={1} size="sm" />
 
+          <ContentTypeControl
+            videoId={item.videoId}
+            contentTypeIds={contentTypeIds}
+            revealOnHover
+            className="-ml-1"
+          />
+
           <span aria-hidden className="text-border-strong">
             ·
           </span>
@@ -425,6 +757,29 @@ function SavedRow({
               {itemCollections.map((c) => c.name).join(", ")}
             </span>
           ) : null}
+
+          {/* Named, never anonymous: an admin's board mixes their own saves
+              with the team's, and an unlabelled row invites them to read a
+              colleague's shortlist as their own judgement.
+
+              Which is why this is driven by `savedBy` rather than by a name
+              that might not exist. The old test was `!isMine && savedByName`,
+              and an orphan fails its second half — so the row that most needed
+              a label was the one row that got none.
+
+              It sits on this wrapping line rather than in the fixed 80px
+              timestamp column, because "Saved by" plus a name does not fit
+              there — and truncating it takes the half that carries the
+              information, leaving "Saved b…". */}
+          {savedBy ? (
+            <span
+              className="inline-flex max-w-[200px] items-center gap-1 truncate text-subtle-foreground"
+              title={`Saved by ${savedBy}`}
+            >
+              <Bookmark className="size-3 shrink-0" />
+              <span className="truncate">Saved by {savedBy}</span>
+            </span>
+          ) : null}
         </div>
       </div>
 
@@ -447,7 +802,7 @@ function SavedRow({
         </span>
       </div>
 
-      <div className="hidden w-[80px] shrink-0 text-right md:block">
+      <div className="hidden w-[80px] shrink-0 flex-col items-end md:flex">
         <span className="text-[11px] text-subtle-foreground">
           {formatRelativeTime(item.savedAt)}
         </span>
@@ -459,8 +814,9 @@ function SavedRow({
             <Button
               variant="ghost"
               size="icon-sm"
-              onClick={onAddNote}
-              aria-label="Notes"
+              onClick={onOpenShort}
+              // Opens the single-Short view — notes, niche and content type.
+              aria-label="Open this Short: notes, niche and content type"
               className={cn(
                 "transition-opacity",
                 noteCount > 0
@@ -472,28 +828,46 @@ function SavedRow({
             </Button>
           </TooltipTrigger>
           <TooltipContent>
-            {noteCount > 0 ? `${noteCount} ${noteCount === 1 ? "note" : "notes"}` : "Add a note"}
+            {noteCount > 0
+              ? `${noteCount} ${noteCount === 1 ? "note" : "notes"} — open the Short`
+              : "Open this Short — notes, niche and content type"}
           </TooltipContent>
         </Tooltip>
 
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Remove from saved"
-          loading={unsave.isPending}
-          onClick={() =>
-            unsave.mutate(item.videoId, {
-              onSuccess: () => toast.success("Removed from saved"),
-              onError: (e) =>
-                toast.error("Could not remove", {
-                  description: e instanceof Error ? e.message : undefined,
-                }),
-            })
-          }
-          className="text-subtle-foreground opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
-        >
-          {unsave.isPending ? null : <Trash2 />}
-        </Button>
+        {isMine || isOrphaned ? (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            // Two removals behind one button, because they are two different
+            // acts. Un-saving takes a Short off the CALLER's own board and is
+            // addressed by video. Clearing an orphan deletes a row that belongs
+            // to nobody, so it is addressed by its own id: a deleted account can
+            // leave several saves of the same Short and `videoId` would name
+            // them all. Offering it to an admin is what stops a departed
+            // colleague's shortlist sitting on the board for good — the whole
+            // reason the row is labelled rather than merely unlabelled.
+            aria-label={isOrphaned ? "Clear this save" : "Remove from saved"}
+            loading={unsave.isPending || clearOrphan.isPending}
+            onClick={() => {
+              const done = {
+                onSuccess: () => toast.success("Removed from saved"),
+                onError: (e: unknown) =>
+                  toast.error("Could not remove", {
+                    description: e instanceof Error ? e.message : undefined,
+                  }),
+              };
+              if (isOrphaned) clearOrphan.mutate(item.id, done);
+              else unsave.mutate(item.videoId, done);
+            }}
+            className="text-subtle-foreground opacity-0 transition-opacity hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+          >
+            {unsave.isPending || clearOrphan.isPending ? null : <Trash2 />}
+          </Button>
+        ) : (
+          // Keeps the column the same width as a row with the button, so a
+          // mixed board does not comb its rightmost edge.
+          <span className="size-7 shrink-0" aria-hidden />
+        )}
       </div>
     </div>
   );

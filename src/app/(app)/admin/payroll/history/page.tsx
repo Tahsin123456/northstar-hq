@@ -22,6 +22,7 @@ import { useSession } from "@/components/providers/session-provider";
 import { FinalizeDialog } from "@/components/admin/payroll/finalize-dialog";
 import { PeriodStatusBadge } from "@/components/admin/payroll/period-status-badge";
 import { PayrollTable } from "@/components/admin/payroll/payroll-table";
+import { SkippedNichesNotice } from "@/components/admin/payroll/skipped-niches-notice";
 import {
   formatRunTotal,
   formatRunTotalWithRecords,
@@ -437,6 +438,14 @@ function PeriodDetail({ year, month }: { year: number; month: number }) {
           </div>
         ) : null}
       </Card>
+
+      {/* A month opened from history is finalized more often than not, and for
+          those this renders nothing: `skippedNiches` is only ever populated for
+          a draft, because a frozen period is read back rather than recomputed.
+          What a finalized run skipped is in its `payroll.period_finalized`
+          audit entry. Mounted unconditionally for the drafts that do land here
+          — last month, before somebody freezes it. */}
+      <SkippedNichesNotice skippedNiches={period.skippedNiches} />
 
       <PayrollTable period={period} mayManage={mayManage} />
 

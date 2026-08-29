@@ -98,15 +98,24 @@ export interface AddChannelOptions {
 }
 
 /**
- * Selects the tracking row plus its niche assignments, for DTO mapping.
+ * Selects the tracking row plus its niche and content-type assignments, for DTO
+ * mapping.
  *
  * Carries no tenant filter of its own, and must not grow one: the join rows
  * hang off a TrackedChannel that the surrounding query has already narrowed to
  * one organization, so scoping here would be a second, drift-prone copy of the
- * same rule.
+ * same rule. (The VIDEO side is the opposite case and does need its own filter;
+ * see `dataset-service.videoSelect`.)
+ *
+ * Content types are back, and they are a SECOND, INDEPENDENT taxonomy on the
+ * same row rather than a re-statement of the niches beside them: the niche says
+ * which slice of the operation a channel belongs to, the content types say what
+ * the team reckons it makes. Ids only — the catalogue travels once in the
+ * dataset, so renaming a tag stays a one-row change.
  */
 const TRACKED_WITH_NICHES = {
   niches: { include: { niche: true } },
+  contentTypes: { select: { contentTypeId: true } },
 } as const;
 
 /**

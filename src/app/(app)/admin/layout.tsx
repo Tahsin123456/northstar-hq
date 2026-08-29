@@ -58,6 +58,12 @@ export default async function AdminLayout({
     // block states is "any capability this section exposes", and leaving a tab
     // out of it is exactly how `youtube.manage` became a grant that led nowhere.
     "payroll.view",
+    // `settings.manage` unlocks the Niches tab, where hit rate thresholds are
+    // configured. Same rule, same reason: it is individually grantable, so an
+    // admin can hand somebody the ability to set thresholds without making them
+    // an administrator — and that person has to be able to reach the one screen
+    // it unlocks.
+    "settings.manage",
   ] as const;
 
   const mayAdminister = ADMIN_SECTION_PERMISSIONS.some((permission) =>

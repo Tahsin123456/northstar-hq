@@ -1,8 +1,10 @@
 "use client";
 
+import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
-import type { NoteTargetType } from "@/lib/dto";
+import type { NoteTargetType, NoteVisibility } from "@/lib/dto";
+import type { SavedShortsQuery } from "@/server/services/research-service";
 import { useInvalidateDataset } from "./use-dataset";
 
 /**
@@ -39,19 +41,46 @@ export function useNotes(targetType: NoteTargetType, targetId: string, enabled =
   });
 }
 
+/**
+ * What a create call may say. Same union as the route's schema — see
+ * `api.createNote`.
+ */
+export type CreateNotePayload =
+  | {
+      targetType: NoteTargetType;
+      targetId: string;
+      body: string;
+      visibility?: NoteVisibility;
+    }
+  | { targetType: "general"; body: string; visibility?: NoteVisibility };
+
 export function useCreateNote() {
   const invalidate = useInvalidateNotes();
   return useMutation({
-    mutationFn: (payload: { targetType: NoteTargetType; targetId: string; body: string }) =>
-      api.createNote(payload),
+    mutationFn: (payload: CreateNotePayload) => api.createNote(payload),
     onSuccess: () => invalidate(),
   });
 }
 
+/**
+ * Edit a note's text, its visibility, or both.
+ *
+ * One mutation for both because they are one row and one endpoint — and
+ * because sharing a note changes who its list is for, so it has to invalidate
+ * exactly what an edit does. A patch with neither field is refused server-side
+ * rather than silently touching `updatedAt`.
+ */
 export function useUpdateNote() {
   const invalidate = useInvalidateNotes();
   return useMutation({
-    mutationFn: ({ id, body }: { id: string; body: string }) => api.updateNote(id, body),
+    mutationFn: ({
+      id,
+      ...patch
+    }: {
+      id: string;
+      body?: string;
+      visibility?: NoteVisibility;
+    }) => api.updateNote(id, patch),
     onSuccess: () => invalidate(),
   });
 }
@@ -64,8 +93,77 @@ export function useDeleteNote() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Saved Shorts
+// ---------------------------------------------------------------------------
+
+/**
+ * Prefix key for the saved-Shorts board. Invalidating it matches every
+ * filter combination currently cached, which is the point: a save made from
+ * Winners must not leave a filtered Saved page asserting the old answer.
+ */
+export const SAVED_KEY = ["saved"] as const;
+
+/**
+ * The board, narrowed and ordered BY THE SERVER.
+ *
+ * ==========================================================================
+ * WHY THIS IS A REQUEST AND NOT A `.filter()` OVER THE DATASET
+ * ==========================================================================
+ * The dataset payload still carries `savedShorts`, and the feeds still read it
+ * to decide which cards show a filled bookmark — that is a question about the
+ * viewer's own saves and it needs no request. This is the other question. An
+ * admin's board holds the whole team's shortlists, so "Hana's saves, last 30
+ * days" is a question ABOUT WHICH ROWS ARE SENT. Answering it in the browser
+ * would mean shipping everybody's library and hiding most of it, which is the
+ * exact shape of the ownership bug this area already had once.
+ *
+ * The parameters cannot widen the answer — `listSavedShorts` ANDs them with the
+ * ownership filter — so naming a colleague only ever narrows.
+ *
+ * `placeholderData` keeps the previous rows on screen while the next answer is
+ * in flight, so changing a filter dims the board instead of blanking it.
+ */
+export function useSavedShorts(query: SavedShortsQuery = {}) {
+  return useQuery({
+    queryKey: [...SAVED_KEY, query],
+    queryFn: () => api.listSaved(query),
+    staleTime: 30_000,
+    placeholderData: (previous) => previous,
+  });
+}
+
+/**
+ * Refresh the board and the dataset together.
+ *
+ * Both, always. The board is its own request now, but `savedShorts` is still in
+ * the dataset payload behind every bookmark icon in Winners and Outliers —
+ * refreshing one and not the other is how a Short comes back unsaved on one
+ * screen and saved on the next.
+ */
+function useInvalidateSaved() {
+  const queryClient = useQueryClient();
+  const invalidateDataset = useInvalidateDataset();
+  return React.useCallback(
+    async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: SAVED_KEY }),
+        invalidateDataset(),
+      ]);
+    },
+    [queryClient, invalidateDataset],
+  );
+}
+
+/*
+ * The collection mutations invalidate the board too, and not out of caution:
+ * deleting a collection drops its rows' membership, so `collectionIds` on a
+ * saved row changes without the save itself being touched. Renaming one changes
+ * the text the row prints. Both are the board going stale from a write nobody
+ * made against it.
+ */
 export function useCreateCollection() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateSaved();
   return useMutation({
     mutationFn: (name: string) => api.createCollection(name),
     onSuccess: () => invalidate(),
@@ -73,7 +171,7 @@ export function useCreateCollection() {
 }
 
 export function useRenameCollection() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateSaved();
   return useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => api.renameCollection(id, name),
     onSuccess: () => invalidate(),
@@ -81,7 +179,7 @@ export function useRenameCollection() {
 }
 
 export function useDeleteCollection() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateSaved();
   return useMutation({
     mutationFn: (id: string) => api.deleteCollection(id),
     onSuccess: () => invalidate(),
@@ -89,7 +187,7 @@ export function useDeleteCollection() {
 }
 
 export function useSaveShort() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateSaved();
   return useMutation({
     mutationFn: (payload: {
       videoId: string;
@@ -102,15 +200,31 @@ export function useSaveShort() {
 }
 
 export function useUnsaveShort() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateSaved();
   return useMutation({
     mutationFn: (videoId: string) => api.unsaveShort(videoId),
     onSuccess: () => invalidate(),
   });
 }
 
+/**
+ * Removes a save whose owner's account is gone.
+ *
+ * Separate from `useUnsaveShort` because the two address different things — a
+ * video for your own save, a row id for one that belongs to nobody — and
+ * collapsing them would put a nullable owner in the middle of the one call
+ * every card on every board makes.
+ */
+export function useRemoveOrphanedSave() {
+  const invalidate = useInvalidateSaved();
+  return useMutation({
+    mutationFn: (savedShortId: string) => api.removeOrphanedSave(savedShortId),
+    onSuccess: () => invalidate(),
+  });
+}
+
 export function useSetSavedCollections() {
-  const invalidate = useInvalidateDataset();
+  const invalidate = useInvalidateSaved();
   return useMutation({
     mutationFn: ({ videoId, collectionIds }: { videoId: string; collectionIds: string[] }) =>
       api.setSavedCollections(videoId, collectionIds),

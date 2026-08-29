@@ -14,6 +14,7 @@ export * from "./hit-rate";
 export * from "./filters";
 export * from "./distribution";
 export * from "./channel-metrics";
+export * from "./content-type-performance";
 export * from "./series";
 export * from "./outliers";
 export * from "./market";

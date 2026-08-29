@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
 import type { ChannelMetrics } from "@/lib/analytics/types";
 import type { ChannelDTO, NicheRefDTO, OwnershipType } from "@/lib/dto";
-import { filterRowsByScope } from "@/hooks/use-channel-analytics";
+import { filterRowsByScope, untaggedChannelCount } from "@/hooks/use-channel-analytics";
 import { DEFAULT_SORT, sortRows } from "@/lib/sorting";
 import { DAY_MS, daysAgo, makeShort } from "@/lib/analytics/__tests__/factories";
 
@@ -33,6 +33,8 @@ function makeRow(options: {
   niches?: NicheRefDTO[];
   /** Views per Short, all published inside the window. */
   views?: number[];
+  /** The channel's own content-type tags — what the team says it makes. */
+  contentTypeIds?: readonly string[];
 }): TestRow {
   const views = options.views ?? [];
   const channel = {
@@ -58,6 +60,9 @@ function makeRow(options: {
     isActive: true,
     ownershipType: options.ownershipType ?? "competitor",
     niches: options.niches ?? [],
+    // Untagged unless a case says otherwise, so the niche and ownership
+    // assertions below cannot start passing for the wrong reason.
+    contentTypeIds: options.contentTypeIds ?? [],
   } satisfies ChannelDTO;
 
   return {
@@ -154,6 +159,94 @@ describe("scoped analytics", () => {
     expect(summary.totalShorts).toBe(3);
     // The 100-view Shorts from the excluded channels must not appear anywhere.
     expect(summary.totalViews).toBe(9_000_000);
+  });
+});
+
+/**
+ * The content-type scope, read off the CHANNEL's own tags.
+ *
+ * `ChannelContentType` is back, so "channels that make Rankings" is answered by
+ * the tag on the channel rather than by scanning its Shorts for one. These pin
+ * the halves that are easy to get backwards: a channel may carry several tags,
+ * "Untagged" means it carries none, and — the one this round changed — a tag
+ * is org-wide, so it composes with the niche filter instead of living inside it.
+ */
+describe("filterRowsByScope — content type", () => {
+  const RANKING = "ct-ranking";
+  const CUTSCENE = "ct-cutscene";
+
+  const TYPED_ROWS: TestRow[] = [
+    makeRow({ id: "a", views: [100, 100], contentTypeIds: [RANKING] }),
+    makeRow({ id: "b", views: [100], contentTypeIds: [CUTSCENE] }),
+    // A channel the team describes as doing both.
+    makeRow({ id: "c", views: [100], contentTypeIds: [RANKING, CUTSCENE] }),
+    makeRow({ id: "d", views: [100, 100] }),
+  ];
+
+  it("keeps a channel tagged with the type", () => {
+    const rows = filterRowsByScope(TYPED_ROWS, "all", "all", RANKING);
+    expect(rows.map((r) => r.channel.id)).toEqual(["a", "c"]);
+  });
+
+  it("counts a channel carrying several tags under each of them", () => {
+    const rows = filterRowsByScope(TYPED_ROWS, "all", "all", CUTSCENE);
+    expect(rows.map((r) => r.channel.id)).toEqual(["b", "c"]);
+  });
+
+  it("'unassigned' is a channel carrying no tag at all", () => {
+    expect(
+      filterRowsByScope(TYPED_ROWS, "all", "all", "unassigned").map((r) => r.channel.id),
+    ).toEqual(["d"]);
+  });
+
+  it("agrees with the count the filter menu labels itself with", () => {
+    expect(untaggedChannelCount(TYPED_ROWS)).toBe(
+      filterRowsByScope(TYPED_ROWS, "all", "all", "unassigned").length,
+    );
+  });
+
+  it("returns nothing for a tag that no longer exists", () => {
+    // A deleted tag can linger in a bookmarked `?contentType=` URL; it must
+    // degrade to an empty result rather than silently showing everything.
+    expect(filterRowsByScope(TYPED_ROWS, "all", "all", "ct-deleted")).toHaveLength(0);
+  });
+
+  it("composes with niche and ownership rather than living inside the niche", () => {
+    const rows: TestRow[] = [
+      makeRow({
+        id: "gta-own",
+        ownershipType: "own",
+        niches: [GTA],
+        views: [100],
+        contentTypeIds: [RANKING],
+      }),
+      makeRow({
+        id: "gta-competitor",
+        ownershipType: "competitor",
+        niches: [GTA],
+        views: [100],
+        contentTypeIds: [RANKING],
+      }),
+      makeRow({
+        id: "rdr-own",
+        ownershipType: "own",
+        niches: [RDR],
+        views: [100],
+        contentTypeIds: [RANKING],
+      }),
+    ];
+
+    expect(
+      filterRowsByScope(rows, GTA.id, "own", RANKING).map((r) => r.channel.id),
+    ).toEqual(["gta-own"]);
+
+    // THE CHANGE THIS ROUND MAKES, pinned: the same tag is a perfectly good
+    // question with no niche selected, because it belongs to no niche. Under the
+    // previous design a type only existed inside its own niche, so this pairing
+    // could not be expressed at all.
+    expect(
+      filterRowsByScope(rows, "all", "all", RANKING).map((r) => r.channel.id).sort(),
+    ).toEqual(["gta-competitor", "gta-own", "rdr-own"]);
   });
 });
 

@@ -14,6 +14,7 @@ import { useSession } from "@/components/providers/session-provider";
 import { FinalizeDialog } from "@/components/admin/payroll/finalize-dialog";
 import { PeriodStatusBadge } from "@/components/admin/payroll/period-status-badge";
 import { PayrollTable } from "@/components/admin/payroll/payroll-table";
+import { SkippedNichesNotice } from "@/components/admin/payroll/skipped-niches-notice";
 import { TelegramCard } from "@/components/admin/payroll/telegram-card";
 import {
   formatRunTotalWithRecords,
@@ -146,6 +147,13 @@ function PayrollScreen() {
       ) : (
         <>
           <UpcomingHeader period={data.period} />
+          {/* First thing under the headline, deliberately: this is the last
+              screen on which an unset threshold is still cheap to fix, and
+              after finalization the figures are a document. It is not what
+              stands between an admin and that step — "Finalize period" is in
+              the header above, reachable without scrolling. The dialog is the
+              gate; it shows the same niches over its confirm button. */}
+          <SkippedNichesNotice skippedNiches={data.period.skippedNiches} />
           <PayrollTable period={data.period} mayManage={mayManage} />
           {data.previous ? (
             <PreviousPeriodStrip previous={data.previous} mayManage={mayManage} />

@@ -20,12 +20,17 @@ export function isWithinRange(publishedAtMs: number, range: DateRange): boolean 
  *      uncertainty excludes rather than inflates.
  *   2. upload date inside the window — the hit rate is always over Shorts
  *      *uploaded during the period*, never the channel's whole back catalogue.
+ *
+ * Generic over the element, exactly like `sortByViewsDesc` below: this narrows
+ * without reshaping, so a caller that passes richer rows — a `VideoDTO` with
+ * its content-type ids, say — gets those rows back rather than having to cast
+ * the engine's minimum shape back up to what it just handed in.
  */
-export function getShortsInDateRange(
-  videos: readonly AnalyticsVideo[],
+export function getShortsInDateRange<T extends AnalyticsVideo>(
+  videos: readonly T[],
   range: DateRange,
-): AnalyticsVideo[] {
-  const result: AnalyticsVideo[] = [];
+): T[] {
+  const result: T[] = [];
   for (const video of videos) {
     if (!video.isShort) continue;
     if (!isWithinRange(video.publishedAt, range)) continue;

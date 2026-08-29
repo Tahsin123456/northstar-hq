@@ -2,7 +2,19 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Database, KeyRound, RefreshCw, ShieldCheck, XCircle } from "lucide-react";
+import {
+  CheckCircle2,
+  Database,
+  KeyRound,
+  Lock,
+  Moon,
+  Palette,
+  RefreshCw,
+  ShieldCheck,
+  Sun,
+  UserRound,
+  XCircle,
+} from "lucide-react";
 import { toast } from "sonner";
 import { PageContainer, PageHeader } from "@/components/layout/app-shell";
 import { ErrorState } from "@/components/common/error-state";
@@ -12,8 +24,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { useSession } from "@/components/providers/session-provider";
+import { useTheme } from "@/components/providers/theme-provider";
 import { api } from "@/lib/api-client";
-import type { SettingsDTO } from "@/lib/dto";
+import type { MyProfileDTO, OrganizationSettingsDTO, PersonalSettingsDTO } from "@/lib/dto";
+import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 import { DATASET_KEY } from "@/hooks/use-dataset";
 import { THRESHOLD_PRESETS } from "@/lib/analytics/constants";
 import { formatCompactNumber, formatNumber } from "@/lib/format";
@@ -22,41 +37,46 @@ import { cn } from "@/lib/utils";
 /**
  * Settings.
  *
- * Split deliberately into what the *user* controls (defaults, refresh
- * behaviour) and what the *environment* controls (API key, database). The
- * second group is read-only and shows status rather than inputs: secrets belong
- * in `.env.local`, never in a form that would persist them to a database or
- * echo them back over the wire.
+ * Split along the line that actually matters: WHOSE setting is it.
+ *
+ *   • Your account — name, email, password. Personal state. Everyone gets it,
+ *     and nobody but the account holder can change it.
+ *   • Organization — analysis defaults, the collection window, the YouTube
+ *     configuration, the currency. One row for the whole team, so changing any
+ *     of it changes what a colleague sees. `settings.manage` only.
+ *
+ * The gate below hides the organization cards from an employee, which is an
+ * affordance and NOT the control. The control is in the service: both the read
+ * and the write of OrganizationSettings call `requirePermission` before they
+ * touch the row, so an employee who calls /api/settings/organization directly
+ * gets the same 403 the sidebar is quietly saving them from discovering.
+ *
+ * The environment group stays read-only for everyone who can see it at all:
+ * secrets belong in `.env.local`, never in a form that would persist them to a
+ * database or echo them back over the wire.
  */
 export default function SettingsPage() {
-  const queryClient = useQueryClient();
+  const session = useSession();
+  const canManageOrganization = session.can("settings.manage");
 
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["settings"],
-    queryFn: api.getSettings,
+  const profile = useQuery({ queryKey: PROFILE_KEY, queryFn: api.getMyProfile });
+
+  const personal = useQuery({ queryKey: SETTINGS_KEY, queryFn: api.getSettings });
+
+  const organization = useQuery({
+    queryKey: ORG_SETTINGS_KEY,
+    queryFn: api.getOrganizationSettings,
+    // Not merely "do not render it": do not REQUEST it. Firing a call that is
+    // guaranteed to 403 would fill an employee's console with authorization
+    // failures for a page they opened legitimately.
+    enabled: canManageOrganization,
   });
 
-  const update = useMutation({
-    mutationFn: (patch: Partial<SettingsDTO>) => api.updateSettings(patch),
-    onSuccess: ({ settings }) => {
-      queryClient.setQueryData(["settings"], (prev: typeof data) =>
-        prev ? { ...prev, settings } : prev,
-      );
-      // Lookback affects how much history the dataset returns.
-      queryClient.invalidateQueries({ queryKey: DATASET_KEY });
-      toast.success("Settings saved");
-    },
-    onError: (mutationError) =>
-      toast.error("Could not save settings", {
-        description: mutationError instanceof Error ? mutationError.message : undefined,
-      }),
-  });
-
-  if (error) {
+  if (profile.error) {
     return (
       <PageContainer>
         <Card>
-          <ErrorState error={error} onRetry={() => refetch()} />
+          <ErrorState error={profile.error} onRetry={() => profile.refetch()} />
         </Card>
       </PageContainer>
     );
@@ -66,42 +86,450 @@ export default function SettingsPage() {
     <PageContainer className="flex max-w-3xl flex-col gap-5">
       <PageHeader
         title="Settings"
-        description="Defaults for new sessions, refresh behaviour, and the current server configuration."
+        description={
+          canManageOrganization
+            ? "Your account, and the defaults and collection behaviour for the whole organization."
+            : "Your account and your personal preferences."
+        }
       />
 
-      {isLoading || !data ? (
-        <div className="flex flex-col gap-4">
-          <Skeleton className="h-48 w-full rounded-lg" />
-          <Skeleton className="h-64 w-full rounded-lg" />
-        </div>
+      {profile.isLoading || !profile.data ? (
+        <Skeleton className="h-64 w-full rounded-lg" />
       ) : (
-        <>
-          <ConfigurationCard config={data.config} />
-          <DefaultsCard
-            settings={data.settings}
-            onChange={(patch) => update.mutate(patch)}
-            saving={update.isPending}
-          />
-          <RefreshCard
-            settings={data.settings}
-            onChange={(patch) => update.mutate(patch)}
-            saving={update.isPending}
-          />
-          <ShortsDetectionCard
-            settings={data.settings}
-            probeEnabledInEnv={data.config.probeEnabledInEnv}
-            onChange={(patch) => update.mutate(patch)}
-          />
-        </>
+        <AccountCard profile={profile.data.profile} />
+      )}
+
+      <AppearanceCard />
+
+      {canManageOrganization ? (
+        <OrganizationSection query={organization} />
+      ) : (
+        <TeamDefaultsNotice settings={personal.data?.settings} />
       )}
     </PageContainer>
   );
 }
 
+const PROFILE_KEY = ["profile"] as const;
+const SETTINGS_KEY = ["settings"] as const;
+const ORG_SETTINGS_KEY = ["settings", "organization"] as const;
+
+// ---------------------------------------------------------------------------
+// PERSONAL
+// ---------------------------------------------------------------------------
+
+/**
+ * Your name, your email, your password.
+ *
+ * Two forms rather than one, because the server refuses a request that carries
+ * both a password change and a profile change — the two writes are not atomic,
+ * and a half-applied submit is worse than a second button. Splitting them here
+ * means the UI cannot construct the request the API rejects.
+ */
+function AccountCard({ profile }: { profile: MyProfileDTO }) {
+  const queryClient = useQueryClient();
+
+  const [name, setName] = React.useState(profile.name ?? "");
+  const [email, setEmail] = React.useState(profile.email ?? "");
+  const [detailsPassword, setDetailsPassword] = React.useState("");
+
+  const [currentPassword, setCurrentPassword] = React.useState("");
+  const [newPassword, setNewPassword] = React.useState("");
+
+  const emailChanging = email.trim().toLowerCase() !== (profile.email ?? "").toLowerCase();
+  const detailsDirty = name.trim() !== (profile.name ?? "") || emailChanging;
+
+  const saveDetails = useMutation({
+    mutationFn: () =>
+      api.updateMyProfile({
+        name: name.trim(),
+        email: email.trim(),
+        // Only sent when it is actually needed. The server asks for it on an
+        // email change and nothing else, so sending it unconditionally would
+        // train people to type their password to rename themselves.
+        ...(emailChanging ? { currentPassword: detailsPassword } : {}),
+      }),
+    onSuccess: (result) => {
+      queryClient.setQueryData(PROFILE_KEY, { profile: result.profile });
+      setDetailsPassword("");
+      toast.success(result.emailChanged ? "Email address updated" : "Profile updated");
+    },
+    onError: (error) =>
+      toast.error("Could not save your details", {
+        description: error instanceof Error ? error.message : undefined,
+      }),
+  });
+
+  const savePassword = useMutation({
+    mutationFn: () => api.updateMyProfile({ currentPassword, newPassword }),
+    onSuccess: () => {
+      setCurrentPassword("");
+      setNewPassword("");
+      toast.success("Password changed", {
+        description: "Every other device has been signed out.",
+      });
+    },
+    onError: (error) =>
+      toast.error("Could not change your password", {
+        description: error instanceof Error ? error.message : undefined,
+      }),
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <UserRound className="size-4 text-subtle-foreground" />
+          Your account
+        </CardTitle>
+        <CardDescription>
+          Yours alone. Nobody else can change these, and no administrator can
+          set your password — they can only send you a reset link.
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent className="flex flex-col gap-6">
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveDetails.mutate();
+          }}
+        >
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="profile-name">Name</Label>
+              <Input
+                id="profile-name"
+                value={name}
+                maxLength={120}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="profile-email">Email address</Label>
+              <Input
+                id="profile-email"
+                type="email"
+                value={email}
+                maxLength={320}
+                onChange={(event) => setEmail(event.target.value)}
+              />
+              <FieldHint>This is what you sign in with.</FieldHint>
+            </div>
+          </div>
+
+          {emailChanging ? (
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="profile-confirm">Current password</Label>
+              <Input
+                id="profile-confirm"
+                type="password"
+                autoComplete="current-password"
+                value={detailsPassword}
+                onChange={(event) => setDetailsPassword(event.target.value)}
+              />
+              <FieldHint>
+                Required to move the address you sign in with — it is also where
+                password-reset links are sent.
+              </FieldHint>
+            </div>
+          ) : null}
+
+          <div>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={
+                !detailsDirty ||
+                saveDetails.isPending ||
+                (emailChanging && detailsPassword.length === 0)
+              }
+            >
+              Save details
+            </Button>
+          </div>
+        </form>
+
+        <form
+          className="flex flex-col gap-4 border-t border-border pt-5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            savePassword.mutate();
+          }}
+        >
+          <span className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+            <Lock className="size-4 text-subtle-foreground" />
+            Change password
+          </span>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="password-current">Current password</Label>
+              <Input
+                id="password-current"
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+              />
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="password-new">New password</Label>
+              <Input
+                id="password-new"
+                type="password"
+                autoComplete="new-password"
+                minLength={MIN_PASSWORD_LENGTH}
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+              />
+              <FieldHint>At least {MIN_PASSWORD_LENGTH} characters.</FieldHint>
+            </div>
+          </div>
+
+          <div>
+            <Button
+              type="submit"
+              size="sm"
+              variant="secondary"
+              disabled={
+                savePassword.isPending ||
+                currentPassword.length === 0 ||
+                newPassword.length < MIN_PASSWORD_LENGTH
+              }
+            >
+              Change password
+            </Button>
+          </div>
+          <FieldHint>Changing it signs out every other device.</FieldHint>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Light or dark.
+ *
+ * The only preference on this page that is not stored on the server, and that
+ * is deliberate rather than an omission: the theme class is applied by a
+ * blocking script before first paint, from `localStorage`, so that the app
+ * never flashes the wrong palette on load. A value that has to come back from
+ * an API cannot be read before the first paint, so persisting it server-side
+ * would either reintroduce the flash or leave two sources of truth that
+ * disagree for the first second of every page load.
+ *
+ * The same control is in the sidebar, and it has to be — this is a preference
+ * people flip when the room's lighting changes, not something they navigate to
+ * Settings for. It is repeated here because Settings is where somebody looks
+ * for it, and both call the same `useTheme`, so they cannot drift.
+ *
+ * NOT SHOWN HERE: the stored `defaultSortKey` / `defaultSortDirection` pair.
+ * The service accepts them and `api.updateSettings` can send them, but nothing
+ * in the app reads them back yet — no table seeds its sort from either. A
+ * control that saves a value no screen consumes is worse than no control: it
+ * reports success and changes nothing. It belongs here the moment a table
+ * honours it.
+ */
+function AppearanceCard() {
+  // `ready` is false during SSR and the first hydration pass, when the stored
+  // theme is not yet known. Rendering a selected state before then would be a
+  // hydration mismatch against markup that always assumes dark.
+  const { theme, setTheme, ready } = useTheme();
+
+  const options = [
+    { value: "dark" as const, label: "Dark", icon: Moon },
+    { value: "light" as const, label: "Light", icon: Sun },
+  ];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Palette className="size-4 text-subtle-foreground" />
+          Appearance
+        </CardTitle>
+        <CardDescription>
+          How this app looks on this device. It changes nothing anybody else
+          sees.
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent>
+        {/*
+          Toggle buttons with `aria-pressed`, not a `radiogroup`. The radio
+          pattern promises one tab stop and arrow-key movement between options;
+          these are two ordinary buttons and each is its own tab stop, so
+          claiming the role would describe behaviour that is not there.
+        */}
+        <div
+          role="group"
+          aria-label="Theme"
+          className="inline-flex gap-1 rounded-lg border border-border bg-surface-sunken p-1"
+        >
+          {options.map((option) => {
+            const selected = ready && theme === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setTheme(option.value)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
+                  selected
+                    ? "bg-surface-raised text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.16)]"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <option.icon className="size-3.5" />
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <FieldHint className="mt-2">
+          Saved in this browser, so a different computer starts on dark again.
+        </FieldHint>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * What an employee sees where the organization cards would be.
+ *
+ * The two defaults are shown because they are already theirs to see — every
+ * chart is drawn with them, and the app hands both to the browser to seed the
+ * filters. Showing them read-only, with who owns them, is more useful than an
+ * empty page and more honest than a disabled form.
+ */
+function TeamDefaultsNotice({ settings }: { settings: PersonalSettingsDTO | undefined }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Organization defaults</CardTitle>
+        <CardDescription>
+          Set once for the whole team by an administrator, so a hit rate means
+          the same thing to everyone looking at it.
+        </CardDescription>
+      </CardHeader>
+
+      <CardContent className="flex flex-col gap-3">
+        {settings ? (
+          <>
+            <ReadOnlyRow
+              label="Default hit threshold"
+              value={`${formatNumber(settings.defaultThreshold)} views`}
+            />
+            <ReadOnlyRow
+              label="Default period"
+              value={`${settings.defaultPeriodDays} days`}
+            />
+          </>
+        ) : (
+          <Skeleton className="h-20 w-full rounded-lg" />
+        )}
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
+          A niche can set its own threshold, which overrides this one for its
+          channels. Ask an administrator if either number is wrong for your work.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function ReadOnlyRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-sunken px-3.5 py-3">
+      <span className="text-[13px] text-foreground">{label}</span>
+      <span className="tnum text-[13px] font-medium text-foreground">{value}</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ORGANIZATION — `settings.manage` only
+// ---------------------------------------------------------------------------
+
+type OrganizationPatch = Partial<Omit<OrganizationSettingsDTO, "baseCurrency">>;
+
+function OrganizationSection({
+  query,
+}: {
+  query: ReturnType<typeof useQuery<Awaited<ReturnType<typeof api.getOrganizationSettings>>>>;
+}) {
+  const queryClient = useQueryClient();
+
+  const update = useMutation({
+    mutationFn: (patch: OrganizationPatch) => api.updateOrganizationSettings(patch),
+    onSuccess: ({ organization }) => {
+      queryClient.setQueryData(ORG_SETTINGS_KEY, (prev: typeof query.data) =>
+        prev ? { ...prev, organization } : prev,
+      );
+      // The two analysis defaults also travel in the personal payload, and the
+      // lookback changes how much history the dataset returns.
+      queryClient.invalidateQueries({ queryKey: SETTINGS_KEY });
+      queryClient.invalidateQueries({ queryKey: DATASET_KEY });
+      toast.success("Settings saved");
+    },
+    onError: (error) =>
+      toast.error("Could not save settings", {
+        description: error instanceof Error ? error.message : undefined,
+      }),
+  });
+
+  if (query.error) {
+    return (
+      <Card>
+        <ErrorState error={query.error} onRetry={() => query.refetch()} />
+      </Card>
+    );
+  }
+
+  if (query.isLoading || !query.data) {
+    return (
+      <div className="flex flex-col gap-4">
+        <Skeleton className="h-48 w-full rounded-lg" />
+        <Skeleton className="h-64 w-full rounded-lg" />
+      </div>
+    );
+  }
+
+  const { organization, config } = query.data;
+
+  return (
+    <>
+      <ConfigurationCard config={config} companyName={organization.companyName} />
+      <DefaultsCard
+        settings={organization}
+        onChange={(patch) => update.mutate(patch)}
+        saving={update.isPending}
+      />
+      <RefreshCard
+        settings={organization}
+        onChange={(patch) => update.mutate(patch)}
+        saving={update.isPending}
+      />
+      <ShortsDetectionCard
+        settings={organization}
+        probeEnabledInEnv={config.probeEnabledInEnv}
+        onChange={(patch) => update.mutate(patch)}
+      />
+    </>
+  );
+}
+
 function ConfigurationCard({
   config,
+  companyName,
 }: {
   config: { hasApiKey: boolean; databaseProvider: string; lookbackDays: number };
+  companyName: string;
 }) {
   return (
     <Card>
@@ -179,6 +607,11 @@ function ConfigurationCard({
           Each refresh walks a channel&rsquo;s uploads back this far, which is
           what makes the 180-day period and custom ranges possible.
         </div>
+
+        <div className="rounded-lg border border-border bg-surface-sunken p-3 text-[12px] leading-relaxed text-muted-foreground">
+          Reports and payroll summaries are branded{" "}
+          <strong className="text-foreground">{companyName}</strong>.
+        </div>
       </CardContent>
     </Card>
   );
@@ -221,8 +654,8 @@ function DefaultsCard({
   onChange,
   saving,
 }: {
-  settings: SettingsDTO;
-  onChange: (patch: Partial<SettingsDTO>) => void;
+  settings: OrganizationSettingsDTO;
+  onChange: (patch: OrganizationPatch) => void;
   saving: boolean;
 }) {
   const [customThreshold, setCustomThreshold] = React.useState(
@@ -234,8 +667,15 @@ function DefaultsCard({
       <CardHeader>
         <CardTitle>Analysis defaults</CardTitle>
         <CardDescription>
-          Applied when you open the app in a new browser. Changing the period or
-          threshold on a page only affects that session.
+          The threshold and period every colleague&rsquo;s dashboard opens with.
+          One row for the whole team — a hit rate two people disagree about is
+          not a metric. Changing either on a page only affects that session.
+          {/* Said here because this is the screen that sets the number, and its
+              reach is narrower than it looks: a selected niche uses its own
+              threshold, or reports no hit rate at all if it has none. */}{" "}
+          This threshold applies when no niche is selected; each niche is scored
+          at its own, and a niche with none reports no hit rate until an Admin
+          sets one.
         </CardDescription>
       </CardHeader>
 
@@ -324,8 +764,8 @@ function RefreshCard({
   onChange,
   saving,
 }: {
-  settings: SettingsDTO;
-  onChange: (patch: Partial<SettingsDTO>) => void;
+  settings: OrganizationSettingsDTO;
+  onChange: (patch: OrganizationPatch) => void;
   saving: boolean;
 }) {
   const [lookback, setLookback] = React.useState(String(settings.lookbackDays));
@@ -337,7 +777,8 @@ function RefreshCard({
         <CardTitle>Data collection</CardTitle>
         <CardDescription>
           How much history to keep and how eagerly to refresh it. These directly
-          control YouTube API usage.
+          control YouTube API usage, which is a shared quota — which is why they
+          are one setting for the team rather than one per person.
         </CardDescription>
       </CardHeader>
 
@@ -444,9 +885,9 @@ function ShortsDetectionCard({
   probeEnabledInEnv,
   onChange,
 }: {
-  settings: SettingsDTO;
+  settings: OrganizationSettingsDTO;
   probeEnabledInEnv: boolean;
-  onChange: (patch: Partial<SettingsDTO>) => void;
+  onChange: (patch: OrganizationPatch) => void;
 }) {
   return (
     <Card>

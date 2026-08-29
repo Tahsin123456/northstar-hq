@@ -14,40 +14,139 @@ const NOW = Date.UTC(2026, 5, 1);
 const range = (days: number) => ({ startMs: NOW - days * DAY_MS, endMs: NOW });
 
 /**
- * The exact rule the provider implements:
- *   explicit override -> niche default -> account default.
+ * The exact rule the provider implements.
+ *
+ *   explicit override
+ *     -> the selected niche's own threshold
+ *     -> UNCONFIGURED, if a niche is selected and has none
+ *     -> the organization default, only when no niche is selected
+ *
+ * The third line is the one this round added, and it is the whole point. The
+ * chain used to end `?? accountDefault` unconditionally, so selecting a niche
+ * nobody had configured borrowed the organization's 1,000,000 and the app
+ * printed a hit rate against it — arithmetic over a number no human chose,
+ * indistinguishable on screen from a measurement.
+ *
+ * `null` here does not mean "fall back". It means there is no answer, and every
+ * consumer renders "Not configured" instead of a figure.
  */
+type Resolution = { threshold: number | null; source: string };
+
 function resolveThreshold(
   override: number | null,
-  nicheDefault: number | null,
-  accountDefault: number,
-): number {
-  return override ?? nicheDefault ?? accountDefault;
+  nicheThreshold: number | null,
+  organizationDefault: number,
+  { nicheSelected }: { nicheSelected: boolean },
+): Resolution {
+  if (override !== null) return { threshold: override, source: "override" };
+  if (nicheThreshold !== null) return { threshold: nicheThreshold, source: "niche" };
+  if (nicheSelected) return { threshold: null, source: "unconfigured" };
+  return { threshold: organizationDefault, source: "account" };
 }
 
 describe("threshold resolution order", () => {
-  it("uses the account default when nothing else is configured", () => {
-    expect(resolveThreshold(null, null, 1_000_000)).toBe(1_000_000);
+  it("uses the organization default when no niche is selected", () => {
+    // "All niches" is NOT unconfigured. With nothing selected the organization
+    // default is a deliberately-set number, and hit rates go on being reported.
+    expect(
+      resolveThreshold(null, null, 1_000_000, { nicheSelected: false }),
+    ).toEqual({ threshold: 1_000_000, source: "account" });
   });
 
-  it("prefers the niche default over the account default", () => {
-    // RDR configured at 750K must win over a 1M account setting.
-    expect(resolveThreshold(null, 750_000, 1_000_000)).toBe(750_000);
+  it("prefers the niche threshold over the organization default", () => {
+    // RDR configured at 750K must win over a 1M organization setting.
+    expect(
+      resolveThreshold(null, 750_000, 1_000_000, { nicheSelected: true }),
+    ).toEqual({ threshold: 750_000, source: "niche" });
   });
 
-  it("prefers an explicit override over the niche default", () => {
-    expect(resolveThreshold(1_000_000, 750_000, 1_000_000)).toBe(1_000_000);
+  it("prefers an explicit override over the niche threshold", () => {
+    expect(
+      resolveThreshold(1_000_000, 750_000, 1_000_000, { nicheSelected: true }),
+    ).toEqual({ threshold: 1_000_000, source: "override" });
   });
 
-  it("treats a null niche threshold as inherit, not as zero", () => {
-    // A niche that has never been configured must follow the account default,
-    // not silently make every Short a hit.
-    expect(resolveThreshold(null, null, 250_000)).toBe(250_000);
-    expect(resolveThreshold(null, null, 250_000)).not.toBe(0);
+  it("resolves a selected niche with no threshold to unconfigured, never to the org default", () => {
+    // THE regression this round exists to prevent. If this ever returns
+    // 1,000,000 again, every screen goes back to reporting a hit rate that
+    // nobody configured.
+    const resolved = resolveThreshold(null, null, 1_000_000, { nicheSelected: true });
+
+    expect(resolved.source).toBe("unconfigured");
+    expect(resolved.threshold).toBeNull();
+    expect(resolved.threshold).not.toBe(1_000_000);
+    // And emphatically not zero, which would make every Short a hit.
+    expect(resolved.threshold).not.toBe(0);
   });
 
-  it("lets a niche configure a threshold above the account default", () => {
-    expect(resolveThreshold(null, 5_000_000, 1_000_000)).toBe(5_000_000);
+  it("still lets a deliberate override win over an unconfigured niche", () => {
+    // A number a person typed on this screen, just now. That is a choice, and
+    // the one case where a figure is legitimate on an unconfigured niche.
+    expect(
+      resolveThreshold(2_000_000, null, 1_000_000, { nicheSelected: true }),
+    ).toEqual({ threshold: 2_000_000, source: "override" });
+  });
+
+  it("lets a niche configure a threshold above the organization default", () => {
+    expect(
+      resolveThreshold(null, 5_000_000, 1_000_000, { nicheSelected: true }),
+    ).toEqual({ threshold: 5_000_000, source: "niche" });
+  });
+});
+
+/**
+ * The engine's own half of the contract.
+ *
+ * The resolution above decides there is no threshold; this is what the metrics
+ * do about it. Both halves matter: a `null` that reached
+ * `calculateChannelMetrics` and came back as 0% would be the same bug wearing a
+ * different hat.
+ */
+describe("metrics with no configured threshold", () => {
+  const videos = [900_000, 1_400_000, 300_000].map((views, i) =>
+    makeShort({ views, publishedAt: daysAgo(i + 1, NOW) }),
+  );
+
+  it("reports no hit rate at all rather than 0%", () => {
+    const metrics = calculateChannelMetrics({
+      videos,
+      range: range(30),
+      threshold: null,
+    });
+
+    // 0% would assert "three Shorts were published and none of them hit",
+    // which is a claim about performance. Nothing was measured.
+    expect(metrics.hitRate).toBeNull();
+    expect(metrics.hitRate).not.toBe(0);
+    expect(metrics.hitCount).toBe(0);
+    expect(metrics.threshold).toBeNull();
+  });
+
+  it("still reports everything that does not depend on a threshold", () => {
+    const metrics = calculateChannelMetrics({
+      videos,
+      range: range(30),
+      threshold: null,
+    });
+
+    // Uploads and views are facts about the Shorts, not about the definition of
+    // a hit. Blanking them too would be over-correcting.
+    expect(metrics.totalShorts).toBe(3);
+    expect(metrics.totalViews).toBe(2_600_000);
+    expect(metrics.medianViews).toBe(900_000);
+  });
+
+  it("marks no Short as a hit and gives none of them a threshold ratio", () => {
+    const metrics = calculateChannelMetrics({
+      videos,
+      range: range(30),
+      threshold: null,
+    });
+
+    // A ratio of 0 would sort every Short as an equal, maximal miss; `null`
+    // says there is nothing to be a ratio of.
+    expect(metrics.bestShort?.isHit).toBe(false);
+    expect(metrics.bestShort?.thresholdRatio).toBeNull();
   });
 });
 

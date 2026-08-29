@@ -37,6 +37,8 @@ import {
   HIT_RATE_DEFINITION,
   TOTAL_VIEWS_DEFINITION,
   TOTAL_VIEWS_VS_STUDIO,
+  UNCONFIGURED_THRESHOLD_EXPLANATION,
+  UNCONFIGURED_THRESHOLD_SHORT,
 } from "@/lib/analytics/constants";
 import { auditActionLabel } from "@/lib/audit/actions";
 import { PERMISSION_LABELS, ROLE_ORDER } from "@/lib/auth/permissions";
@@ -198,17 +200,29 @@ export default function AdminOverviewPage() {
               <Stat
                 label="Hit rate"
                 emphasis="strong"
-                value={formatPercent(summary.averageHitRate)}
+                value={
+                  threshold === null
+                    ? UNCONFIGURED_THRESHOLD_SHORT
+                    : formatPercent(summary.averageHitRate)
+                }
                 hint={
                   <InfoTip>
-                    The mean of each channel&rsquo;s own hit rate, counting only
-                    channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}
+                    {threshold === null ? (
+                      UNCONFIGURED_THRESHOLD_EXPLANATION
+                    ) : (
+                      <>
+                        The mean of each channel&rsquo;s own hit rate, counting only
+                        channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}
+                      </>
+                    )}
                   </InfoTip>
                 }
                 caption={
-                  summary.averageHitRate === null
-                    ? "No Shorts uploaded in this period"
-                    : `At ${formatThreshold(threshold)} views`
+                  threshold === null
+                    ? "No threshold set for this niche"
+                    : summary.averageHitRate === null
+                      ? "No Shorts uploaded in this period"
+                      : `At ${formatThreshold(threshold)} views`
                 }
               />
             </Tile>
@@ -217,7 +231,13 @@ export default function AdminOverviewPage() {
               <Stat
                 label="Uploads"
                 value={formatNumber(summary.totalShorts)}
-                caption={`${formatNumber(summary.totalHits)} of them cleared the threshold`}
+                caption={
+                  // `totalHits` is 0 with no threshold, and "0 of them cleared
+                  // the threshold" is a false accusation rather than a count.
+                  threshold === null
+                    ? "No threshold set, so none are counted as hits"
+                    : `${formatNumber(summary.totalHits)} of them cleared the threshold`
+                }
               />
             </Tile>
 
@@ -580,16 +600,42 @@ function TeamGroup({
   // account that has been accepted and needs letting in. Both are work for an
   // admin, and an admin who sees only one of them leaves the other sitting.
   const waiting = invitations.outstanding + users.pendingApproval;
-  const waitingCaption = [
-    invitations.outstanding > 0
-      ? `${formatNumber(invitations.outstanding)} ${pluralize(invitations.outstanding, "invitation")}`
-      : null,
-    users.pendingApproval > 0
-      ? `${formatNumber(users.pendingApproval)} awaiting approval`
-      : null,
-  ]
-    .filter((part): part is string => part !== null)
-    .join(" · ");
+
+  /*
+   * The count of people awaiting approval is a LINK, not a label.
+   *
+   * This tile has always been able to say that three people cannot sign in; it
+   * has never been able to do anything about it, and "three awaiting approval"
+   * followed by a hunt through the Employees table for the three rows is how a
+   * queue goes unworked. The number and the screen that clears it are now the
+   * same click.
+   *
+   * The figure still comes from /api/admin/overview rather than from the
+   * approvals queue itself — one source per fact, and this page already made
+   * that request. Every approval invalidates both namespaces together (see
+   * use-employees.ts), so the tile and the tab's badge move at the same moment.
+   */
+  const waitingCaption: React.ReactNode[] = [];
+  if (invitations.outstanding > 0) {
+    waitingCaption.push(
+      <span key="invitations">
+        {formatNumber(invitations.outstanding)}{" "}
+        {pluralize(invitations.outstanding, "invitation")}
+      </span>,
+    );
+  }
+  if (users.pendingApproval > 0) {
+    waitingCaption.push(
+      // The separator belongs to the second part rather than being interleaved
+      // afterwards, so the list is built once and never needs an index key.
+      <React.Fragment key="approvals">
+        {waitingCaption.length > 0 ? <span aria-hidden> · </span> : null}
+        <Link href="/admin/approvals" className="text-warning underline-offset-4 hover:underline">
+          {formatNumber(users.pendingApproval)} awaiting approval
+        </Link>
+      </React.Fragment>,
+    );
+  }
 
   return (
     <TileGroup
@@ -598,6 +644,16 @@ function TeamGroup({
       columns={mayViewPayroll ? "grid-cols-2 lg:grid-cols-4" : "grid-cols-1 sm:grid-cols-2"}
       action={
         <div className="flex items-center gap-3">
+          {/* First in the row, and only when there is something in it. A link
+              to an empty queue is a link nobody needs; a link to a queue with
+              somebody in it is the most useful thing on this page. */}
+          {users.pendingApproval > 0 ? (
+            <GroupLink href="/admin/approvals">
+              <span className="text-warning">
+                Approvals ({formatNumber(users.pendingApproval)})
+              </span>
+            </GroupLink>
+          ) : null}
           <GroupLink href="/admin/employees">Employees</GroupLink>
           <IfPermitted to="payroll.view">
             <GroupLink href="/admin/payroll">Payroll</GroupLink>
@@ -630,7 +686,7 @@ function TeamGroup({
               {formatNumber(waiting)}
             </span>
           }
-          caption={waitingCaption || "Nobody is waiting to join"}
+          caption={waitingCaption.length > 0 ? waitingCaption : "Nobody is waiting to join"}
         />
       </Tile>
 

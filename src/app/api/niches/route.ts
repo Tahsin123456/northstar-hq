@@ -21,7 +21,19 @@ export function GET() {
   });
 }
 
-/** POST /api/niches — create a niche. */
+/**
+ * POST /api/niches — create a niche.
+ *
+ * Two permissions, checked in two places. `niches.manage` is the floor to
+ * create one at all and is asserted here, before anything is read. A
+ * `hitThreshold` in the body is a second, narrower act — it defines what a hit
+ * means for everybody's charts — and needs `settings.manage`; that check lives
+ * in `createNiche` itself so it holds for every caller, not just this route.
+ *
+ * An employee who sends one anyway is refused with a 403 rather than having the
+ * field quietly dropped. Stripping it would create the niche and let them
+ * believe they had configured a number that does not exist.
+ */
 export function POST(request: Request) {
   return handleMutation(request, async () => {
     // A niche is shared taxonomy — everyone's charts regroup around it — so

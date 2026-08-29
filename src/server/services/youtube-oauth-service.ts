@@ -44,18 +44,49 @@ import type { RawChannelItem, RawListResponse, RawThumbnails, YouTubeChannel } f
  * compromised token is decided here, at consent, and nowhere else — no amount
  * of care further down the stack can narrow a grant that was already given.
  *
- * `yt-analytics.readonly` is not requested either. Nothing in the product reads
- * the Analytics API today, and asking for a scope "in case we need it later"
- * makes every admin approve access that is never used — which is also how a
- * consent screen stops being read.
+ * The two `yt-analytics` scopes were added when automatic revenue import was
+ * built, and they are read-only in exactly the same sense: they permit
+ * *reports* to be run against the YouTube Analytics API and nothing else. There
+ * is no write counterpart to either of them to accidentally ask for.
+ *
+ * They are separate scopes because Google separates the data. Revenue is not in
+ * the YouTube Data API this integration started with at all — no amount of
+ * `youtube.readonly` returns a figure — and the monetary metrics
+ * (`estimatedRevenue` and friends) sit behind `yt-analytics-monetary.readonly`
+ * specifically, apart from views and watch time under `yt-analytics.readonly`.
+ * Asking for the monetary scope without the non-monetary one would leave the
+ * report endpoint unusable for anything but money.
  *
  * `openid email` identifies which Google account granted access, so the admin
  * screen can show whose authorisation a sync depends on.
  */
-const OAUTH_SCOPES = ["https://www.googleapis.com/auth/youtube.readonly", "openid", "email"] as const;
+const OAUTH_SCOPES = [
+  "https://www.googleapis.com/auth/youtube.readonly",
+  "https://www.googleapis.com/auth/yt-analytics.readonly",
+  "https://www.googleapis.com/auth/yt-analytics-monetary.readonly",
+  "openid",
+  "email",
+] as const;
 
 /** The scope the integration cannot function without, checked after consent. */
 const REQUIRED_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
+
+/**
+ * The scope revenue cannot be read without.
+ *
+ * Checked against what Google ACTUALLY returned rather than against what was
+ * asked for. Google's consent screen lets a person untick individual
+ * permissions, and every connection made before revenue existed was granted
+ * without this one — so assuming the list above was accepted whole would turn
+ * two entirely different situations ("they said no" and "they were never
+ * asked") into the same nightly 403.
+ */
+export const REVENUE_SCOPE = "https://www.googleapis.com/auth/yt-analytics-monetary.readonly";
+
+/** True only when Google's own scope string contains the monetary scope. */
+export function grantsRevenueScope(scope: string): boolean {
+  return scope.split(" ").filter(Boolean).includes(REVENUE_SCOPE);
+}
 
 const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -496,7 +527,15 @@ export async function refreshAccessToken(connectionId: string): Promise<string |
       // means "keep using the one you have" — writing `null` here would destroy
       // a working grant on the first successful refresh.
       ...(tokens.refreshToken ? { refreshTokenEnc: encryptSecret(tokens.refreshToken) } : {}),
-      ...(tokens.scope ? { scope: tokens.scope } : {}),
+      // A refresh response restates the scopes the grant still carries, which
+      // makes this the one place that notices a grant NARROWED after the fact —
+      // somebody removing the monetary permission in their Google account
+      // settings. Recording it here means revenue stops with "reconnect to
+      // enable revenue" on the admin screen rather than with a 403 a night
+      // later that nobody can explain.
+      ...(tokens.scope
+        ? { scope: tokens.scope, revenueScopeGranted: grantsRevenueScope(tokens.scope) }
+        : {}),
       status: "connected",
       lastError: null,
     },
@@ -802,7 +841,7 @@ export async function completeConnection(options: {
             youtubeChannelId: ownChannel.channelId,
           },
         },
-        select: { id: true, refreshTokenEnc: true },
+        select: { id: true, refreshTokenEnc: true, revenueSyncStatus: true },
       })
     : // No channel to key on, so fall back to the Google account itself — still
       // scoped, so one workspace can never adopt another's connection row.
@@ -811,7 +850,7 @@ export async function completeConnection(options: {
       identity.googleUserId
       ? await prisma.youTubeConnection.findFirst({
           where: { organizationId: options.organizationId, googleUserId: identity.googleUserId },
-          select: { id: true, refreshTokenEnc: true },
+          select: { id: true, refreshTokenEnc: true, revenueSyncStatus: true },
         })
       : null;
 
@@ -828,6 +867,18 @@ export async function completeConnection(options: {
     );
   }
 
+  /**
+   * Whether this grant can read money, decided from Google's own answer.
+   *
+   * Deliberately NOT a hard failure the way a missing `REQUIRED_SCOPE` is. A
+   * connection without the monetary scope still does everything the integration
+   * did before revenue existed, so refusing it would break channel syncing to
+   * punish a missing feature. It is recorded instead, and the admin screen says
+   * "reconnect to enable revenue" — a sentence about one capability rather than
+   * an error about the whole connection.
+   */
+  const revenueScopeGranted = grantsRevenueScope(tokens.scope);
+
   const data = {
     googleAccountEmail: identity.email,
     googleUserId: identity.googleUserId,
@@ -839,6 +890,23 @@ export async function completeConnection(options: {
     ...(tokens.refreshToken ? { refreshTokenEnc: encryptSecret(tokens.refreshToken) } : {}),
     accessTokenExpiresAt: tokens.expiresAt,
     scope: tokens.scope,
+    revenueScopeGranted,
+    // The revenue verdict is only ever *cleared* by reconnecting, never
+    // invented. "no_scope" is the one status a new grant can genuinely
+    // invalidate, so it is reset to "never" and the next run decides. A channel
+    // previously found to be outside the Partner Programme, or a run that
+    // failed for its own reasons, is not made true or false by re-authorising —
+    // overwriting those here would replace a fact with an optimistic guess.
+    ...(revenueScopeGranted
+      ? existing?.revenueSyncStatus === "no_scope"
+        ? { revenueSyncStatus: "never", revenueSyncError: null }
+        : {}
+      : {
+          revenueSyncStatus: "no_scope",
+          revenueSyncError:
+            "This connection was not granted permission to read YouTube revenue. Reconnect the " +
+            "account and leave every permission ticked on Google's consent screen.",
+        }),
     status: "connected",
     lastError: null,
     connectedById: options.userId,
@@ -880,6 +948,12 @@ const CONNECTION_DTO_SELECT = {
   status: true,
   lastError: true,
   lastSyncAt: true,
+  revenueScopeGranted: true,
+  monetizationStatus: true,
+  revenueSyncStatus: true,
+  revenueSyncError: true,
+  lastRevenueSyncAt: true,
+  nextSyncAt: true,
   createdAt: true,
   connectedBy: { select: { name: true, email: true } },
 } as const;
@@ -893,6 +967,12 @@ interface ConnectionRow {
   readonly status: string;
   readonly lastError: string | null;
   readonly lastSyncAt: Date | null;
+  readonly revenueScopeGranted: boolean;
+  readonly monetizationStatus: string;
+  readonly revenueSyncStatus: string;
+  readonly revenueSyncError: string | null;
+  readonly lastRevenueSyncAt: Date | null;
+  readonly nextSyncAt: Date | null;
   readonly createdAt: Date;
   readonly connectedBy: { name: string | null; email: string | null } | null;
 }
@@ -908,6 +988,12 @@ function toConnectionDTO(row: ConnectionRow): YouTubeConnectionDTO {
     lastError: row.lastError,
     // Epoch milliseconds, per the wire convention in lib/dto.ts.
     lastSyncAt: row.lastSyncAt?.getTime() ?? null,
+    revenueScopeGranted: row.revenueScopeGranted,
+    monetizationStatus: row.monetizationStatus,
+    revenueSyncStatus: row.revenueSyncStatus,
+    revenueSyncError: row.revenueSyncError,
+    lastRevenueSyncAt: row.lastRevenueSyncAt?.getTime() ?? null,
+    nextSyncAt: row.nextSyncAt?.getTime() ?? null,
     // Prefer the live name so a rename shows, falling back to the address when
     // the account has no name and to null when it has been deleted.
     connectedByName: row.connectedBy?.name ?? row.connectedBy?.email ?? null,

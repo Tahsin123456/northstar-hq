@@ -15,7 +15,9 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { NO_CONTENT_TYPES } from "@/hooks/use-content-types";
 import { NicheChips } from "@/components/niches/niche-chip";
+import { ContentTypeControl } from "@/components/content-types/content-type-control";
 import { SaveShortButton } from "./save-short-button";
 import { cn } from "@/lib/utils";
 
@@ -100,14 +102,23 @@ export function OutlierMultiple({
 export function ShortCard({
   short,
   rank,
-  onAddNote,
+  onOpenShort,
   noteCount = 0,
+  contentTypeIds = NO_CONTENT_TYPES,
   className,
 }: {
   short: FeedShort;
   rank?: number;
-  onAddNote?: (short: FeedShort) => void;
+  /**
+   * Opens the single-Short view — notes, and the Short's niche and content
+   * type. It used to be `onAddNote`, and the rename is the point: the dialog it
+   * opens is no longer only about notes, and a prop still called `onAddNote`
+   * would be the last thing in the codebase asserting that it was.
+   */
+  onOpenShort?: (short: FeedShort) => void;
   noteCount?: number;
+  /** Supplied by the feed, which resolves the whole list in one pass. */
+  contentTypeIds?: readonly string[];
   className?: string;
 }) {
   const { video, channel } = short;
@@ -175,6 +186,15 @@ export function ShortCard({
 
           <NicheChips niches={short.niches} limit={1} size="sm" />
 
+          {/* The same control as the Shorts table and Saved. A Short is worth
+              classifying at the moment somebody notices it, which is here. */}
+          <ContentTypeControl
+            videoId={video.id}
+            contentTypeIds={contentTypeIds}
+            revealOnHover
+            className="-ml-1"
+          />
+
           <span aria-hidden className="text-border-strong">
             ·
           </span>
@@ -224,14 +244,17 @@ export function ShortCard({
       </div>
 
       <div className="flex shrink-0 items-center gap-0.5">
-        {onAddNote ? (
+        {onOpenShort ? (
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon-sm"
-                onClick={() => onAddNote(short)}
-                aria-label="Add a note about this Short"
+                onClick={() => onOpenShort(short)}
+                // The dialog behind this button is the app's only single-Short
+                // view now — notes, plus the niche and the content type — so
+                // the label names the Short rather than only the note.
+                aria-label="Open this Short: notes, niche and content type"
                 className={cn(
                   "transition-opacity",
                   noteCount > 0
@@ -244,8 +267,8 @@ export function ShortCard({
             </TooltipTrigger>
             <TooltipContent>
               {noteCount > 0
-                ? `${noteCount} ${noteCount === 1 ? "note" : "notes"}`
-                : "Add a note"}
+                ? `${noteCount} ${noteCount === 1 ? "note" : "notes"} — open the Short`
+                : "Open this Short — notes, niche and content type"}
             </TooltipContent>
           </Tooltip>
         ) : null}

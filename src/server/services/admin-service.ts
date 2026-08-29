@@ -7,6 +7,7 @@ import {
   listAuditEvents,
   recordAudit,
   type AuditEntryDTO,
+  type AuditMoneyAccess,
 } from "@/server/audit/audit-service";
 import { actorCan } from "@/server/auth/dal";
 import { revokeAllSessionsForUser } from "@/server/auth/session";
@@ -911,16 +912,18 @@ async function loadPayrollSummary(organizationId: string): Promise<AdminPayrollS
  * from the route, which is where the permission decision is legible — never
  * from a request body, and never assumed from `users.manage`: the two are
  * separate capabilities and only an admin holds the payroll one.
- * @param options.includeSensitiveAuditMetadata The same permission asked about
- * different data: whether the amounts a pay entry carries in its audit metadata
- * survive into `recentActivity`. Separate from `includePayroll` because they
- * gate separate reads — one decides whether payroll is computed, this one
- * decides what an audit row is allowed to say — and a caller that dropped the
- * payroll tile for any other reason must not thereby publish salaries.
+ * @param options.auditMoneyAccess Which kinds of amount survive into
+ * `recentActivity`. Separate from `includePayroll` because they gate separate
+ * reads — one decides whether payroll is computed, this one decides what an
+ * audit row is allowed to say — and a caller that dropped the payroll tile for
+ * any other reason must not thereby publish salaries. `recentActivity` is
+ * unfiltered by action, so it carries finance entries as well as pay ones;
+ * both permissions are therefore asked for, and each unlocks only its own
+ * figures.
  */
 export async function getAdminOverview(options: {
   includePayroll: boolean;
-  includeSensitiveAuditMetadata: boolean;
+  auditMoneyAccess: AuditMoneyAccess;
 }): Promise<AdminOverview> {
   const organizationId = await getCurrentOrgId();
   const now = new Date();
@@ -991,7 +994,7 @@ export async function getAdminOverview(options: {
     listAuditEvents({
       organizationId,
       limit: RECENT_ACTIVITY_LIMIT,
-      includeSensitiveMetadata: options.includeSensitiveAuditMetadata,
+      moneyAccess: options.auditMoneyAccess,
     }),
     // Started alongside the counts rather than after them: it is by far the
     // slowest read here, and running it in series would add its latency to

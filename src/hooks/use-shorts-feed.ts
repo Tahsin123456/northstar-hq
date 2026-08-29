@@ -9,7 +9,12 @@ import {
 } from "@/lib/analytics/outliers";
 import type { DateRange } from "@/lib/analytics/types";
 import type { ChannelDTO, DatasetDTO, NicheRefDTO, OwnershipType } from "@/lib/dto";
-import type { NicheFilter, OwnershipFilter } from "@/lib/filters-store";
+import type {
+  ContentTypeFilter,
+  NicheFilter,
+  OwnershipFilter,
+} from "@/lib/filters-store";
+import { useSession } from "@/components/providers/session-provider";
 import { useNow } from "./use-now";
 
 /**
@@ -29,6 +34,7 @@ export interface FeedShort extends OutlierShort {
   readonly channel: ChannelDTO;
   readonly niches: readonly NicheRefDTO[];
   readonly ownershipType: OwnershipType;
+  /** Whether *this* viewer has saved it. Saves are personal, so a colleague's does not count. */
   readonly isSaved: boolean;
 }
 
@@ -45,6 +51,18 @@ export interface FeedOptions {
   readonly baselineRange: DateRange;
   readonly niche: NicheFilter;
   readonly ownership: OwnershipFilter;
+  /**
+   * Which content type the Shorts themselves must carry.
+   *
+   * A PER-SHORT predicate here, unlike the channel-list filter in
+   * `filterRowsByScope` which reads the channel's own tags. That is not an
+   * inconsistency — it is the two surfaces having different units. A row on the
+   * dashboard is a channel and its numbers describe everything that channel
+   * published, so filtering it by a per-Short label would put a figure next to a
+   * label that did not describe it. Here the row IS a Short, so the Short's own
+   * classification is exactly the right question.
+   */
+  readonly contentType?: ContentTypeFilter;
   readonly minViews?: number;
   readonly channelId?: string | null;
   readonly sort?: OutlierSortKey;
@@ -63,12 +81,18 @@ export function useShortsFeed(
   options: FeedOptions,
 ): FeedShort[] {
   const now = useNow();
+  // Saves are personal, and an admin's payload deliberately carries the whole
+  // team's. Without narrowing to the viewer, every Short a colleague had saved
+  // would render with a filled bookmark on an admin's feed, and clicking it
+  // would do nothing — the server un-saves the caller's row, and there is none.
+  const viewerId = useSession().user.id;
 
   const {
     range,
     baselineRange,
     niche,
     ownership,
+    contentType = "all",
     minViews = 0,
     channelId = null,
     sort = "outlierMultiple",
@@ -78,7 +102,9 @@ export function useShortsFeed(
   return React.useMemo(() => {
     if (!dataset) return [];
 
-    const savedVideoIds = new Set(dataset.savedShorts.map((s) => s.videoId));
+    const savedVideoIds = new Set(
+      dataset.savedShorts.filter((s) => s.savedById === viewerId).map((s) => s.videoId),
+    );
 
     // Scope channels first so a filtered feed never pays to score channels it
     // will discard — and, more importantly, so the baseline of an excluded
@@ -90,6 +116,35 @@ export function useShortsFeed(
     });
 
     const channelById = new Map(scoped.map((entry) => [entry.channel.id, entry.channel]));
+
+    /*
+     * The content-type predicate, as a set of video ids to keep.
+     *
+     * Built here and applied AFTER scoring, never before. `calculateOutliers`
+     * derives each channel's median from its whole baseline window, and a
+     * channel's typical Short is a fact about the channel — narrowing the input
+     * to one content type would silently re-baseline every multiple against
+     * "typical for this channel's rankings", so a ranking could never be an
+     * outlier among rankings. Filtering the output keeps the multiples the same
+     * numbers they are on every other screen.
+     *
+     * `null` means no filter at all, which is the overwhelmingly common case and
+     * costs nothing to check.
+     */
+    const allowedVideoIds =
+      contentType === "all"
+        ? null
+        : new Set(
+            scoped.flatMap((entry) =>
+              entry.videos
+                .filter((video) =>
+                  contentType === "unassigned"
+                    ? video.contentTypeIds.length === 0
+                    : video.contentTypeIds.includes(contentType),
+                )
+                .map((video) => video.id),
+            ),
+          );
 
     const scored = calculateOutliers(
       scoped.map((entry) => ({ channelId: entry.channel.id, videos: entry.videos })),
@@ -104,6 +159,7 @@ export function useShortsFeed(
     for (const item of scored) {
       const channel = channelById.get(item.channelId);
       if (!channel) continue;
+      if (allowedVideoIds && !allowedVideoIds.has(item.video.id)) continue;
       if (item.video.views < minViews) continue;
       if (requireReliableBaseline && item.outlierMultiple === null) continue;
 
@@ -123,11 +179,13 @@ export function useShortsFeed(
     baselineRange,
     niche,
     ownership,
+    contentType,
     minViews,
     channelId,
     sort,
     requireReliableBaseline,
     now,
+    viewerId,
   ]);
 }
 

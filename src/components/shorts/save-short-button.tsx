@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useSession } from "@/components/providers/session-provider";
 import { cn } from "@/lib/utils";
 
 /**
@@ -52,8 +53,27 @@ export function SaveShortButton({
   const [creating, setCreating] = React.useState(false);
   const [newName, setNewName] = React.useState("");
 
-  const collections = data?.collections ?? [];
-  const savedRecord = data?.savedShorts.find((s) => s.videoId === short.video.id);
+  const viewerId = useSession().user.id;
+
+  // The viewer's own folders, never the team's. `listCollections` widens to
+  // everyone's for an admin, which is right for a read — but filing is not a
+  // read. `setSavedShortCollections` scopes to `createdById: ownerId`, so a
+  // colleague's folder offered here is a menu item that answers the click with
+  // "One or more of those collections no longer exists" while still sitting in
+  // the open menu above the toast. Reading somebody's folders and putting a
+  // Short in one are different authorities; this control only has the second.
+  const collections = React.useMemo(
+    () => (data?.collections ?? []).filter((c) => c.createdById === viewerId),
+    [data?.collections, viewerId],
+  );
+  // `savedById`, not just `videoId`. Saves are per person now, so the payload
+  // can legitimately hold two rows for one Short — and an admin's holds the
+  // whole team's. Matching on the video alone would point this button at
+  // somebody else's save: the record it reads collections from, and the one
+  // the server would actually mutate, would be different rows.
+  const savedRecord = data?.savedShorts.find(
+    (s) => s.videoId === short.video.id && s.savedById === viewerId,
+  );
   const isSaved = Boolean(savedRecord);
   const pending = save.isPending || unsave.isPending;
 

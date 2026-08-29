@@ -23,16 +23,24 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { InfoTip } from "@/components/ui/tooltip";
 import {
   filterRows,
+  untaggedChannelCount,
   useChannelRows,
   useScopedRows,
   type ChannelRow,
 } from "@/hooks/use-channel-analytics";
 import {
+  ContentTypeFilterControl,
   NicheFilterControl,
   OwnershipFilterControl,
 } from "@/components/dashboard/scope-filters";
 import { useDataset } from "@/hooks/use-dataset";
 import { useFilters } from "@/components/providers/filters-provider";
+import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
+import {
+  UNCONFIGURED_THRESHOLD_EXPLANATION,
+  UNCONFIGURED_THRESHOLD_LABEL,
+  UNCONFIGURED_THRESHOLD_SHORT,
+} from "@/lib/analytics/constants";
 import {
   EM_DASH,
   formatCompactNumber,
@@ -55,13 +63,16 @@ const MAX_COMPARE = 6;
  */
 export default function ComparePage() {
   const { data, isLoading, error, refetch } = useDataset();
-  const { threshold, niche, ownership } = useFilters();
+  const { threshold, nicheName, niche, contentType, ownership } = useFilters();
 
   const allRows = useChannelRows(data);
   // Comparison operates inside the active scope: with "GTA + Our Channels"
   // selected, the picker offers exactly those channels. Comparing across a
   // filter the user has set would quietly contradict it.
-  const rows = useScopedRows(allRows, niche, ownership);
+  const rows = useScopedRows(allRows, niche, ownership, contentType);
+  // Niche and ownership only — the set the Type menu describes. See the note on
+  // `unassignedCount` in `ContentTypeFilterControl`.
+  const nicheScopedRows = useScopedRows(allRows, niche, ownership);
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
   const [query, setQuery] = React.useState("");
 
@@ -124,13 +135,21 @@ export default function ComparePage() {
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="Compare"
-        description={`Put channels side by side at ${formatCompactNumber(threshold)}+ views.`}
+        description={
+          threshold === null
+            ? `${UNCONFIGURED_THRESHOLD_LABEL}. Channels can still be compared on views and volume; hit rate is not reported.`
+            : `Put channels side by side at ${formatCompactNumber(threshold)}+ views.`
+        }
       />
 
       <div className="flex flex-wrap items-center gap-2">
         <NicheFilterControl
           niches={data?.niches ?? []}
           unassignedCount={allRows.filter((r) => r.channel.niches.length === 0).length}
+        />
+        <ContentTypeFilterControl
+          contentTypes={data?.contentTypes ?? []}
+          unassignedCount={untaggedChannelCount(nicheScopedRows)}
         />
         <OwnershipFilterControl
           ownCount={allRows.filter((r) => r.channel.ownershipType === "own").length}
@@ -211,7 +230,9 @@ export default function ComparePage() {
                         {row.channel.displayName}
                       </span>
                       <span className="tnum shrink-0 text-[11px] text-subtle-foreground">
-                        {formatPercent(row.metrics.hitRate, 0)}
+                        {row.metrics.threshold === null
+                          ? null
+                          : formatPercent(row.metrics.hitRate, 0)}
                       </span>
                       {isSelected ? (
                         <span
@@ -243,12 +264,25 @@ export default function ComparePage() {
                   <CardHeader>
                     <CardTitle>Hit rate</CardTitle>
                     <CardDescription>
-                      The share of each channel&rsquo;s Shorts that reached{" "}
-                      {formatCompactNumber(threshold)} views this period.
+                      {threshold === null ? (
+                        UNCONFIGURED_THRESHOLD_EXPLANATION
+                      ) : (
+                        <>
+                          The share of each channel&rsquo;s Shorts that reached{" "}
+                          {formatCompactNumber(threshold)} views this period.
+                        </>
+                      )}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
-                    <ComparisonChart data={chartData} />
+                    {/* Every bar would be zero-height and every label 0%, which
+                        is a chart that asserts total failure. There is nothing
+                        to plot, so nothing is plotted. */}
+                    {threshold === null ? (
+                      <ThresholdNotConfiguredNotice nicheName={nicheName} />
+                    ) : (
+                      <ComparisonChart data={chartData} />
+                    )}
                   </CardContent>
                 </Card>
 
@@ -313,18 +347,32 @@ const METRIC_ROWS: MetricRow[] = [
     value: (row) => row.metrics.bestShort?.views ?? null,
     format: (row) => formatCompactNumber(row.metrics.bestShort?.views ?? null),
   },
+  /*
+   * The two threshold-dependent rows.
+   *
+   * `metrics.threshold` is `null` exactly when the niche has none configured,
+   * and it travels on the metrics object rather than being read from the filter
+   * context here — so a row can never disagree with the numbers it was computed
+   * alongside.
+   */
   {
     label: "Hits",
     higherIsBetter: true,
     value: (row) => row.metrics.hitCount,
-    format: (row) => formatFraction(row.metrics.hitCount, row.metrics.totalShorts),
+    format: (row) =>
+      row.metrics.threshold === null
+        ? UNCONFIGURED_THRESHOLD_SHORT
+        : formatFraction(row.metrics.hitCount, row.metrics.totalShorts),
   },
   {
     label: "Hit rate",
     hint: "The headline metric: hits divided by Shorts uploaded in the period.",
     higherIsBetter: true,
     value: (row) => row.metrics.hitRate,
-    format: (row) => formatPercent(row.metrics.hitRate),
+    format: (row) =>
+      row.metrics.threshold === null
+        ? UNCONFIGURED_THRESHOLD_SHORT
+        : formatPercent(row.metrics.hitRate),
   },
   {
     label: "Consistency",

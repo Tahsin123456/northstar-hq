@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Bookmark,
+  Coins,
   ShieldCheck,
   Wallet,
   Flame,
@@ -14,6 +15,7 @@ import {
   LayoutDashboard,
   Moon,
   Settings,
+  Shapes,
   StickyNote,
   Sun,
   Swords,
@@ -78,13 +80,34 @@ const NAV_SECTIONS: NavSection[] = [
     label: "Tracker",
     items: [
       { href: "/channels", label: "Channels", icon: Tv2, matchPrefix: true },
-      { href: "/niches", label: "Niches", icon: Layers },
+      // `matchPrefix` because a niche's own page is `/niches/[id]`, and the
+      // sidebar losing its highlight there would suggest the user had left the
+      // Tracker.
+      { href: "/niches", label: "Niches", icon: Layers, matchPrefix: true },
+      // Beside Niches because they are the two taxonomies — which slice of the
+      // operation owns a channel, and what the work itself is — and a reader
+      // looking for one is usually deciding between them.
+      //
+      // TOP LEVEL, not a tab inside Niches and not a settings pane. The feature
+      // was reported missing twice while it was reachable only by opening a
+      // niche first, which is the answer to a question nobody asks in those
+      // words: you go looking for "content types", not for the niche you
+      // happened to define them under.
+      { href: "/content-types", label: "Content Types", icon: Shapes },
       { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
   {
     label: "Business",
     items: [
+      {
+        // Everyone's, and only ever their own row. Listed unconditionally
+        // because every role holds `earnings.view_own` — the `requires` below
+        // would be a filter that never filters, which reads as though it might.
+        href: "/earnings",
+        label: "Your Earnings",
+        icon: Coins,
+      },
       {
         href: "/finance",
         label: "Finance",

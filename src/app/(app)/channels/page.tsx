@@ -21,10 +21,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { HitRateValue } from "@/components/metrics/hit-rate-value";
 import {
   filterRows,
+  untaggedChannelCount,
   useChannelRows,
   useScopedRows,
 } from "@/hooks/use-channel-analytics";
 import {
+  ContentTypeFilterControl,
   NicheFilterControl,
   OwnershipFilterControl,
 } from "@/components/dashboard/scope-filters";
@@ -48,11 +50,14 @@ import {
  */
 export default function ChannelsPage() {
   const { data, isLoading, error, refetch } = useDataset();
-  const { niche, ownership } = useFilters();
+  const { niche, contentType, ownership } = useFilters();
   const [query, setQuery] = React.useState("");
 
   const allRows = useChannelRows(data);
-  const rows = useScopedRows(allRows, niche, ownership);
+  const rows = useScopedRows(allRows, niche, ownership, contentType);
+  // Niche and ownership only — the set the Type menu describes. See the note on
+  // `unassignedCount` in `ContentTypeFilterControl`.
+  const nicheScopedRows = useScopedRows(allRows, niche, ownership);
   const visible = React.useMemo(() => filterRows(rows, query), [rows, query]);
 
   return (
@@ -85,6 +90,10 @@ export default function ChannelsPage() {
                 unassignedCount={
                   allRows.filter((r) => r.channel.niches.length === 0).length
                 }
+              />
+              <ContentTypeFilterControl
+                contentTypes={data?.contentTypes ?? []}
+                unassignedCount={untaggedChannelCount(nicheScopedRows)}
               />
               <OwnershipFilterControl
                 ownCount={allRows.filter((r) => r.channel.ownershipType === "own").length}
@@ -165,6 +174,10 @@ export default function ChannelsPage() {
 
 function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }) {
   const { channel, metrics } = row;
+  // Passed through so the card can say "Not configured" rather than the em dash
+  // it would otherwise show for a niche with no threshold — an em dash here
+  // means "no Shorts in period", which is a different and untrue claim.
+  const { threshold } = useFilters();
 
   return (
     <Card className="group relative flex flex-col p-4 transition-colors duration-150 hover:border-border-strong">
@@ -223,6 +236,10 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
             hitRate={metrics.hitRate}
             hitCount={metrics.hitCount}
             totalShorts={metrics.totalShorts}
+            // `null` when unconfigured, `undefined` when configured: this card
+            // never printed the threshold beside its fraction and still should
+            // not, but it does have to know when there is no threshold at all.
+            threshold={threshold === null ? null : undefined}
             size="sm"
             showBar
           />

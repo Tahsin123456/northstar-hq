@@ -73,8 +73,11 @@ export interface EvaluatedShort extends AnalyticsVideo {
   /**
    * views / threshold. 1.0 means exactly at the threshold. Useful for the
    * "views relative to threshold" column and for sorting near-misses.
+   *
+   * `null` when there is no configured threshold to be relative *to*. A ratio
+   * against a borrowed default would read as a measurement somebody made.
    */
-  readonly thresholdRatio: number;
+  readonly thresholdRatio: number | null;
 }
 
 /**
@@ -86,13 +89,22 @@ export interface EvaluatedShort extends AnalyticsVideo {
  */
 export interface ChannelMetrics {
   readonly range: DateRange;
-  readonly threshold: number;
+  /**
+   * The threshold these figures were judged at, or `null` when the active niche
+   * has none configured. In that case `hitCount` is 0 and `hitRate` is `null` —
+   * not because nothing hit, but because nobody ever said what a hit is.
+   */
+  readonly threshold: number | null;
 
   /** Shorts uploaded inside the window. Denominator of the hit rate. */
   readonly totalShorts: number;
   /** Shorts inside the window whose *current* views >= threshold. */
   readonly hitCount: number;
-  /** Percentage 0..100, or `null` when `totalShorts === 0`. */
+  /**
+   * Percentage 0..100. `null` when `totalShorts === 0`, and also `null` when
+   * `threshold` is `null` — a hit rate with no threshold behind it is not a
+   * smaller number, it is not a number at all.
+   */
   readonly hitRate: number | null;
 
   readonly totalViews: number;
@@ -141,5 +153,11 @@ export type SeriesGranularity = "day" | "week" | "month";
 export interface ChannelMetricsInput {
   readonly videos: readonly AnalyticsVideo[];
   readonly range: DateRange;
-  readonly threshold: number;
+  /**
+   * `null` means "the selected niche has no configured hit threshold". The
+   * engine then reports no hit rate at all rather than quietly measuring
+   * against the organization default, which is the bug this nullability exists
+   * to make impossible to reintroduce.
+   */
+  readonly threshold: number | null;
 }

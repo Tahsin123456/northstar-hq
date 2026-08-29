@@ -158,6 +158,9 @@ model Organization {
   employeeProfiles     EmployeeProfile[]
   payrollPeriods       PayrollPeriod[]
   notificationSettings NotificationSettings?
+  contentTypes         ContentType[]
+  videoContentTypes    VideoContentType[]
+  channelRevenueDays   ChannelRevenueDay[]
 
   @@map("organizations")
 }
@@ -389,6 +392,7 @@ model Channel {
   refreshRuns    ChannelRefreshRun[]
   notes          Note[]
   financeEntries FinanceEntry[]
+  revenueDays    ChannelRevenueDay[]
 
   @@index([lastFetchedAt])
   @@map("channels")
@@ -431,7 +435,8 @@ model TrackedChannel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  niches TrackedChannelNiche[]
+  niches       TrackedChannelNiche[]
+  contentTypes ChannelContentType[]
 
   @@unique([organizationId, channelId])
   @@index([organizationId, isActive])
@@ -485,9 +490,10 @@ model Video {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  snapshots   VideoSnapshot[]
-  notes       Note[]
-  savedShorts SavedShort[]
+  snapshots    VideoSnapshot[]
+  notes        Note[]
+  savedShorts  SavedShort[]
+  contentTypes VideoContentType[]
 
   @@index([channelId, publishedAt])
   @@index([channelId, isShort, publishedAt])
@@ -588,9 +594,25 @@ model Note {
 
   body String
 
+  /// "personal" | "shared".
+  ///
+  /// A personal note is working memory — visible to its author, and to an admin
+  /// who is accountable for the workspace. A shared note is team research, and
+  /// is visible to any colleague who can already see the thing it is about:
+  /// a shared note on a Red Dead channel reaches whoever can see Red Dead, and
+  /// nobody else. That is why the check is not "is it shared" alone but "is it
+  /// shared AND is its subject in your scope" — otherwise sharing a note would
+  /// be a way to hand somebody a niche they were never assigned.
+  ///
+  /// Defaults to personal. Making a note visible to colleagues is a decision
+  /// somebody takes deliberately; it should never be what happens when they do
+  /// not think about it.
+  visibility String @default("personal")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([organizationId, visibility])
   @@index([organizationId, targetType])
   @@index([createdById])
   @@index([channelId])
@@ -662,7 +684,18 @@ model SavedShort {
 
   collections SavedShortCollection[]
 
-  @@unique([organizationId, videoId])
+  /// PER PERSON, not per organization.
+  ///
+  /// This was `[organizationId, videoId]`, which made saving org-wide: the
+  /// first person to save a Short claimed it, and nobody else could save it at
+  /// all — their colleague's shortlist was their shortlist. A saved Short is
+  /// personal working state, so the key carries the owner.
+  ///
+  /// `createdById` is nullable and NULLs do not collide on either connector, so
+  /// saves whose owner has since been deleted stop deduplicating against each
+  /// other. That is the right trade: they are already orphaned records kept for
+  /// the audit trail, not a live shortlist anybody is adding to.
+  @@unique([organizationId, createdById, videoId])
   @@index([organizationId, savedAt])
   @@index([createdById])
   @@map("saved_shorts")
@@ -901,6 +934,38 @@ model YouTubeConnection {
   lastError  String?
   lastSyncAt DateTime?
 
+  /// Whether the monetary Analytics scope was actually granted.
+  ///
+  /// Revenue does not come from the YouTube Data API at all — it needs
+  /// yt-analytics-monetary.readonly against the YouTube Analytics API. A
+  /// connection made before that scope was requested, or one where the person
+  /// unticked it on the consent screen, can read channel data and not a penny
+  /// of revenue. Recording it means the UI can say "reconnect to enable
+  /// revenue" instead of reporting an error every night.
+  revenueScopeGranted Boolean @default(false)
+
+  /// "unknown" | "monetized" | "not_monetized"
+  ///
+  /// Monetary metrics require the channel to be in the YouTube Partner
+  /// Programme. A channel below the threshold is not an error to be retried —
+  /// it is a fact to be displayed, which is why it is a status rather than a
+  /// message in lastError.
+  monetizationStatus String @default("unknown")
+
+  /// "never" | "ok" | "error" | "no_scope" | "not_monetized" | "reported_zero"
+  ///
+  /// "not_monetized" is YouTube refusing a report to a connection that has
+  /// permission to read one; "reported_zero" is YouTube answering with nothing
+  /// but zeros. Separate values because they are separate facts — the first is
+  /// evidence about the channel, the second is only evidence about the window.
+  revenueSyncStatus String    @default("never")
+  revenueSyncError  String?
+  lastRevenueSyncAt DateTime?
+
+  /// When the scheduler will next look. Shown to the admin so "nothing has
+  /// happened yet" is distinguishable from "nothing is going to happen".
+  nextSyncAt DateTime?
+
   connectedById String?
   connectedBy   AppUser? @relation(fields: [connectedById], references: [id], onDelete: SetNull)
 
@@ -1001,12 +1066,42 @@ model FinanceEntry {
 
   notes String?
 
+  /// Where this row came from: "manual" | "youtube".
+  ///
+  /// An imported figure and a typed one are not the same kind of fact, and the
+  /// UI must be able to say so. It also decides who may edit the row — an
+  /// imported amount that a person can silently overwrite stops reconciling on
+  /// the next sync.
+  source String @default("manual")
+
+  /// Stable key for an imported row, e.g. "youtube:UC123:2026-08".
+  ///
+  /// THE IDEMPOTENCY MECHANISM. The sync upserts on (organization, source,
+  /// externalId), so re-running it updates the existing row rather than adding
+  /// a second one. Null for manual entries, and NULLs do not collide in a
+  /// unique index on either connector, so hand-typed rows are unaffected.
+  externalId String?
+
+  /// True when the figure is an estimate that the source may still revise.
+  ///
+  /// YouTube's revenue metrics are explicitly "subject to month-end
+  /// adjustment", so presenting one as settled cash would be wrong. The
+  /// finance screens label it rather than hiding the distinction.
+  isEstimated Boolean @default(false)
+
+  /// Set when an import overwrote a different figure, so a changed number is
+  /// visible as a change rather than appearing to have always been that.
+  previousAmountMinor Int?
+  revisionCount       Int       @default(0)
+  lastImportedAt      DateTime?
+
   createdById String?
   createdBy   AppUser? @relation(fields: [createdById], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, source, externalId])
   @@index([organizationId, kind, occurredOn])
   @@index([organizationId, channelId, occurredOn])
   @@index([categoryId])
@@ -1294,4 +1389,171 @@ model NotificationSettings {
   updatedAt DateTime @updatedAt
 
   @@map("notification_settings")
+}
+
+// ---------------------------------------------------------------------------
+// CONTENT TYPES
+//
+// A second, independent way to slice the same Shorts. A niche says WHAT GAME a
+// channel covers; a content type says WHAT KIND OF VIDEO it is — a funny
+// moment, a ranking, a cutscene. They are orthogonal on purpose: "which content
+// type performs best in GTA" is the question this exists to make answerable,
+// and it is only answerable if the two are separate dimensions rather than one
+// merged taxonomy.
+//
+// Nothing here is hardcoded. The catalogue is rows, editable by an admin, the
+// same way niches and finance categories already are.
+// ---------------------------------------------------------------------------
+
+/// A kind of video WITHIN ONE NICHE: "Funny Meme" in GTA, "Story Moment" in RDR.
+///
+/// Deliberately NOT a global list. A single catalogue shared by every niche
+/// would offer "Cinematics" against a TLOU Short and "Emotional Moments"
+/// against a GTA one, and the vocabulary each niche actually argues in would be
+/// buried in everybody else's. Two niches may both have a "Character Moments"
+/// — they are separate rows, because they are separate things that happen to
+/// share a name, and merging them would make "which content type performs best"
+/// a question about a label rather than about the work.
+model ContentType {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name String
+
+  /// Lowercased name — the portable case-insensitive uniqueness trick
+  /// `Niche.slug` and `FinanceCategory.slug` already use, because SQLite and
+  /// PostgreSQL disagree about case-insensitive collation.
+  slug String
+
+  /// A `--chart-N` index, so a tag is recognisable at a glance.
+  colorIndex Int @default(0)
+  sortOrder  Int @default(0)
+
+  /// Archived rather than deleted wherever it is in use: retiring a tag stops
+  /// it being offered on new work while every Short already carrying it keeps
+  /// its label. A tag nothing references can be removed outright.
+  isActive Boolean @default(true)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  channels ChannelContentType[]
+  videos   VideoContentType[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, sortOrder])
+  @@map("content_types")
+}
+
+/// The content types a channel primarily produces.
+///
+/// Hangs off `TrackedChannel` rather than `Channel` because it is the
+/// organization's editorial read on a channel it watches, not a fact about the
+/// channel itself — two teams tracking the same channel would describe it
+/// differently, and `Channel` rows are shared between them.
+model ChannelContentType {
+  id String @id @default(cuid())
+
+  trackedChannelId String
+  trackedChannel   TrackedChannel @relation(fields: [trackedChannelId], references: [id], onDelete: Cascade)
+
+  contentTypeId String
+  contentType   ContentType @relation(fields: [contentTypeId], references: [id], onDelete: Cascade)
+
+  assignedById String?
+  createdAt    DateTime @default(now())
+
+  @@unique([trackedChannelId, contentTypeId])
+  @@index([contentTypeId])
+  @@map("channel_content_types")
+}
+
+/// The content type(s) of one Short.
+///
+/// CARRIES organizationId ON PURPOSE. `Video` is a global, deduplicated row —
+/// the same YouTube video is one record however many organizations track its
+/// channel — so a classification hung off it alone would be visible to all of
+/// them. The organization is stored here so a query can be scoped without
+/// joining through ContentType, and so the unique constraint is per-team.
+///
+/// Many-to-many because a Short genuinely can be two things at once ("Character
+/// Moment + Funny Moment"). The UI does not force a second choice.
+model VideoContentType {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  videoId String
+  video   Video  @relation(fields: [videoId], references: [id], onDelete: Cascade)
+
+  contentTypeId String
+  contentType   ContentType @relation(fields: [contentTypeId], references: [id], onDelete: Cascade)
+
+  /// Attribution, so a bulk assignment can be traced back to whoever ran it.
+  assignedById String?
+  assignedAt   DateTime @default(now())
+
+  @@unique([organizationId, videoId, contentTypeId])
+  @@index([organizationId, contentTypeId])
+  @@index([videoId])
+  @@map("video_content_types")
+}
+
+// ---------------------------------------------------------------------------
+// YOUTUBE REVENUE
+//
+// Revenue is NOT available from the YouTube Data API that powers the rest of
+// this app. It comes from a different service — the YouTube Analytics API at
+// youtubeanalytics.googleapis.com — under a different scope,
+// yt-analytics-monetary.readonly, and only for channels in the YouTube Partner
+// Programme.
+//
+// The daily rows below are the raw record as reported. Finance entries are
+// derived from them, which is what makes a revised figure a correction to one
+// row rather than a second payment appearing in the ledger.
+// ---------------------------------------------------------------------------
+
+/// One channel's reported revenue for one day.
+model ChannelRevenueDay {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  /// Which connection reported it. Kept so a figure can be traced to the
+  /// Google account that authorised reading it.
+  connectionId String?
+
+  /// The reported day, at UTC midnight — the granularity the Analytics API
+  /// returns and the unit a revision applies to.
+  day DateTime
+
+  /// Integer minor units, like every other amount in this system.
+  estimatedRevenueMinor           Int @default(0)
+  estimatedAdRevenueMinor         Int @default(0)
+  estimatedRedPartnerRevenueMinor Int @default(0)
+
+  /// The currency YouTube reported in, which is the channel's payout currency
+  /// and not necessarily the organization's base.
+  currency String @default("USD")
+
+  /// Revision tracking. YouTube states plainly that these figures are subject
+  /// to month-end adjustment, so a day's value moving is expected rather than
+  /// exceptional — and worth being able to see.
+  previousEstimatedRevenueMinor Int?
+  revisionCount                 Int  @default(0)
+
+  fetchedAt DateTime @default(now())
+
+  @@unique([organizationId, channelId, day])
+  @@index([organizationId, day])
+  @@index([channelId, day])
+  @@map("channel_revenue_days")
 }

@@ -54,18 +54,28 @@ export function NichePicker({
     const name = newName.trim();
     if (!name) return;
 
-    createNiche.mutate(name, {
-      onSuccess: ({ niche }) => {
-        onChange([...selectedIds, niche.id]);
-        setNewName("");
-        setCreating(false);
-        toast.success(`Niche “${niche.name}” created`);
+    // Deliberately name-only. This is the inline "create one while assigning
+    // channels" path, not the place to configure what a hit means — the niche
+    // is created unconfigured and an Admin sets the threshold on the Niches
+    // screen, where the consequences of the number are visible.
+    createNiche.mutate(
+      { name },
+      {
+        onSuccess: ({ niche }) => {
+          onChange([...selectedIds, niche.id]);
+          setNewName("");
+          setCreating(false);
+          toast.success(`Niche “${niche.name}” created`, {
+            description:
+              "No hit rate threshold yet — an Admin can set one on the Niches page.",
+          });
+        },
+        onError: (error) =>
+          toast.error("Could not create that niche", {
+            description: error instanceof Error ? error.message : undefined,
+          }),
       },
-      onError: (error) =>
-        toast.error("Could not create that niche", {
-          description: error instanceof Error ? error.message : undefined,
-        }),
-    });
+    );
   };
 
   return (

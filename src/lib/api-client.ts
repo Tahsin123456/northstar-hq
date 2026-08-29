@@ -2,6 +2,7 @@ import type {
   ApiErrorDTO,
   ChannelDTO,
   ChannelPreviewDTO,
+  ContentTypeDTO,
   DatasetDTO,
   CollectionDTO,
   ExcludedVideoDTO,
@@ -9,13 +10,16 @@ import type {
   NicheDTO,
   NoteDTO,
   NoteTargetType,
+  NoteVisibility,
   NoteWithContextDTO,
+  MyProfileDTO,
   NotificationAttemptDTO,
+  OrganizationSettingsDTO,
   OwnershipType,
+  PersonalSettingsDTO,
   SavedShortDTO,
   RefreshResultDTO,
   RuntimeConfigDTO,
-  SettingsDTO,
   YouTubeConnectionDTO,
 } from "@/lib/dto";
 import type {
@@ -45,20 +49,32 @@ import type {
   RevokedInvitation,
 } from "@/server/services/admin-service";
 import type {
+  BulkApprovalResult,
   EmployeeApprovalResult,
   EmployeeListItemDTO,
   EmployeeProfileDTO,
+  PendingApprovalDTO,
   SetEmployeeNichesResult,
   UpdateEmployeePayResult,
 } from "@/server/services/employee-service";
 import type { AuditPage } from "@/server/audit/audit-service";
+import type { BulkAssignResult } from "@/server/services/content-type-service";
+import type {
+  NoteLogQuery,
+  SavedShortsQuery,
+  UpdateNoteInput,
+} from "@/server/services/research-service";
 import type {
   FinanceEntryCreateInput,
   FinanceEntryUpdateInput,
   FinanceOverview,
 } from "@/server/services/finance-service";
 import type { NotificationSettingsView } from "@/server/services/notification-service";
+import type { RevenueSyncSummary } from "@/server/services/youtube-revenue-service";
 import type {
+  MyEarningsDTO,
+  MyEarningsHistoryBreakdownDTO,
+  MyEarningsHistoryDTO,
   PayrollDashboardDTO,
   PayrollPeriodDTO,
   PayrollPeriodSummaryDTO,
@@ -316,13 +332,23 @@ export const api = {
 
   listNiches: (): Promise<{ niches: NicheDTO[] }> => request("/api/niches"),
 
-  createNiche: (name: string): Promise<{ niche: NicheDTO }> =>
-    request("/api/niches", { method: "POST", body: JSON.stringify({ name }) }),
+  /**
+   * `hitThreshold` is omitted entirely unless the caller is configuring one.
+   *
+   * Not sent-as-null: the server treats *any* present `hitThreshold` as a
+   * threshold write and refuses it without `settings.manage`, so an employee's
+   * create must not carry the key at all.
+   */
+  createNiche: (payload: {
+    name: string;
+    hitThreshold?: number;
+  }): Promise<{ niche: NicheDTO }> =>
+    request("/api/niches", { method: "POST", body: JSON.stringify(payload) }),
 
   renameNiche: (id: string, name: string): Promise<{ niche: NicheDTO }> =>
     request(`/api/niches/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
 
-  /** `null` clears the override and returns the niche to the account default. */
+  /** `null` clears the threshold, leaving the niche unconfigured. */
   setNicheThreshold: (
     id: string,
     hitThreshold: number | null,
@@ -342,6 +368,124 @@ export const api = {
     request(`/api/channels/${channelId}/niches`, {
       method: "PUT",
       body: JSON.stringify({ nicheIds }),
+    }),
+
+  // --- Content types ---
+  //
+  // The catalogue read is separate from the dataset for the same reason
+  // `listNiches` is: the management screen wants the vocabulary and its usage
+  // counts, and archived types besides, without pulling every channel's view
+  // history to get them. Everything that merely *renders* a content type reads
+  // it out of the dataset, which already ships the catalogue once.
+
+  /**
+   * The organization's catalogue — one flat list.
+   *
+   * `search` is a case-insensitive substring match on the name, applied by the
+   * server rather than in the browser: the counts come with the rows, and a
+   * client-side filter over a partially-fetched list would show a match count
+   * that disagreed with the catalogue behind it.
+   */
+  listContentTypes: (
+    options: { search?: string; includeInactive?: boolean } = {},
+  ): Promise<{ contentTypes: ContentTypeDTO[] }> =>
+    request(
+      `/api/content-types${queryString({
+        search: options.search?.trim() || undefined,
+        includeInactive: options.includeInactive ? "true" : undefined,
+      })}`,
+    ),
+
+  createContentType: (name: string): Promise<{ contentType: ContentTypeDTO }> =>
+    request("/api/content-types", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  /**
+   * Sets the catalogue's order.
+   *
+   * `orderedIds` must be the COMPLETE set, archived types included — the server
+   * refuses a partial list rather than inventing positions for what it was not
+   * sent. Returns the catalogue as stored.
+   */
+  reorderContentTypes: (
+    orderedIds: readonly string[],
+  ): Promise<{ contentTypes: ContentTypeDTO[] }> =>
+    request("/api/content-types/reorder", {
+      method: "POST",
+      body: JSON.stringify({ orderedIds }),
+    }),
+
+  renameContentType: (id: string, name: string): Promise<{ contentType: ContentTypeDTO }> =>
+    request(`/api/content-types/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+
+  /** Archive (`false`) or restore (`true`). The soft alternative to a delete. */
+  setContentTypeActive: (
+    id: string,
+    isActive: boolean,
+  ): Promise<{ contentType: ContentTypeDTO }> =>
+    request(`/api/content-types/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ isActive }),
+    }),
+
+  /**
+   * Only ever succeeds on a type nothing is filed under.
+   *
+   * One that is in use answers 400 with `details.videoCount` /
+   * `details.canDeactivate`, which is what lets the UI offer the archive button
+   * without parsing the message.
+   */
+  deleteContentType: (id: string): Promise<{ deleted: true }> =>
+    request(`/api/content-types/${id}`, { method: "DELETE" }),
+
+  /**
+   * Replaces one Short's tags. Echoes back what the server actually stored.
+   *
+   * Any of the organization's tags may go on any Short, so the only refusals
+   * are tenancy ones: a tag another team owns, or a Short outside this caller's
+   * tracker.
+   */
+  setVideoContentTypes: (
+    videoId: string,
+    contentTypeIds: readonly string[],
+  ): Promise<{ videoId: string; contentTypeIds: string[] }> =>
+    request(`/api/videos/${videoId}/content-types`, {
+      method: "PUT",
+      body: JSON.stringify({ contentTypeIds }),
+    }),
+
+  /**
+   * Files many Shorts under one type at once.
+   *
+   * Idempotent server-side, and the result distinguishes rows written from rows
+   * that already carried the type — so the UI can say "38 filed, 12 already
+   * were" rather than implying it wrote 50.
+   */
+  assignContentTypeToVideos: (payload: {
+    videoIds: readonly string[];
+    contentTypeId: string;
+    mode: "add" | "replace";
+  }): Promise<BulkAssignResult> =>
+    request("/api/content-types/assign", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  /**
+   * Replaces a channel's content-type tags — "what this channel makes".
+   *
+   * Takes the CHANNEL id, matching `setChannelNiches` above, and returns the
+   * updated channel so the caller re-renders from what the server stored.
+   */
+  setChannelContentTypes: (
+    channelId: string,
+    contentTypeIds: readonly string[],
+  ): Promise<{ channel: ChannelDTO }> =>
+    request(`/api/channels/${channelId}/content-types`, {
+      method: "PUT",
+      body: JSON.stringify({ contentTypeIds }),
     }),
 
   setChannelOwnership: (
@@ -422,17 +566,45 @@ export const api = {
   ): Promise<{ notes: NoteDTO[] }> =>
     request(`/api/notes?targetType=${targetType}&targetId=${encodeURIComponent(targetId)}`),
 
-  listAllNotes: (): Promise<{ notes: NoteWithContextDTO[] }> => request("/api/notes/all"),
+  /**
+   * The notes log, narrowed and ordered BY THE SERVER.
+   *
+   * Every parameter here becomes part of the `where` — see `listAllNotes` in
+   * research-service. The client does not receive rows it then hides, which is
+   * the whole reason these are parameters rather than a `.filter()` on the way
+   * out of the query.
+   */
+  listAllNotes: (query: NoteLogQuery = {}): Promise<{ notes: NoteWithContextDTO[] }> =>
+    request(`/api/notes/all${queryString(query)}`),
 
-  createNote: (payload: {
-    targetType: NoteTargetType;
-    targetId: string;
-    body: string;
-  }): Promise<{ note: NoteDTO }> =>
+  /**
+   * A note about something, or a note about nothing.
+   *
+   * The union mirrors `createNoteSchema` on the server rather than making
+   * `targetId` optional, so a caller that names a target but forgets its id
+   * fails at the call site instead of at the parse — the two shapes are
+   * different requests, not one request with a hole in it.
+   */
+  createNote: (
+    payload:
+      | {
+          targetType: NoteTargetType;
+          targetId: string;
+          body: string;
+          visibility?: NoteVisibility;
+        }
+      | { targetType: "general"; body: string; visibility?: NoteVisibility },
+  ): Promise<{ note: NoteDTO }> =>
     request("/api/notes", { method: "POST", body: JSON.stringify(payload) }),
 
-  updateNote: (id: string, body: string): Promise<{ note: NoteDTO }> =>
-    request(`/api/notes/${id}`, { method: "PATCH", body: JSON.stringify({ body }) }),
+  /**
+   * Edits the text, the visibility, or both — whatever the patch carries.
+   *
+   * The server refuses an empty patch rather than touching `updatedAt` for a
+   * request that changed nothing, so callers pass what actually changed.
+   */
+  updateNote: (id: string, patch: UpdateNoteInput): Promise<{ note: NoteDTO }> =>
+    request(`/api/notes/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
 
   deleteNote: (id: string): Promise<{ ok: boolean }> =>
     request(`/api/notes/${id}`, { method: "DELETE" }),
@@ -453,7 +625,12 @@ export const api = {
 
   // --- Saved Shorts ---
 
-  listSaved: (): Promise<{ saved: SavedShortDTO[] }> => request("/api/saved"),
+  /**
+   * The caller's shortlist — or, for an admin, the team's, narrowed by who
+   * saved what and when. Server-side, like the notes log above.
+   */
+  listSaved: (query: SavedShortsQuery = {}): Promise<{ saved: SavedShortDTO[] }> =>
+    request(`/api/saved${queryString(query)}`),
 
   saveShort: (payload: {
     videoId: string;
@@ -466,6 +643,15 @@ export const api = {
   unsaveShort: (videoId: string): Promise<{ ok: boolean }> =>
     request(`/api/saved/${videoId}`, { method: "DELETE" }),
 
+  /**
+   * Clears a save whose owner's account has been deleted.
+   *
+   * By SavedShort row id, not `videoId`: an orphan has no owner to key the
+   * personal save on, and more than one can exist for the same Short.
+   */
+  removeOrphanedSave: (savedShortId: string): Promise<{ ok: boolean }> =>
+    request(`/api/saved/orphaned/${savedShortId}`, { method: "DELETE" }),
+
   setSavedCollections: (
     videoId: string,
     collectionIds: readonly string[],
@@ -475,14 +661,116 @@ export const api = {
       body: JSON.stringify({ collectionIds }),
     }),
 
-  getSettings: (): Promise<{ settings: SettingsDTO; config: RuntimeConfigDTO }> =>
-    request("/api/settings"),
+  // --- Settings: yours, and the organization's ---
+  //
+  // Two endpoints because they answer to two permissions. The personal one is
+  // open to every member and carries their display preferences plus the two
+  // org-wide defaults the dashboard is drawn with; the organization one is
+  // `settings.manage` on the read as well as the write. Calling the second
+  // without the permission is a 403, not an empty object — so a component that
+  // renders it must be gated, and `useSession().can("settings.manage")` is how.
 
-  updateSettings: (update: Partial<SettingsDTO>): Promise<{ settings: SettingsDTO }> =>
+  getSettings: (): Promise<{ settings: PersonalSettingsDTO }> => request("/api/settings"),
+
+  /** Your own display preferences. The schema rejects organization fields. */
+  updateSettings: (
+    update: Partial<Pick<PersonalSettingsDTO, "defaultSortKey" | "defaultSortDirection">>,
+  ): Promise<{ settings: PersonalSettingsDTO }> =>
     request("/api/settings", {
       method: "PATCH",
       body: JSON.stringify(update),
     }),
+
+  getOrganizationSettings: (): Promise<{
+    organization: OrganizationSettingsDTO;
+    config: RuntimeConfigDTO;
+  }> => request("/api/settings/organization"),
+
+  /**
+   * `baseCurrency` is absent from the patch type on purpose: changing it does
+   * not re-convert stored finance entries, it re-labels them. See the schema in
+   * settings-service.ts.
+   */
+  updateOrganizationSettings: (
+    update: Partial<Omit<OrganizationSettingsDTO, "baseCurrency">>,
+  ): Promise<{ organization: OrganizationSettingsDTO }> =>
+    request("/api/settings/organization", {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    }),
+
+  // --- Your own account ---
+
+  getMyProfile: (): Promise<{ profile: MyProfileDTO }> => request("/api/me/profile"),
+
+  /**
+   * Name, email or password. A password change travels on its own — the server
+   * rejects a body that carries both, because the two writes are not atomic.
+   * `currentPassword` is required for an email change as well as a password
+   * change: the address is the login identifier and the reset destination.
+   */
+  updateMyProfile: (update: {
+    name?: string;
+    email?: string;
+    currentPassword?: string;
+    newPassword?: string;
+  }): Promise<{
+    profile: MyProfileDTO;
+    emailChanged: boolean;
+    passwordChanged: boolean;
+  }> =>
+    request("/api/me/profile", {
+      method: "PATCH",
+      body: JSON.stringify(update),
+    }),
+
+  /**
+   * What you earned, for a period.
+   *
+   * There is no parameter for whose earnings, here or on the server: the
+   * endpoint resolves the person from the session. `startsAt`/`endsAt` are
+   * epoch milliseconds and only apply to `period: "custom"`, whose end is
+   * exclusive like every other window in this app.
+   */
+  getMyEarnings: (
+    query: { period?: "current" | "previous" | "custom"; startsAt?: number; endsAt?: number } = {},
+  ): Promise<{ earnings: MyEarningsDTO }> =>
+    request(
+      `/api/me/earnings${queryString({
+        period: query.period,
+        startsAt: query.startsAt,
+        endsAt: query.endsAt,
+      })}`,
+    ),
+
+  /**
+   * The months you have already been paid for, newest first.
+   *
+   * Same rule as `getMyEarnings`: there is no parameter for whose history, here
+   * or on the server. `limit` and `offset` are clamped server-side.
+   */
+  getMyEarningsHistory: (
+    query: { limit?: number; offset?: number } = {},
+  ): Promise<{ history: MyEarningsHistoryDTO }> =>
+    request(
+      `/api/me/earnings/history${queryString({
+        limit: query.limit,
+        offset: query.offset,
+      })}`,
+    ),
+
+  /**
+   * The per-niche hit lines behind one settled month.
+   *
+   * The month is in the path rather than the query string because it identifies
+   * the thing being read, and — the same rule again — it is the only thing this
+   * call can say. There is no parameter for whose month, here or on the server.
+   */
+  getMyEarningsHistoryBreakdown: (month: {
+    year: number;
+    month: number;
+  }): Promise<{ breakdown: MyEarningsHistoryBreakdownDTO }> =>
+    request(`/api/me/earnings/history/${month.year}/${month.month}`),
 
   // --- Admin: the directory ---
 
@@ -598,6 +886,40 @@ export const api = {
 
   rejectEmployee: (id: string): Promise<{ employee: EmployeeApprovalResult }> =>
     request(`/api/admin/employees/${id}/reject`, { method: "POST" }),
+
+  // --- Admin: the approvals queue ---
+  //
+  // The batch form of the two calls above, over the identical service
+  // functions. Both endpoints answer with a per-user result rather than a bare
+  // ok, and BOTH RESOLVE ON PARTIAL FAILURE — `failed > 0` inside a 200 is the
+  // normal shape when one id in the batch was already actioned by a colleague.
+  // A caller that only checks for a thrown ApiError will report five approvals
+  // as five approvals when four landed, so read `results`.
+
+  listPendingApprovals: (): Promise<{ approvals: PendingApprovalDTO[] }> =>
+    request("/api/admin/approvals"),
+
+  approveApprovals: (userIds: readonly string[]): Promise<BulkApprovalResult> =>
+    request("/api/admin/approvals/approve", {
+      method: "POST",
+      body: JSON.stringify({ userIds }),
+    }),
+
+  /**
+   * `reason` is optional and goes to the audit trail, not to the person.
+   *
+   * Omitted from the body entirely when it is absent, rather than sent as null:
+   * the server treats an empty reason as no reason, and a log entry recording
+   * `reason: ""` would read as "they gave one, and it was nothing".
+   */
+  denyApprovals: (
+    userIds: readonly string[],
+    reason?: string,
+  ): Promise<BulkApprovalResult> =>
+    request("/api/admin/approvals/deny", {
+      method: "POST",
+      body: JSON.stringify(reason ? { userIds, reason } : { userIds }),
+    }),
 
   // --- Admin: the audit trail ---
 
@@ -844,6 +1166,26 @@ export const api = {
     id: string,
   ): Promise<{ ok: boolean; revokedAtGoogle: boolean }> =>
     request(`/api/youtube/connections/${id}`, { method: "DELETE" }),
+
+  /**
+   * Read revenue now rather than waiting for the scheduler.
+   *
+   * The response is the run's own summary, so the screen can say what happened
+   * — how many months were written, how many figures YouTube revised, and which
+   * connections could not be read and why. A bare `{ ok: true }` would leave
+   * "nothing appeared" and "nothing was there" looking identical.
+   *
+   * Pass a `connectionId` to read that one account; omit it to read them all.
+   * The narrow form is what the per-connection button sends, so pressing it
+   * after fixing one channel does not spend an Analytics call on every other.
+   */
+  syncYouTubeRevenue: (
+    connectionId?: string | null,
+  ): Promise<{ ok: true } & RevenueSyncSummary> =>
+    request("/api/youtube/revenue/sync", {
+      method: "POST",
+      body: JSON.stringify({ connectionId: connectionId ?? null }),
+    }),
 
   // --- Auth ---
 

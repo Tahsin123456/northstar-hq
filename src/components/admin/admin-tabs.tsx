@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useOptionalSession } from "@/components/providers/session-provider";
+import { usePendingApprovals } from "@/hooks/use-employees";
 import type { Permission } from "@/lib/auth/permissions";
 import { cn } from "@/lib/utils";
 
@@ -31,10 +32,34 @@ interface AdminTab {
    * match would leave it lit on every other tab.
    */
   readonly exact?: boolean;
+  /**
+   * Carries the size of the approvals queue when there is one.
+   *
+   * A flag rather than a number on the tab, because the count is fetched — the
+   * table below is a static description of the section, and putting live data
+   * in it would mean rebuilding the array on every render.
+   */
+  readonly showsPendingCount?: boolean;
 }
 
 const ADMIN_TABS: readonly AdminTab[] = [
   { href: "/admin", label: "Overview", exact: true },
+  /*
+   * Approvals sits second, ahead of the screens it draws its rows from.
+   *
+   * The other tabs are places to look something up; this one is a queue with
+   * work in it, and the work is somebody who cannot sign in until an admin
+   * clicks. Ordering it after Users and Employees would put the one tab that
+   * expires — a person waiting — behind two that never do. It carries the count
+   * as a badge for the same reason: the queue is normally empty, and a tab that
+   * never changes is a tab nobody looks at.
+   */
+  {
+    href: "/admin/approvals",
+    label: "Approvals",
+    requires: "users.manage",
+    showsPendingCount: true,
+  },
   { href: "/admin/users", label: "Users", requires: "users.manage" },
   /*
    * Employees is `users.manage`, not `payroll.view`.
@@ -63,6 +88,16 @@ const ADMIN_TABS: readonly AdminTab[] = [
    * pages would be one more row of chrome than either page earns.
    */
   { href: "/admin/payroll", label: "Payroll", requires: "payroll.view" },
+  /*
+   * Niches is `settings.manage`, not `niches.manage`.
+   *
+   * The tab is not for organising the taxonomy — that is the main Niches page,
+   * and a Head of Shorts does it there with `niches.manage`. This one exists to
+   * set hit rate thresholds, which is organization-wide analysis configuration
+   * and carries the permission that guards it. Gating it on `niches.manage`
+   * would show it to somebody every control on it would refuse.
+   */
+  { href: "/admin/niches", label: "Niches", requires: "settings.manage" },
   { href: "/admin/audit", label: "Audit log", requires: "audit.view" },
   { href: "/admin/youtube", label: "YouTube", requires: "youtube.manage" },
 ];
@@ -76,6 +111,23 @@ export function AdminTabs() {
     [session],
   );
 
+  /*
+   * The badge count.
+   *
+   * Gated on the permission rather than on which tabs survived the filter,
+   * because this component renders for everybody in the admin section — an
+   * auditor, somebody with only the YouTube permission — and firing a
+   * `users.manage` request on their behalf would put a 403 in the console of
+   * every admin page they open, to decide whether to draw a badge they will
+   * never see.
+   *
+   * It shares a cache key with the queue itself, so the number here and the
+   * rows there are one request and cannot disagree.
+   */
+  const mayManageUsers = session?.can("users.manage") ?? false;
+  const { data: queue } = usePendingApprovals({ enabled: mayManageUsers });
+  const pendingCount = queue?.approvals.length ?? 0;
+
   return (
     // -mb-px pulls the 2px active underline over the container's hairline, so
     // the two read as one line rather than as a rule with a bar under it.
@@ -85,13 +137,15 @@ export function AdminTabs() {
           ? pathname === tab.href
           : pathname === tab.href || pathname.startsWith(`${tab.href}/`);
 
+        const badge = tab.showsPendingCount ? pendingCount : 0;
+
         return (
           <Link
             key={tab.href}
             href={tab.href}
             aria-current={isActive ? "page" : undefined}
             className={cn(
-              "whitespace-nowrap border-b-2 px-3 pb-2.5 pt-3 text-[13px] font-medium",
+              "inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 pb-2.5 pt-3 text-[13px] font-medium",
               "transition-colors duration-150",
               isActive
                 ? "border-accent text-foreground"
@@ -99,6 +153,24 @@ export function AdminTabs() {
             )}
           >
             {tab.label}
+            {badge > 0 ? (
+              <>
+                <span
+                  aria-hidden
+                  // `text-background` against `bg-warning` in both themes: the
+                  // warning token is a dark brown on light and an amber on
+                  // dark, and the page background is the one colour that
+                  // contrasts with both without a second variable.
+                  className="inline-flex min-w-[18px] items-center justify-center rounded-full bg-warning px-1.5 py-px text-[10px] font-semibold tabular-nums text-background"
+                >
+                  {badge}
+                </span>
+                {/* The words, not the pill: `aria-label` on a plain span with
+                    no role is unreliably announced, and "Approvals 3" gives a
+                    screen reader no way to tell a count from a name. */}
+                <span className="sr-only">{badge} waiting for approval</span>
+              </>
+            ) : null}
           </Link>
         );
       })}

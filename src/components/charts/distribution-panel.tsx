@@ -54,7 +54,12 @@ export function DistributionPanel({
 }: {
   shorts: readonly AnalyticsVideo[];
   range: DateRange;
-  threshold: number;
+  /**
+   * `null` when the niche in view has no configured threshold. The histogram
+   * itself is unaffected — where Shorts land is a fact about the Shorts — but
+   * no bucket is shaded as a hit zone, because there is no hit to zone.
+   */
+  threshold: number | null;
   channelId?: string;
   className?: string;
 }) {

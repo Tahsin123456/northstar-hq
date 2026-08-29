@@ -16,10 +16,12 @@ const collectionsSchema = z.object({
   collectionIds: z.array(z.string().min(1)).max(20),
 });
 
-/** PUT /api/saved/:videoId — replace the collections this Short belongs to. */
+/** PUT /api/saved/:videoId — replace the collections the caller's save belongs to. */
 export function PUT(request: Request, context: RouteContext) {
   return handleMutation(request, async () => {
-    // Re-filing a Short changes what the rest of the team sees on each board.
+    // Re-filing is a change to the caller's own board. `videoId` addresses it
+    // because that is what the client holds; the service resolves it against
+    // this person's save, so a colleague's filing is untouchable from here.
     await requirePermission("research.write");
 
     const { videoId } = await context.params;
@@ -31,7 +33,9 @@ export function PUT(request: Request, context: RouteContext) {
 
 export function DELETE(request: Request, context: RouteContext) {
   return handleMutation(request, async () => {
-    // Un-saving takes the Short off everyone's board, not just the caller's.
+    // Un-saving removes the caller's own save and nothing else. It used to
+    // take the Short off whoever's board it happened to be on, because the row
+    // was keyed on the video alone.
     await requirePermission("research.write");
 
     const { videoId } = await context.params;

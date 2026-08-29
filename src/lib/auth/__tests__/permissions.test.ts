@@ -104,6 +104,42 @@ describe("what each role may do", () => {
   });
 });
 
+/**
+ * Seeing your OWN pay is not a privilege, and seeing everybody's still is.
+ *
+ * The pair below is the whole point of splitting `earnings.view_own` out of
+ * `payroll.view`. Iterating ROLES rather than listing the roles by hand is what
+ * makes the first case survive a role being added later: a new definition that
+ * forgets `earnings.view_own` fails here rather than shipping an employee who
+ * cannot find out what they are owed.
+ */
+describe("earnings.view_own", () => {
+  it.each(ROLES)("is held by %s — everybody can see their own pay", (role) => {
+    expect(can({ role }, "earnings.view_own")).toBe(true);
+  });
+
+  it("does not carry payroll with it", () => {
+    for (const role of ROLES) {
+      if (role === "admin") continue;
+      expect(can({ role }, "earnings.view_own")).toBe(true);
+      // The line that must never blur: your own row, not the company's table.
+      expect(can({ role }, "payroll.view")).toBe(false);
+      expect(can({ role }, "payroll.manage")).toBe(false);
+    }
+  });
+
+  it("is not offered as an individual grant", () => {
+    // Every role already holds it, so a checkbox could only ever be a no-op —
+    // and grants are additive, so it could not be un-ticked either.
+    expect(GRANTABLE_PERMISSIONS).not.toContain("earnings.view_own");
+  });
+
+  it("cannot be widened into payroll by granting it", () => {
+    const employee = { role: "short_form_editor", grants: ["earnings.view_own"] };
+    expect(can(employee, "payroll.view")).toBe(false);
+  });
+});
+
 describe("individual grants", () => {
   it("widens a role without changing it", () => {
     const director = { role: "short_form_editor", grants: ["finance.view"] };
@@ -134,7 +170,12 @@ describe("individual grants", () => {
     // without limit. `payroll.manage` is everyone's salary. Both may only
     // arrive with the Admin role — a considered act, not a stray tick on a
     // checklist.
-    const notGrantable = ["users.manage", "payroll.manage"] as const;
+    //
+    // `earnings.view_own` is off the list for the opposite reason: every role
+    // already holds it, so a checkbox could only ever be a no-op. Grants are
+    // additive, so it could not be un-ticked either, and a control that cannot
+    // do what it appears to do is worse than no control.
+    const notGrantable = ["users.manage", "payroll.manage", "earnings.view_own"] as const;
 
     for (const permission of notGrantable) {
       expect(GRANTABLE_PERMISSIONS).not.toContain(permission);

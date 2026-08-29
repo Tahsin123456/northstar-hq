@@ -27,6 +27,7 @@ import type { DatasetChannelDTO, DatasetDTO, ExcludedVideoDTO } from "@/lib/dto"
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { getCurrentOrgId, getCurrentOrgSettings } from "./user-service";
 import { listNiches } from "./niche-service";
+import { listContentTypes } from "./content-type-service";
 import { getNoteCounts, listCollections, listSavedShorts } from "./research-service";
 
 const MS_PER_DAY = 86_400_000;
@@ -46,21 +47,40 @@ function snapshotsVisibleTo(organizationId: string): Prisma.VideoSnapshotWhereIn
   };
 }
 
-/** The exact columns the analytics engine and Shorts table consume. */
-const VIDEO_SELECT = {
-  id: true,
-  youtubeVideoId: true,
-  title: true,
-  publishedAt: true,
-  viewCount: true,
-  likeCount: true,
-  commentCount: true,
-  durationSeconds: true,
-  isShort: true,
-  classification: true,
-  classificationConfidence: true,
-  isAvailable: true,
-} as const;
+/**
+ * The exact columns the analytics engine and Shorts table consume.
+ *
+ * A FUNCTION, not a constant, and that is the whole point of it. Every scalar
+ * here belongs to the global, deduplicated `Video` row and is the same for
+ * everyone — but `contentTypes` is this organization's classification of that
+ * shared row, and `VideoContentType` carries `organizationId` for exactly that
+ * reason. Selecting the relation unfiltered would ship every team's labels for
+ * a Short to every other team tracking the same channel. Taking the scope as a
+ * parameter means the filter cannot be forgotten: there is no version of this
+ * select that compiles without one.
+ */
+function videoSelect(organizationId: string) {
+  return {
+    id: true,
+    youtubeVideoId: true,
+    title: true,
+    publishedAt: true,
+    viewCount: true,
+    likeCount: true,
+    commentCount: true,
+    durationSeconds: true,
+    isShort: true,
+    classification: true,
+    classificationConfidence: true,
+    isAvailable: true,
+    // Ids only. The catalogue travels once at the top of the payload; see the
+    // note on `VideoDTO.contentTypeIds`.
+    contentTypes: {
+      where: { organizationId },
+      select: { contentTypeId: true },
+    },
+  } as const;
+}
 
 export async function buildDataset(
   options: { lookbackDays?: number } = {},
@@ -80,8 +100,15 @@ export async function buildDataset(
   const lookbackDays = options.lookbackDays ?? orgSettings.lookbackDays;
   const since = new Date(Date.now() - lookbackDays * MS_PER_DAY);
 
-  const [tracked, niches, collections, savedShorts, noteCounts, viewsDefinition] =
-    await Promise.all([
+  const [
+    tracked,
+    niches,
+    contentTypes,
+    collections,
+    savedShorts,
+    noteCounts,
+    viewsDefinition,
+  ] = await Promise.all([
     // The team's tracker, not the caller's: two people in one organization must
     // open the dashboard on the same channels and the same numbers.
     prisma.trackedChannel.findMany({
@@ -92,11 +119,20 @@ export async function buildDataset(
       where: { organizationId, isActive: true, ...trackedChannelNicheFilter(visibleNiches) },
       include: {
         niches: { include: { niche: true } },
+        // The channel's own tags — "what this channel makes" — as ids into the
+        // catalogue shipped once below. A separate statement from what its
+        // Shorts were actually filed under, and the two are allowed to
+        // disagree; see `ChannelDTO.contentTypeIds`.
+        //
+        // No tenant filter here and none needed: `ChannelContentType` hangs off
+        // the `TrackedChannel` this query has already narrowed to one
+        // organization. The video side below is the opposite case.
+        contentTypes: { select: { contentTypeId: true } },
         channel: {
           include: {
             videos: {
               where: { publishedAt: { gte: since } },
-              select: VIDEO_SELECT,
+              select: videoSelect(organizationId),
               orderBy: { publishedAt: "desc" },
             },
           },
@@ -108,6 +144,26 @@ export async function buildDataset(
     // assignment menus all read from one payload. Niche filtering is then a
     // client-side predicate like every other filter — no refetch.
     listNiches(),
+    // THE catalogue — one flat, org-wide list, and the same read the
+    // management screen makes. There is nothing to group and nothing to
+    // narrow: any of these tags may go on any channel or Short, so the client
+    // resolves a `contentTypeIds` array and builds a picker's options from this
+    // one array.
+    //
+    // Archived types included. A Short filed under one keeps its label, so the
+    // catalogue has to be able to resolve every id the videos above carry —
+    // omitting them would render historical classifications as dangling ids.
+    // The client narrows to `isActive` when it offers a choice, not when it
+    // renders one already made.
+    listContentTypes({ includeInactive: true }),
+    // The three PERSONAL reads in an otherwise global payload. Everything
+    // above describes the operation and is the same for the whole team;
+    // collections, saves and note badges belong to one person, and each of
+    // these narrows to the caller inside its own `where` — see the ownership
+    // note at the top of research-service. They travel in this payload because
+    // the Saved page, the bookmark button and the note badges are all client
+    // derivations of it, and no API response here is cacheable (`no-store` in
+    // `src/server/http.ts`), so one person's rows cannot be served to another.
     listCollections(),
     listSavedShorts(),
     getNoteCounts(),
@@ -131,6 +187,7 @@ export async function buildDataset(
   return {
     channels,
     niches,
+    contentTypes,
     collections,
     savedShorts,
     noteCounts,

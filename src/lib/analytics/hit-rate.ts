@@ -24,16 +24,23 @@ export function calculateHitRate(
  * A Short is a hit when its *current* view count is greater than or equal to
  * the threshold. Inclusive on purpose: exactly 1,000,000 views counts as a
  * 1M hit; 999,999 does not.
+ *
+ * A `null` threshold is not a threshold of zero. It means the active niche has
+ * never had one configured, so nothing can be called a hit — the honest answer
+ * is false for every Short, and the caller renders "Not configured" rather than
+ * a rate.
  */
-export function isHit(views: number, threshold: number): boolean {
+export function isHit(views: number, threshold: number | null): boolean {
+  if (threshold === null) return false;
   return views >= threshold;
 }
 
 /** Counts Shorts at or above the threshold. Assumes pre-filtered Shorts. */
 export function countHits(
   shorts: readonly AnalyticsVideo[],
-  threshold: number,
+  threshold: number | null,
 ): number {
+  if (threshold === null) return 0;
   let count = 0;
   for (const short of shorts) {
     if (isHit(short.views, threshold)) count += 1;
@@ -44,12 +51,14 @@ export function countHits(
 /** Annotates each Short with its hit status and distance from the threshold. */
 export function evaluateShorts(
   shorts: readonly AnalyticsVideo[],
-  threshold: number,
+  threshold: number | null,
 ): EvaluatedShort[] {
-  const safeThreshold = threshold > 0 ? threshold : 1;
+  // No threshold, no ratio. `0` would sort every Short as an equal, maximal
+  // miss; `null` says there is nothing to be a ratio of.
+  const safeThreshold = threshold !== null && threshold > 0 ? threshold : null;
   return shorts.map((short) => ({
     ...short,
     isHit: isHit(short.views, threshold),
-    thresholdRatio: short.views / safeThreshold,
+    thresholdRatio: safeThreshold === null ? null : short.views / safeThreshold,
   }));
 }

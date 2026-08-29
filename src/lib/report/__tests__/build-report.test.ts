@@ -18,8 +18,8 @@ const NOW = Date.UTC(2026, 5, 1);
 
 /**
  * The factories build the analytics engine input shape; the dataset carries the
- * slightly wider wire shape. Adding the three classification fields here keeps
- * the fixtures honest rather than casting the difference away.
+ * slightly wider wire shape. Adding the classification and content-type fields
+ * here keeps the fixtures honest rather than casting the difference away.
  */
 function asVideoDTO(video: ReturnType<typeof makeShort>): VideoDTO {
   return {
@@ -27,6 +27,9 @@ function asVideoDTO(video: ReturnType<typeof makeShort>): VideoDTO {
     classification: video.isShort ? "short" : "not_short",
     classificationConfidence: 0.99,
     isAvailable: true,
+    // Unclassified. The report is built from view counts and hit thresholds and
+    // must not start depending on a label an organization may never apply.
+    contentTypeIds: [],
   };
 }
 const range = (days: number) => ({ startMs: NOW - days * DAY_MS, endMs: NOW });
@@ -61,6 +64,9 @@ function channel(
       isActive: true,
       ownershipType,
       niches: [{ id: "n1", name: "GTA", colorIndex: 0 }],
+      // No editorial tags on the channel — the report does not read them, and
+      // an empty list keeps that visible rather than implied.
+      contentTypeIds: [],
     },
     videos: [
       ...views.map((v, i) => asVideoDTO(makeShort({ views: v, publishedAt: daysAgo(i + 1, NOW) }))),
@@ -83,9 +89,14 @@ function dataset(channels: DatasetDTO["channels"]): DatasetDTO {
         hitThreshold: null,
         sortOrder: 0,
         channelCount: channels.length,
+        createdById: "u1",
+        createdByName: "Ada Lovelace",
         createdAt: NOW,
       },
     ],
+    // Empty on purpose: the report must produce identical numbers for an
+    // organization that has never defined a content type.
+    contentTypes: [],
     collections: [],
     savedShorts: [],
     noteCounts: { channels: {}, niches: {}, videos: {} },

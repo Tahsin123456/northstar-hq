@@ -28,7 +28,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { IfPermitted, useSession } from "@/components/providers/session-provider";
 import { useApproveEmployee, useEmployees, useRejectEmployee } from "@/hooks/use-employees";
 import { useNow } from "@/hooks/use-now";
-import { PERMISSION_LABELS } from "@/lib/auth/permissions";
+import { isNicheScoped, PERMISSION_LABELS } from "@/lib/auth/permissions";
 import { EM_DASH, formatDate, formatDateTime, formatRelativeTime, pluralize } from "@/lib/format";
 /**
  * `formatMoneyTrimmed`, not `formatMoney`, for every figure on this screen.
@@ -183,12 +183,18 @@ function EmployeesScreen({ organizationName }: { organizationName: string }) {
  * The rows carry the actual decision, but a pending account sorts wherever its
  * role and name put it — possibly below the fold on a large team. This says how
  * many are waiting without pretending to be the control that resolves them.
+ *
+ * IT NOW POINTS AT ADMIN › APPROVALS. That screen is the same decision over the
+ * same service calls, with the queue as its only content and bulk selection on
+ * top — which is what an admin with six people waiting actually wants. The
+ * per-row buttons below stay exactly as they are: somebody already looking at
+ * the roster should not have to go somewhere else to say yes to one person.
  */
 function PendingBanner({ count }: { count: number }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-lg border border-warning/30 bg-warning-subtle px-4 py-3">
-      <UserCheck className="mt-0.5 size-4 shrink-0 text-warning" />
-      <p className="text-[13px] leading-relaxed text-foreground">
+    <div className="flex flex-wrap items-center gap-2.5 rounded-lg border border-warning/30 bg-warning-subtle px-4 py-3">
+      <UserCheck className="size-4 shrink-0 text-warning" />
+      <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-foreground">
         <span className="font-medium">
           {count} {pluralize(count, "account")} waiting for approval.
         </span>{" "}
@@ -196,6 +202,9 @@ function PendingBanner({ count }: { count: number }) {
         in until an admin approves them. Approve or reject each one in the table
         below.
       </p>
+      <Button variant="secondary" size="sm" asChild>
+        <Link href="/admin/approvals">Open the queue</Link>
+      </Button>
     </div>
   );
 }
@@ -364,15 +373,7 @@ function EmployeeRow({ employee, now }: { employee: EmployeeListItemDTO; now: nu
       </td>
 
       <td className={CELL}>
-        {/* The same chip, with the same colour, that this niche wears on the
-            dashboard and in the channel table — `colorIndex` is carried all the
-            way from the row so nothing is re-derived per screen. */}
-        <NicheChips
-          niches={employee.assignedNiches}
-          limit={3}
-          size="sm"
-          emptyLabel="No niches"
-        />
+        <AssignedNiches employee={employee} />
       </td>
 
       <IfPermitted to="payroll.view">
@@ -391,6 +392,52 @@ function EmployeeRow({ employee, now }: { employee: EmployeeListItemDTO; now: nu
         {isPending ? <ApprovalActions employee={employee} label={label} /> : null}
       </td>
     </tr>
+  );
+}
+
+/**
+ * The niches column — and what an EMPTY one means, which is not one thing.
+ *
+ * "No niches" reads the same on every row and hides the only difference that
+ * matters. For a niche-scoped role it is a broken account: `resolveVisibleNicheIds`
+ * fails closed, so an editor with nothing assigned sees no channels at all —
+ * they sign in to an empty app, and until now nothing on this screen said so.
+ * For a role that is not niche-scoped it is ordinary: they are outside the
+ * mechanism and see everything regardless. What both share is payroll, which
+ * credits hits per assigned niche and therefore credits none.
+ *
+ * Same fact, opposite severity, so the tone follows the role rather than the
+ * emptiness. The role's own `nicheScoped` flag decides — this file compares no
+ * role strings of its own.
+ */
+function AssignedNiches({ employee }: { employee: EmployeeListItemDTO }) {
+  if (employee.assignedNiches.length > 0) {
+    // The same chip, with the same colour, that this niche wears on the
+    // dashboard and in the channel table — `colorIndex` is carried all the way
+    // from the row so nothing is re-derived per screen.
+    return <NicheChips niches={employee.assignedNiches} limit={3} size="sm" />;
+  }
+
+  const scoped = isNicheScoped(employee.role);
+
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 text-[11px]",
+        scoped ? "text-warning" : "text-subtle-foreground",
+      )}
+      // The long form as a title rather than a tooltip: this cell sits inside a
+      // row that navigates on click, and a focusable trigger on every row would
+      // put a tab stop between an admin and the person they are looking for.
+      title={
+        scoped
+          ? `${employee.roleLabel} only sees the niches assigned to them. With none assigned this account sees no channels at all, and can earn no hit bonus.`
+          : `${employee.roleLabel} sees every niche either way. Hit bonuses are paid per niche, so none can be credited until one is assigned.`
+      }
+    >
+      {scoped ? <ShieldAlert className="size-3 shrink-0" /> : null}
+      {scoped ? "None — sees nothing" : "None"}
+    </span>
   );
 }
 

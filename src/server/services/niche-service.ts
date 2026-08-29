@@ -11,15 +11,56 @@
  * niche, so every query here scopes on `organizationId`; `createdById` is
  * recorded for the byline only and is never used to decide who may see or edit
  * a niche.
+ *
+ * TWO PERMISSIONS, NOT ONE
+ * Creating and naming a niche is `niches.manage` — a Head of Shorts organises
+ * their own taxonomy and does not need an admin to do it. Setting its
+ * `hitThreshold` is `settings.manage`, and that split is deliberate: the
+ * threshold is not a property of the label, it is the definition of a hit for
+ * every chart, every report and the payroll run, which is precisely the
+ * organization-wide analysis configuration `settings.manage` already guards.
+ *
+ * The check lives in this file rather than only in the route because a service
+ * function is reachable from anywhere on the server — another service, a job, a
+ * future route somebody writes in a hurry. A rule enforced one layer up is a
+ * rule that holds only for the callers that happen to exist today.
  */
 
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
+import { requireActor } from "@/server/auth/dal";
 import { MAX_THRESHOLD, MIN_THRESHOLD } from "@/lib/analytics/constants";
 import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
+
+/**
+ * The columns needed to name a niche's author.
+ *
+ * Selected explicitly rather than including the whole user: an admin's list of
+ * niches has no business carrying password hashes across a service boundary,
+ * however carefully the DTO is written afterwards.
+ */
+const AUTHOR_SELECT = { select: { id: true, name: true, email: true } } as const;
+
+/**
+ * Refuses a threshold write from somebody who may organise niches but may not
+ * configure the organization's analysis.
+ *
+ * Called only when the caller actually sent the field. Omitting `hitThreshold`
+ * is not an attempt to set it, so an employee creating an ordinary niche never
+ * touches this path — but sending `hitThreshold: null` explicitly *is* a write
+ * (it clears the number), and is refused for the same reason setting one is.
+ */
+async function assertMayConfigureThreshold(): Promise<void> {
+  const actor = await requireActor();
+  if (!actor.permissions.has("settings.manage")) {
+    throw errors.forbidden(
+      "set a hit rate threshold. Hit rate thresholds are configured by an Admin",
+    );
+  }
+}
 
 /** How many accent colours the niche chips cycle through (`--chart-1..6`). */
 const NICHE_COLOR_COUNT = 6;
@@ -40,7 +81,11 @@ export const updateNicheSchema = z.object({
   name: nicheNameSchema.optional(),
   colorIndex: z.number().int().min(0).max(NICHE_COLOR_COUNT - 1).optional(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
-  /** `null` clears the override and returns the niche to the organization default. */
+  /**
+   * `null` clears the threshold, leaving the niche unconfigured — which is now
+   * a visible state ("Hit rate threshold: Not configured"), not a quiet fall
+   * back to the organization default.
+   */
   hitThreshold: z
     .number()
     .int()
@@ -71,6 +116,11 @@ export async function listNiches(): Promise<NicheDTO[]> {
     where: { organizationId },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     include: {
+      // The byline. An admin looking at a niche that still needs a threshold
+      // has to know whose niche it is before they can ask what the number
+      // should be — "Needs hit rate configuration" with no name attached is a
+      // task with nobody to talk to.
+      createdBy: AUTHOR_SELECT,
       _count: {
         // Only count channels still in the tracker — a niche should not claim
         // channels the team has removed.
@@ -79,7 +129,9 @@ export async function listNiches(): Promise<NicheDTO[]> {
     },
   });
 
-  return niches.map((niche) => toNicheDTO(niche, niche._count.channels));
+  return niches.map((niche) =>
+    toNicheDTO(niche, niche._count.channels, niche.createdBy),
+  );
 }
 
 export async function createNiche(input: {
@@ -87,6 +139,17 @@ export async function createNiche(input: {
   colorIndex?: number;
   hitThreshold?: number | null;
 }): Promise<NicheDTO> {
+  // The threshold check comes before anything is read or written. An employee's
+  // create request that carries a threshold is REFUSED, not quietly stripped:
+  // silently dropping it would create the niche and tell them nothing, and they
+  // would go on believing they had set a number that does not exist.
+  //
+  // `in` rather than `!== undefined` so an explicit `hitThreshold: null` is
+  // caught too — clearing a threshold is a threshold write.
+  if ("hitThreshold" in input && input.hitThreshold !== undefined) {
+    await assertMayConfigureThreshold();
+  }
+
   // Both halves of the scope: the organization decides where the row lives and
   // what it collides with, the user is recorded only as its author.
   const { organizationId, userId } = await getScope();
@@ -115,12 +178,16 @@ export async function createNiche(input: {
       // Cycle the accent so consecutively created niches are visually distinct
       // without the user having to pick a colour.
       colorIndex: input.colorIndex ?? count % NICHE_COLOR_COUNT,
+      // Null when an employee created it, and null is a real state now: the
+      // niche exists, works as a filter, and reports no hit rate until an admin
+      // says what a hit is.
       hitThreshold: input.hitThreshold ?? null,
       sortOrder: count,
     },
+    include: { createdBy: AUTHOR_SELECT },
   });
 
-  return toNicheDTO(niche, 0);
+  return toNicheDTO(niche, 0, niche.createdBy);
 }
 
 export async function updateNiche(
@@ -132,6 +199,14 @@ export async function updateNiche(
     hitThreshold?: number | null;
   },
 ): Promise<NicheDTO> {
+  // Same rule as on create, and checked before the row is even looked up: a
+  // rename is `niches.manage`, a threshold is `settings.manage`. Somebody who
+  // may do the first and not the second gets a 403 rather than a niche that
+  // silently kept its old number.
+  if ("hitThreshold" in update && update.hitThreshold !== undefined) {
+    await assertMayConfigureThreshold();
+  }
+
   const organizationId = await getCurrentOrgId();
 
   // Scoped by organization, not by author: any teammate may rename or recolour
@@ -171,11 +246,12 @@ export async function updateNiche(
     where: { id: niche.id },
     data,
     include: {
+      createdBy: AUTHOR_SELECT,
       _count: { select: { channels: { where: { trackedChannel: { isActive: true } } } } },
     },
   });
 
-  return toNicheDTO(updated, updated._count.channels);
+  return toNicheDTO(updated, updated._count.channels, updated.createdBy);
 }
 
 /**
@@ -196,6 +272,23 @@ export async function deleteNiche(nicheId: string): Promise<{ unassignedChannels
     include: { _count: { select: { channels: true } } },
   });
   if (!niche) throw errors.notFound("niche");
+
+  /*
+   * THERE IS NO CONTENT-TYPE GUARD ANY MORE, and its absence is the correct
+   * outcome rather than an oversight.
+   *
+   * It existed for one round, when a niche OWNED its content types and
+   * `ContentType.nicheId` cascaded — deleting a niche would have taken its
+   * whole vocabulary with it, and every classification hanging off that
+   * vocabulary with it, silently destroying human judgements about individual
+   * Shorts that are recorded nowhere else.
+   *
+   * Content types are flat org-wide tags again. They belong to the
+   * organization, not to any niche, so nothing about them cascades from here
+   * and deleting a niche cannot reach a single classification. What is left is
+   * what a niche delete always was: every channel filed under it becomes
+   * unassigned, and no channel, video or snapshot is touched.
+   */
 
   await prisma.niche.delete({ where: { id: niche.id } });
 

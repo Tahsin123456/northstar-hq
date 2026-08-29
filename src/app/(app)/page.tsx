@@ -14,12 +14,16 @@ import { ApiKeyNotice, ErrorState } from "@/components/common/error-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import {
+  untaggedChannelCount,
+  useContentTypePerformance,
   usePortfolioSummary,
   useChannelRows,
   useScopedRows,
   useVisibleRows,
 } from "@/hooks/use-channel-analytics";
+import { ContentTypePerformanceTable } from "@/components/dashboard/content-type-performance-table";
 import {
+  ContentTypeFilterControl,
   NicheFilterControl,
   OwnershipFilterControl,
   ScopeSummary,
@@ -29,7 +33,12 @@ import { useFilters } from "@/components/providers/filters-provider";
 import { DEFAULT_SORT, type SortState } from "@/lib/sorting";
 import { previousRange } from "@/lib/analytics/trends";
 import { GenerateReportDialog } from "@/components/report/generate-report-dialog";
-import { HIT_RATE_DEFINITION } from "@/lib/analytics/constants";
+import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
+import { SetNicheThresholdButton } from "@/components/niches/niche-threshold-dialog";
+import {
+  HIT_RATE_DEFINITION,
+  UNCONFIGURED_THRESHOLD_LABEL,
+} from "@/lib/analytics/constants";
 import { formatCompactNumber } from "@/lib/format";
 import { BRAND } from "@/lib/brand";
 
@@ -42,7 +51,17 @@ import { BRAND } from "@/lib/brand";
  */
 export default function OverviewPage() {
   const { data, isLoading, error, refetch, isFetching } = useDataset();
-  const { threshold, niche, ownership, ownFirst, clearScopeFilters, range } = useFilters();
+  const {
+    threshold,
+    nicheId,
+    nicheName,
+    niche,
+    contentType,
+    ownership,
+    ownFirst,
+    clearScopeFilters,
+    range,
+  } = useFilters();
 
   const [query, setQuery] = React.useState("");
   const [sort, setSort] = React.useState<SortState>(DEFAULT_SORT);
@@ -52,17 +71,65 @@ export default function OverviewPage() {
   // Scope first, then search and sort. The summary cards read the *scoped* set,
   // not the global one, so "GTA + Our Channels" reports the average hit rate of
   // those channels rather than of everything being tracked.
-  const scopedRows = useScopedRows(rows, niche, ownership);
-  const visibleRows = useVisibleRows(rows, query, sort, niche, ownership, ownFirst);
+  const scopedRows = useScopedRows(rows, niche, ownership, contentType);
+  // Everything the niche and ownership filters allow, BEFORE the content-type
+  // predicate. This is the set the Type menu describes: its "Unstated" count
+  // has to agree with what selecting it would show, and a count taken over the
+  // whole tracker would offer a number from outside the current niche.
+  const nicheScopedRows = useScopedRows(rows, niche, ownership);
+  const visibleRows = useVisibleRows(
+    rows,
+    query,
+    sort,
+    niche,
+    ownership,
+    ownFirst,
+    contentType,
+  );
   const summary = usePortfolioSummary(scopedRows);
   // The same portfolio metrics over the immediately preceding window, so every
   // KPI can show movement rather than a bare number.
   const previousSummary = usePortfolioSummary(scopedRows, previousRange(range));
 
   const niches = data?.niches ?? [];
+  const contentTypes = data?.contentTypes ?? [];
+
+  // The niche an Admin would configure from the banner below. Only a *selected*
+  // niche can be unconfigured, so it is found by id rather than inferred.
+  // Keyed off `data` rather than the `niches` fallback array, whose identity
+  // changes on every render and would defeat the memo.
+  const unconfiguredNiche = React.useMemo(
+    () =>
+      threshold === null && nicheId
+        ? (data?.niches.find((n) => n.id === nicheId && n.hitThreshold === null) ?? null)
+        : null,
+    [data, nicheId, threshold],
+  );
+
   const unassignedCount = React.useMemo(
     () => rows.filter((row) => row.channel.niches.length === 0).length,
     [rows],
+  );
+  const untypedCount = React.useMemo(
+    () => untaggedChannelCount(nicheScopedRows),
+    [nicheScopedRows],
+  );
+
+  /*
+   * "Performance by content type", over the NICHE-AND-OWNERSHIP scope — not the
+   * content-type-filtered one.
+   *
+   * Deliberate, and the only place on this page where a table ignores a filter.
+   * Selecting "Rankings" narrows the channel list to channels that make
+   * rankings, which is what that control is for; feeding the same selection into
+   * this table would collapse it to a single row and destroy the comparison it
+   * exists to make. The table's whole job is to rank the types against each
+   * other, so it reads the scope the comparison is *within* — niche, ownership,
+   * period, threshold — and not the selection made among its own rows.
+   */
+  const contentTypePerformance = useContentTypePerformance(
+    nicheScopedRows,
+    contentTypes,
   );
   const ownCount = React.useMemo(
     () => rows.filter((row) => row.channel.ownershipType === "own").length,
@@ -78,9 +145,13 @@ export default function OverviewPage() {
       <PageHeader
         title="Overview"
         description={
-          hasChannels
-            ? `Out of every 100 Shorts these channels publish, how many pass ${formatCompactNumber(threshold)} views?`
-            : "Track the Shorts channels you care about."
+          !hasChannels
+            ? "Track the Shorts channels you care about."
+            : threshold === null
+              ? // The page's headline question needs a number to be a question.
+                // Without one it states the situation instead of pretending to ask.
+                `${UNCONFIGURED_THRESHOLD_LABEL} for ${nicheName ?? "this niche"}, so no hit rate is shown below.`
+              : `Out of every 100 Shorts these channels publish, how many pass ${formatCompactNumber(threshold)} views?`
         }
         actions={
           <>
@@ -110,13 +181,17 @@ export default function OverviewPage() {
         <>
           {/*
             The product's mental model, left to right:
-              niche → channels → period → threshold → answer.
-            All four are the same weight and the same interaction, so adding
-            two of them did not add a second layer of UI.
+              niche → type → channels → period → threshold → answer.
+            All five are the same weight and the same interaction, so adding
+            to them did not add a second layer of UI.
           */}
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-wrap items-center gap-2">
               <NicheFilterControl niches={niches} unassignedCount={unassignedCount} />
+              <ContentTypeFilterControl
+                contentTypes={contentTypes}
+                unassignedCount={untypedCount}
+              />
               <OwnershipFilterControl
                 ownCount={ownCount}
                 competitorCount={rows.length - ownCount}
@@ -136,11 +211,48 @@ export default function OverviewPage() {
             </div>
           </div>
 
+          {/* The banner sits above the numbers rather than beside one of them:
+              hit rate is the column the whole table is ranked by, so an
+              unconfigured niche changes how the entire screen should be read,
+              not just one cell. */}
+          {threshold === null ? (
+            <ThresholdNotConfiguredNotice
+              nicheName={nicheName}
+              action={
+                unconfiguredNiche ? (
+                  <SetNicheThresholdButton niche={unconfiguredNiche} />
+                ) : null
+              }
+            />
+          ) : null}
+
           <SummaryCards
             summary={summary}
             previousSummary={previousSummary}
             loading={isLoading}
+            thresholdConfigured={threshold !== null}
           />
+
+          {/*
+            HERE, AND ONLY HERE.
+
+            "What kind of content is working?" is a portfolio question, and the
+            Overview is the one screen that already holds every channel's Shorts
+            alongside the active period, threshold and scope — so this is the
+            only place the table can be built without a second data path or a
+            second definition of a hit. A copy on the niche page would answer a
+            narrower question with the same title, and a copy on a channel page
+            would rank formats over a sample of one channel; both would be a
+            second number that could disagree with this one.
+
+            It sits between the portfolio KPIs and the channel ranking on
+            purpose: the cards say how the operation did, this says what kind of
+            work did it, and the table below says who. Same order as the
+            question a person actually asks.
+          */}
+          {!isLoading && contentTypes.length > 0 ? (
+            <ContentTypePerformanceTable performance={contentTypePerformance} />
+          ) : null}
 
           {!isLoading && scopeIsEmpty ? (
             <div className="rounded-lg border border-border bg-surface">

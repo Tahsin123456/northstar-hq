@@ -8,6 +8,10 @@ import { pruneDeadSessions } from "@/server/auth/session";
 import { pruneRateLimits } from "@/server/auth/rate-limit";
 import { syncChannel, type SyncOptions, type SyncResult } from "./channel-sync";
 import { getOrgSettings } from "./user-service";
+import {
+  syncRevenueForOrganization,
+  type RevenueSyncSummary,
+} from "./youtube-revenue-service";
 
 /**
  * Scheduled synchronisation — refreshing the data without a human present.
@@ -113,6 +117,16 @@ export interface ScheduledSyncSummary {
    */
   readonly autoRefreshEnabled: boolean;
   readonly housekeeping: HousekeepingResult;
+  /**
+   * What the revenue step did, or null when the run never got as far as it.
+   *
+   * Revenue rides on this schedule rather than on a cron of its own. A second
+   * scheduled endpoint would be a second thing to configure at deploy, a second
+   * thing to forget, and a second place for "when did this last run?" to be
+   * answered differently — for a job whose upstream cost is one API call per
+   * connected account.
+   */
+  readonly revenue: RevenueSyncSummary | null;
   readonly errors: readonly ScheduledSyncError[];
 }
 
@@ -121,6 +135,9 @@ export interface AllOrganizationsSyncSummary {
   readonly channelsSynced: number;
   readonly failed: number;
   readonly quotaUnitsUsed: number;
+  /** Monthly ledger entries the revenue step wrote or corrected across every org. */
+  readonly revenueEntriesCreated: number;
+  readonly revenueEntriesRevised: number;
   readonly durationMs: number;
   readonly summaries: readonly ScheduledSyncSummary[];
 }
@@ -297,7 +314,7 @@ export async function runScheduledSync(
   // `false` with nothing synced means opted out; `true` with
   // `channelsConsidered: 0` means everything was already fresh; `false` with
   // channels synced means an operator forced a catch-up.
-  const emptySummary = (): ScheduledSyncSummary => ({
+  const emptySummary = (revenue: RevenueSyncSummary | null = null): ScheduledSyncSummary => ({
     organizationId,
     trigger,
     channelsConsidered: 0,
@@ -309,6 +326,7 @@ export async function runScheduledSync(
     stoppedEarly: null,
     autoRefreshEnabled: settings.autoRefreshEnabled,
     housekeeping,
+    revenue,
     errors: [],
   });
 
@@ -321,8 +339,27 @@ export async function runScheduledSync(
   // describing work that never happened.
   if (!maySync) return emptySummary();
 
+  /**
+   * Revenue first, and independently of whether any channel is due.
+   *
+   * Channel staleness and revenue freshness are different questions. A tracker
+   * whose channels were all refreshed twenty minutes ago still has a month of
+   * revenue that YouTube has since revised, and gating the import on the
+   * channel sweep would mean a busy tracker imported revenue every run and a
+   * quiet one never imported it at all.
+   *
+   * It is inside the `maySync` gate, though. "Automatic background refresh" is
+   * the organization's consent to let this app talk to Google unattended, and
+   * that consent does not become narrower because the traffic is worth money.
+   *
+   * Failures are contained: the revenue step reports errors in its own summary
+   * rather than throwing, so an expired Google grant cannot stop the channel
+   * sweep that has nothing to do with it.
+   */
+  const revenue = await runRevenueStep(organizationId, trigger, options.request ?? null);
+
   const due = await findDueChannels(organizationId, settings.refreshIntervalMinutes);
-  if (due.length === 0) return emptySummary();
+  if (due.length === 0) return emptySummary(revenue);
 
   const maxChannels = Math.max(1, options.maxChannels ?? env.syncMaxChannelsPerRun);
   const batch = due.slice(0, maxChannels);
@@ -427,11 +464,48 @@ export async function runScheduledSync(
     stoppedEarly,
     autoRefreshEnabled: settings.autoRefreshEnabled,
     housekeeping,
+    revenue,
     errors,
   };
 
   await recordRunFailureIfAny(summary, options.request ?? null);
   return summary;
+}
+
+/**
+ * The revenue import, wrapped so it can never end the channel sweep.
+ *
+ * `syncRevenueForOrganization` already contains one connection's failure and
+ * reports it. This catches the structural case it cannot — the database going
+ * away mid-step — and turns it into a summary the caller can report, because a
+ * revenue problem taking the whole scheduled run down with it would stop the
+ * channel data that has nothing to do with Google's billing.
+ */
+async function runRevenueStep(
+  organizationId: string,
+  trigger: ScheduledSyncTrigger,
+  request: Request | null,
+): Promise<RevenueSyncSummary> {
+  try {
+    return await syncRevenueForOrganization(organizationId, { trigger, request });
+  } catch (caught) {
+    const appError = toAppError(caught);
+    console.error(
+      `[sync] revenue step failed for organization ${organizationId}: ${appError.code} — ${appError.message}`,
+    );
+    return {
+      organizationId,
+      connectionsConsidered: 0,
+      connectionsSynced: 0,
+      connectionsSkipped: 0,
+      failed: 1,
+      daysWritten: 0,
+      daysRevised: 0,
+      entriesCreated: 0,
+      entriesRevised: 0,
+      errors: [{ connectionId: null, label: "Revenue sync", message: appError.userMessage }],
+    };
+  }
 }
 
 /**
@@ -555,6 +629,14 @@ export async function runScheduledSyncForAllOrganizations(
     channelsSynced: summaries.reduce((total, s) => total + s.channelsSynced, 0),
     failed: summaries.reduce((total, s) => total + s.failed, 0),
     quotaUnitsUsed: summaries.reduce((total, s) => total + s.quotaUnitsUsed, 0),
+    revenueEntriesCreated: summaries.reduce(
+      (total, s) => total + (s.revenue?.entriesCreated ?? 0),
+      0,
+    ),
+    revenueEntriesRevised: summaries.reduce(
+      (total, s) => total + (s.revenue?.entriesRevised ?? 0),
+      0,
+    ),
     durationMs: Date.now() - startedAt,
     summaries,
   };

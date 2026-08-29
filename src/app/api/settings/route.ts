@@ -1,54 +1,44 @@
 import { requirePermission } from "@/server/auth/dal";
 import { handle, handleMutation, readJson } from "@/server/http";
-import { errors } from "@/server/errors";
 import {
-  getRuntimeConfig,
-  getSettings,
-  hasFields,
-  settingsUpdateSchema,
-  splitSettingsUpdate,
-  updateSettings,
+  getMySettings,
+  parsePersonalSettingsUpdate,
+  updateMySettings,
 } from "@/server/services/settings-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** GET /api/settings — user preferences plus read-only server configuration. */
+/**
+ * /api/settings — the signed-in person's own settings.
+ *
+ * PERSONAL ONLY. This endpoint used to carry every field on
+ * OrganizationSettings in both directions, with the authorization split done
+ * here in the handler. Organization configuration now lives at
+ * /api/settings/organization behind `settings.manage`, and the split is
+ * enforced in the service rather than in this file — so an employee posting
+ * directly to either URL meets the same check the UI does.
+ *
+ * The payload still includes the organization's default threshold and default
+ * period, read-only. They are the numbers every chart is drawn with, and the
+ * authenticated layout already hands both to the browser; see the note at the
+ * top of settings-service.ts.
+ */
 export function GET() {
   return handle(async () => {
-    // These are the defaults every chart and table is drawn with, so reading
-    // them is part of reading the numbers rather than a separate privilege.
     await requirePermission("analytics.view");
-
-    const [settings, config] = await Promise.all([getSettings(), getRuntimeConfig()]);
-    return { settings, config };
+    return { settings: await getMySettings() };
   });
 }
 
-/** PATCH /api/settings */
+/** PATCH /api/settings — your own display preferences. */
 export function PATCH(request: Request) {
   return handleMutation(request, async () => {
-    // The floor. Sort key and direction are stored per user and cannot change a
-    // number anybody else sees, so any member may edit their own.
     await requirePermission("analytics.view");
 
-    const parsed = settingsUpdateSchema.safeParse(await readJson(request));
-    if (!parsed.success) {
-      throw errors.invalidInput(
-        parsed.error.issues[0]?.message ?? "Those settings are not valid.",
-      );
-    }
-
-    // Everything else — thresholds, cadences, lookback, the probe switch — is
-    // one row for the whole organization, so changing any of it silently
-    // rewrites what every colleague sees. Split with the same helper the write
-    // uses, so the gate cannot disagree with which table gets touched.
-    const { team } = splitSettingsUpdate(parsed.data);
-    if (hasFields(team)) {
-      await requirePermission("settings.manage");
-    }
-
-    const settings = await updateSettings(parsed.data);
-    return { settings };
+    // The schema is strict and has no organization keys, so a patch aimed at a
+    // team-wide setting is rejected here rather than partially applied.
+    const update = parsePersonalSettingsUpdate(await readJson(request));
+    return { settings: await updateMySettings(update) };
   });
 }

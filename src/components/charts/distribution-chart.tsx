@@ -13,6 +13,7 @@ import {
   YAxis,
 } from "recharts";
 import type { ViewDistributionBin } from "@/lib/analytics/types";
+import { UNCONFIGURED_THRESHOLD_LABEL } from "@/lib/analytics/constants";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import {
   AXIS_TICK,
@@ -52,7 +53,8 @@ export function DistributionChart({
   className,
 }: {
   bins: readonly ViewDistributionBin[];
-  threshold: number;
+  /** `null` when the niche in view has no configured threshold. */
+  threshold: number | null;
   /** Optional second series, e.g. the same window 30 days ago. */
   comparisonBins?: readonly ViewDistributionBin[] | null;
   comparisonLabel?: string;
@@ -225,6 +227,13 @@ export function DistributionChart({
             <>
               Shown as a share of each period&rsquo;s own output, so the shapes are
               comparable even when the volumes are not.
+            </>
+          ) : threshold === null ? (
+            /* The shape is real and worth reading; the verdict is what is
+               missing. Naming a threshold here would invent one. */
+            <>
+              {UNCONFIGURED_THRESHOLD_LABEL}, so no bucket is marked as a hit zone.
+              The distribution itself is unaffected.
             </>
           ) : anyHitBucket ? (
             <>Buckets at or above {formatCompactNumber(threshold)} views count as hits.</>

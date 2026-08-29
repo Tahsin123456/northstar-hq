@@ -12,6 +12,8 @@ import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { NicheChips } from "@/components/niches/niche-chip";
+import { ContentTypeChips } from "@/components/content-types/content-type-chip";
+import { useContentTypesByIds } from "@/hooks/use-content-types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ChannelRowMenu } from "@/components/channels/channel-row-menu";
@@ -21,6 +23,10 @@ export function ChannelHeader({ channel }: { channel: ChannelDTO }) {
 
   // Keeps "views checked 3 minutes ago" honest, from the shared clock store.
   const now = useNow();
+
+  // Joined from the catalogue that already travelled with the dataset, so a
+  // rename shows up here without this component knowing anything about it.
+  const contentTypes = useContentTypesByIds(channel.contentTypeIds);
 
   const handleRefresh = () => {
     refresh.mutate(channel.id, {
@@ -72,8 +78,20 @@ export function ChannelHeader({ channel }: { channel: ChannelDTO }) {
               </Badge>
               {/* Niches sit next to the identity rather than in a metadata row:
                   "which niche is this?" is part of knowing what you're looking
-                  at, not a detail to hunt for. */}
+                  at, not a detail to hunt for.
+
+                  Content types sit beside them, and the two are different
+                  claims: the niche is which slice of the operation owns this
+                  channel, the content types are what the team says it makes.
+                  They are told apart by the chip itself — a content type's dot
+                  is squared where a niche's is round — which is why both can
+                  share a line without reading as one list.
+
+                  Read-only here. Editing lives in the block further down the
+                  page, where a whole set is committed at once; a header is for
+                  knowing what you are looking at. */}
               <NicheChips niches={channel.niches} limit={3} size="md" />
+              <ContentTypeChips contentTypes={contentTypes} limit={3} size="md" />
             </div>
 
             {channel.label ? (

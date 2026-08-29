@@ -78,6 +78,44 @@ export interface FinanceEntryDTO extends FinanceAnalyticsEntry {
   readonly createdByName: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /**
+   * Where this row came from: "manual" | "youtube".
+   *
+   * An imported figure and a typed one are not the same kind of fact. The
+   * screen has to be able to say which, because they answer "who put this
+   * number here" differently and because only one of them can have its amount
+   * edited — the other is rewritten by its connector on every sync.
+   */
+  readonly source: string;
+  /**
+   * True when the source may still revise the figure.
+   *
+   * YouTube's revenue metrics are explicitly subject to month-end adjustment,
+   * so presenting one as settled cash would be wrong. Labelled rather than
+   * hidden: the distinction between an estimate and a receipt is the reader's
+   * to make, not ours to erase.
+   */
+  readonly isEstimated: boolean;
+  /**
+   * True when the source has STOPPED maintaining the figure.
+   *
+   * The third state, and not a shade of either of the other two. `isEstimated`
+   * says "the source may still revise this"; a settled row says "this is final".
+   * A month whose daily figures the connector will no longer total is neither:
+   * the amount is the last one it could stand behind, no revision is coming, and
+   * it was never settled cash. A screen that had only the first two to choose
+   * from would have to assert one of them, and both are false.
+   *
+   * Derived on the server from the connector's mark rather than stored, because
+   * there is no column for it (see `./unmaintained`). It is the screens' single
+   * source for this state — nothing in the browser reads the note itself.
+   */
+  readonly isUnmaintained: boolean;
+  /** What the amount was before the last revision, or null if it never moved. */
+  readonly previousAmountMinor: number | null;
+  /** How many times an import has changed this figure. */
+  readonly revisionCount: number;
+  readonly lastImportedAt: number | null;
 }
 
 export interface FinanceCategoryDTO {

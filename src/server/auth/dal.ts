@@ -231,6 +231,11 @@ function describePermission(permission: Permission): string {
     case "finance.view":
     case "finance.manage":
       return "access financial data";
+    case "payroll.view":
+    case "payroll.manage":
+      return "access payroll";
+    case "earnings.view_own":
+      return "see your earnings";
     case "users.manage":
       return "manage users";
     case "audit.view":

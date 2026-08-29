@@ -13,7 +13,10 @@ import {
   youtubeWatchUrl,
 } from "@/lib/format";
 import { nextSortState, type SortKey, type SortState } from "@/lib/sorting";
-import { PERIOD_PRESET_BY_ID } from "@/lib/analytics/constants";
+import {
+  PERIOD_PRESET_BY_ID,
+  UNCONFIGURED_THRESHOLD_SHORT,
+} from "@/lib/analytics/constants";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -111,13 +114,28 @@ export function ChannelTable({
                   extra={
                     column.key === "hitRate" ? (
                       <span className="ml-1 inline-flex items-center gap-1">
-                        <Badge
-                          variant="outline"
-                          size="sm"
-                          className="tnum normal-case tracking-normal"
-                        >
-                          ≥ {formatCompactNumber(threshold)}
-                        </Badge>
+                        {/* The column header states the number every cell below
+                            it was judged against. With no threshold configured
+                            there is no such number, and printing the account
+                            default here would label a column of "Not
+                            configured" cells with a figure. */}
+                        {threshold === null ? (
+                          <Badge
+                            variant="near"
+                            size="sm"
+                            className="normal-case tracking-normal"
+                          >
+                            {UNCONFIGURED_THRESHOLD_SHORT}
+                          </Badge>
+                        ) : (
+                          <Badge
+                            variant="outline"
+                            size="sm"
+                            className="tnum normal-case tracking-normal"
+                          >
+                            ≥ {formatCompactNumber(threshold)}
+                          </Badge>
+                        )}
                         <Badge variant="outline" size="sm" className="normal-case tracking-normal">
                           {periodLabel}
                         </Badge>

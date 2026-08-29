@@ -6,6 +6,8 @@ import {
   HIT_RATE_DEFINITION,
   TOTAL_VIEWS_DEFINITION,
   TOTAL_VIEWS_VS_STUDIO,
+  UNCONFIGURED_THRESHOLD_EXPLANATION,
+  UNCONFIGURED_THRESHOLD_SHORT,
 } from "@/lib/analytics/constants";
 import type { PortfolioSummary } from "@/lib/analytics";
 import { calculateTrend } from "@/lib/analytics/trends";
@@ -31,10 +33,20 @@ export function SummaryCards({
   summary,
   previousSummary,
   loading,
+  thresholdConfigured = true,
 }: {
   summary: PortfolioSummary;
   previousSummary?: PortfolioSummary;
   loading?: boolean;
+  /**
+   * False when the selected niche has no hit threshold.
+   *
+   * The hit-rate tile then reads "Not configured" instead of an em dash. Both
+   * are absences, but they are different ones: the dash on this strip means "no
+   * Shorts in this period", and reusing it here would answer a question about
+   * configuration with a statement about output.
+   */
+  thresholdConfigured?: boolean;
 }) {
   const trends = React.useMemo(() => {
     const prev = previousSummary;
@@ -118,15 +130,29 @@ export function SummaryCards({
         <Stat
           label="Average hit rate"
           emphasis="strong"
-          value={formatPercent(summary.averageHitRate)}
+          value={
+            thresholdConfigured
+              ? formatPercent(summary.averageHitRate)
+              : UNCONFIGURED_THRESHOLD_SHORT
+          }
           hint={
             <InfoTip>
-              The mean of each channel&rsquo;s own hit rate, counting only
-              channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}
+              {thresholdConfigured ? (
+                <>
+                  The mean of each channel&rsquo;s own hit rate, counting only
+                  channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}
+                </>
+              ) : (
+                UNCONFIGURED_THRESHOLD_EXPLANATION
+              )}
             </InfoTip>
           }
           caption={
-            previousSummary ? (
+            // No trend either. A movement indicator against a metric that does
+            // not exist would be two fabrications rather than one.
+            !thresholdConfigured ? (
+              "No threshold set for this niche"
+            ) : previousSummary ? (
               <TrendIndicator trend={trends.hitRate} valueFormat="percent" />
             ) : summary.pooledHitRate !== null ? (
               `${formatNumber(summary.totalHits)} hits · ${formatPercent(summary.pooledHitRate)} pooled`
@@ -154,9 +180,14 @@ export function SummaryCards({
             )
           }
           caption={
-            summary.topChannel
-              ? `${formatPercent(summary.topChannel.hitRate)} hit rate`
-              : "No channel has Shorts this period"
+            // "Top channel" is ranked *by* hit rate, so with no threshold there
+            // is no ranking and `topChannel` is already null — this caption just
+            // has to say why, rather than blaming an empty period.
+            !thresholdConfigured
+              ? "Ranked by hit rate, which needs a threshold"
+              : summary.topChannel
+                ? `${formatPercent(summary.topChannel.hitRate)} hit rate`
+                : "No channel has Shorts this period"
           }
         />
       </div>

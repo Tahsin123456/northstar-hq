@@ -70,7 +70,7 @@ const MS_PER_WEEK = 604_800_000;
 function poolFor(
   channels: readonly { videos: readonly AnalyticsVideo[] }[],
   range: DateRange,
-  threshold: number,
+  threshold: number | null,
 ): MarketPool {
   // Flatten first, then measure once. The pooled set is the unit of comparison.
   const allVideos = channels.flatMap((c) => [...c.videos]);
@@ -110,8 +110,12 @@ function absDelta(ours: number | null, market: number | null): number | null {
 function growth(
   shorts: readonly AnalyticsVideo[],
   range: DateRange,
-  threshold: number,
+  threshold: number | null,
 ): number | null {
+  // Growth *of the hit rate*, so with no configured threshold there is nothing
+  // to have grown. Every other metric on the comparison survives; this one does
+  // not exist rather than reading as flat.
+  if (threshold === null) return null;
   const mid = range.startMs + (range.endMs - range.startMs) / 2;
   const first = shorts.filter((s) => s.publishedAt >= range.startMs && s.publishedAt < mid);
   const second = shorts.filter((s) => s.publishedAt >= mid && s.publishedAt < range.endMs);
@@ -130,7 +134,8 @@ export function compareToMarket(
   ourChannels: readonly { videos: readonly AnalyticsVideo[] }[],
   competitorChannels: readonly { videos: readonly AnalyticsVideo[] }[],
   range: DateRange,
-  threshold: number,
+  /** `null` when the selected niche has no configured hit threshold. */
+  threshold: number | null,
 ): MarketComparison {
   const ours = poolFor(ourChannels, range, threshold);
   const market = poolFor(competitorChannels, range, threshold);

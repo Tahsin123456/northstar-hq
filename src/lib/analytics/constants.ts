@@ -17,6 +17,40 @@ export const MIN_THRESHOLD = 1;
 /** Above the most-viewed video ever, with room to spare. */
 export const MAX_THRESHOLD = 100_000_000_000;
 
+/**
+ * ==========================================================================
+ * WHEN THERE IS NO THRESHOLD
+ * ==========================================================================
+ *
+ * A niche with `hitThreshold === null` has never been configured. The app used
+ * to quietly borrow the organization default for it and print a hit rate — a
+ * figure that looks exactly like a measurement and is nobody's decision.
+ *
+ * These strings are the replacement, kept here rather than typed into each
+ * screen so that every surface says the same words. "Not configured" is a
+ * state, not an error: nothing is broken, a number is simply missing and
+ * somebody has to choose it.
+ *
+ * Note what is NOT unconfigured: "All niches". With no niche selected the
+ * organization default is a real, deliberately-set number, and the app should
+ * go on reporting hit rates against it.
+ */
+export const UNCONFIGURED_THRESHOLD_LABEL = "Hit rate threshold: Not configured";
+
+/** The short form, for a table cell or a stat where the label is already there. */
+export const UNCONFIGURED_THRESHOLD_SHORT = "Not configured";
+
+/** Why the figure is missing, for a tooltip or a caption. */
+export const UNCONFIGURED_THRESHOLD_EXPLANATION =
+  "This niche has no hit rate threshold, so there is no definition of a hit to measure against. An Admin can set one; until then no hit rate is reported for it.";
+
+/** What an employee is told when they create a niche they cannot threshold. */
+export const EMPLOYEE_THRESHOLD_NOTICE =
+  "Hit rate threshold is set by an Admin. Your niche will be created without a threshold until an Admin configures it.";
+
+/** The marker on an admin's list of niches that still need a number. */
+export const NEEDS_THRESHOLD_LABEL = "Needs hit rate configuration";
+
 export interface PeriodPreset {
   readonly id: PeriodPresetId;
   readonly label: string;

@@ -997,6 +997,168 @@ export async function changeOwnPassword(
   );
 }
 
+// ---------------------------------------------------------------------------
+// YOUR OWN ACCOUNT
+//
+// Name, email address and password. Personal state, all of it — nothing here
+// touches the organization, and nothing here can address another account: the
+// user id comes from the session on every path below, exactly as it does in
+// `changeOwnPassword` above.
+// ---------------------------------------------------------------------------
+
+export interface ProfileUpdateInput {
+  readonly name?: string;
+  readonly email?: string;
+  /** Required to change the email address; see the note in `updateOwnProfile`. */
+  readonly currentPassword?: string;
+}
+
+export interface UpdatedProfile {
+  readonly id: string;
+  readonly name: string | null;
+  readonly email: string | null;
+  /** True when the login identifier moved, so the client can say so plainly. */
+  readonly emailChanged: boolean;
+}
+
+/**
+ * Changes the signed-in person's own name and/or email address.
+ *
+ * WHY AN EMAIL CHANGE NEEDS THE CURRENT PASSWORD AND A NAME CHANGE DOES NOT
+ * The email address is the login identifier and the address a password-reset
+ * link is sent to. Anyone who reaches an unattended, unlocked browser could
+ * otherwise point both at themselves and own the account a minute later, with
+ * the real employee locked out and no way back. Re-asking for the password is
+ * the same control `changeOwnPassword` applies for the same reason. A display
+ * name grants nothing, so it does not carry the friction.
+ *
+ * WHY IT CANNOT TAKE SOMEBODY ELSE'S ADDRESS
+ * Two guards, and both are needed. The lookup below is the one that produces a
+ * sentence a person can act on — but it is a check-then-write, so two requests
+ * racing for the same free address would both pass it. `AppUser.email` is
+ * unique in the database, so the loser's write fails with P2002, which is
+ * caught and turned into the same message. The constraint is what actually
+ * holds; the lookup only makes the common case legible.
+ *
+ * Addresses are normalised before both the comparison and the write, so
+ * "Ada@Example.com" cannot slip past a check on "ada@example.com" and then sit
+ * in the table as a second row that only differs by case.
+ */
+export async function updateOwnProfile(
+  input: ProfileUpdateInput,
+  scope: { userId: string; organizationId: string; actorLabel: string | null },
+  context: AuthContext,
+): Promise<UpdatedProfile> {
+  const name = input.name?.trim();
+  const email = input.email === undefined ? undefined : normalizeEmail(input.email);
+
+  if (name === undefined && email === undefined) {
+    throw errors.invalidInput("Nothing to change — send a name, an email address, or both.");
+  }
+  if (name !== undefined && name.length === 0) {
+    throw errors.invalidInput("Enter your name.");
+  }
+  if (name !== undefined && name.length > 120) {
+    throw errors.invalidInput("That name is too long.");
+  }
+
+  const current = await prisma.appUser.findUnique({
+    where: { id: scope.userId },
+    select: { email: true, name: true, passwordHash: true },
+  });
+  if (!current) throw errors.unauthenticated();
+
+  // An "email change" that changes nothing is a no-op, not a re-authentication
+  // prompt: a form that submits every field would otherwise demand a password
+  // from somebody who only edited their name.
+  const emailChanged = email !== undefined && email !== current.email;
+
+  if (emailChanged) {
+    if (!email.includes("@")) throw errors.invalidInput("Enter a valid email address.");
+    if (email.length > 320) throw errors.invalidInput("That email address is too long.");
+
+    const { valid } = await verifyPassword(input.currentPassword ?? "", current.passwordHash);
+    if (!valid) {
+      throw errors.invalidInput(
+        "Enter your current password to change the email address on your account.",
+      );
+    }
+
+    const taken = await prisma.appUser.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+    // Deliberately the same message whether the address belongs to a colleague
+    // or to a deactivated account: this endpoint is authenticated, so it is not
+    // the staff-enumeration risk the login form is, but there is still no
+    // reason for it to confirm who holds which address.
+    if (taken && taken.id !== scope.userId) {
+      throw errors.invalidInput("That email address is already in use.");
+    }
+  }
+
+  const data: Prisma.AppUserUpdateInput = {};
+  if (name !== undefined) data.name = name;
+  if (emailChanged) data.email = email;
+
+  let updated;
+  try {
+    updated = await prisma.appUser.update({
+      where: { id: scope.userId },
+      data,
+      select: { id: true, name: true, email: true },
+    });
+  } catch (caught) {
+    // The race the lookup above cannot close. The unique index is what actually
+    // prevents the collision; this turns its error into the same sentence.
+    if (isUniqueConstraintViolation(caught)) {
+      throw errors.invalidInput("That email address is already in use.");
+    }
+    throw caught;
+  }
+
+  await recordAudit(
+    {
+      organizationId: scope.organizationId,
+      actorUserId: scope.userId,
+      actorLabel: scope.actorLabel,
+      request: context.request,
+    },
+    emailChanged
+      ? {
+          action: "auth.email_changed",
+          summary: "Email address changed",
+          targetType: "user",
+          targetId: scope.userId,
+        }
+      : {
+          action: "auth.profile_updated",
+          summary: "Profile updated",
+          targetType: "user",
+          targetId: scope.userId,
+        },
+  );
+
+  return { ...updated, emailChanged };
+}
+
+/**
+ * Prisma reports a unique-constraint violation as error code P2002.
+ *
+ * Duck-typed rather than `instanceof PrismaClientKnownRequestError`, matching
+ * `notification-service.ts`: the code is part of Prisma's documented contract
+ * and this module does not need a runtime import of the namespace for one
+ * branch.
+ */
+function isUniqueConstraintViolation(caught: unknown): boolean {
+  return (
+    typeof caught === "object" &&
+    caught !== null &&
+    "code" in caught &&
+    (caught as { readonly code?: unknown }).code === "P2002"
+  );
+}
+
 function originOf(request: Request): string | null {
   try {
     return new URL(request.url).origin;

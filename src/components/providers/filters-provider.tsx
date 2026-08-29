@@ -12,6 +12,7 @@ import {
   getFiltersSnapshot,
   resetFilters,
   seedDefaults,
+  setContentTypeFilter,
   setCustomRange,
   setNicheFilter,
   setOwnFirst,
@@ -19,6 +20,7 @@ import {
   setPeriodPreset,
   setThreshold,
   subscribeToFilters,
+  type ContentTypeFilter,
   type NicheFilter,
   type OwnershipFilter,
 } from "@/lib/filters-store";
@@ -29,7 +31,9 @@ import {
  * THRESHOLD RESOLUTION
  * `threshold` is *derived*, not stored:
  *
- *     explicit override  ->  niche default  ->  account default
+ *     explicit override  ->  the selected niche's own threshold
+ *                        ->  the organization default, but ONLY when no niche
+ *                            is selected
  *
  * That ordering is what makes niche-specific thresholds work without touching
  * a single consumer. Every screen already reads `threshold` from this context,
@@ -38,32 +42,74 @@ import {
  * there is no way for one surface to be looking at a different number than
  * another.
  *
+ * WHY THE CHAIN STOPS AT A SELECTED NICHE
+ * It used to read `override ?? nicheDefault ?? accountDefault`, so selecting a
+ * niche nobody had configured silently borrowed the organization's 1,000,000
+ * and the app printed a hit rate against it. That number looks identical to one
+ * somebody chose, and it is not: it is the app guessing and then presenting the
+ * guess as a measurement. So a *selected* niche with no threshold now resolves
+ * to `threshold: null` / `thresholdSource: "unconfigured"`, and every consumer
+ * renders "Not configured" instead of a figure.
+ *
+ * "All niches" is a different case and deliberately unaffected. With no niche
+ * selected the organization default is the team's own deliberately-set number,
+ * not a fallback — so it stays, and hit rates go on being reported.
+ *
+ * An override still wins over everything, including an unconfigured niche: that
+ * is a number a person typed on purpose, on this screen, just now.
+ *
  * The override is deliberately transient state rather than a write to the
  * niche: experimenting with 1M on an RDR view should not silently reconfigure
  * the niche for everyone tomorrow. Saving is an explicit, separate action.
+ *
+ * SCOPE
+ * Niche, content type and ownership are three independent narrowings. They used
+ * to be two-and-a-half — a content type belonged to a niche, so the pair had to
+ * be reconciled — but a content type is an org-wide tag again and any of them
+ * may be combined with any other.
  *
  * None of this enters a query key, so changing any of it recomputes from data
  * already in memory and issues no request.
  */
 
-export type ThresholdSource = "override" | "niche" | "account";
+/**
+ * Where the active threshold came from.
+ *
+ * `"unconfigured"` is not a source of a number — it is the honest absence of
+ * one, and it travels beside `threshold: null` so a consumer cannot read the
+ * figure without also having been told there isn't one.
+ */
+export type ThresholdSource = "override" | "niche" | "account" | "unconfigured";
 
 interface FiltersState {
   readonly period: PeriodSelection;
-  /** The effective threshold every analytic should use. */
-  readonly threshold: number;
+  /**
+   * The effective threshold every analytic should use, or `null` when the
+   * selected niche has none configured.
+   *
+   * Nullable rather than "defaulted" on purpose: the type is what stops a new
+   * screen from reintroducing `?? DEFAULT_THRESHOLD` without noticing.
+   */
+  readonly threshold: number | null;
   /** Where that number came from, so the UI can label it honestly. */
   readonly thresholdSource: ThresholdSource;
+  /** Shorthand for `thresholdSource !== "unconfigured"`, for readability. */
+  readonly isThresholdConfigured: boolean;
   /** The selected niche's configured threshold, if it has one. */
   readonly nicheDefaultThreshold: number | null;
   /** Display name of the active niche, for threshold labelling. */
   readonly nicheName: string | null;
+  /** The selected niche's id, or null for "all"/"unassigned". */
+  readonly nicheId: string | null;
   readonly hasThresholdOverride: boolean;
 
   /** Recomputed on a timer so "last 30 days" does not drift over a long session. */
   readonly range: DateRange;
 
   readonly niche: NicheFilter;
+  readonly contentType: ContentTypeFilter;
+  /** Display name of the active content type, for labelling. */
+  readonly contentTypeName: string | null;
   readonly ownership: OwnershipFilter;
   readonly ownFirst: boolean;
   readonly hasScopeFilter: boolean;
@@ -73,6 +119,7 @@ interface FiltersState {
   readonly setThreshold: (threshold: number) => void;
   readonly clearThresholdOverride: () => void;
   readonly setNiche: (niche: NicheFilter) => void;
+  readonly setContentType: (contentType: ContentTypeFilter) => void;
   readonly setOwnership: (ownership: OwnershipFilter) => void;
   readonly setOwnFirst: (ownFirst: boolean) => void;
   readonly clearScopeFilters: () => void;
@@ -110,17 +157,58 @@ export function FiltersProvider({
     return data?.niches.find((n) => n.id === snapshot.niche) ?? null;
   }, [data, snapshot.niche]);
 
+  // Resolved from the catalogue the dataset already ships, and deliberately
+  // including archived types: a link carrying `?contentType=` for a type that
+  // has since been retired should still say which one, not fall back to "All".
+  const activeContentType = React.useMemo(() => {
+    if (snapshot.contentType === "all" || snapshot.contentType === "unassigned") return null;
+    return data?.contentTypes.find((type) => type.id === snapshot.contentType) ?? null;
+  }, [data, snapshot.contentType]);
+
+  /*
+   * NICHE AND CONTENT TYPE ARE TWO INDEPENDENT NARROWINGS AGAIN.
+   *
+   * There used to be a `reconcileScope` pass here — a whole pure function with
+   * its own test file — whose job was to stop the pair reaching a state the
+   * Type menu could not show: a content type belonged to exactly one niche, so
+   * "GTA + Red Dead's Character Moments" was an empty intersection for a reason
+   * nothing on screen explained.
+   *
+   * Content types are org-wide tags now. Every type is offered under every
+   * niche, so there is no incoherent pair left to reconcile, and the whole
+   * mechanism is gone rather than kept as a no-op. `setNiche` is the store's
+   * setter directly, and a `?contentType=` link no longer has to move somebody's
+   * niche filter to make its own selection visible.
+   */
+  const setNiche = setNicheFilter;
+
   const nicheDefaultThreshold = activeNiche?.hitThreshold ?? null;
 
-  const threshold =
-    snapshot.thresholdOverride ?? nicheDefaultThreshold ?? defaultThreshold;
+  // A niche is "selected" for this purpose only when it resolves to a real row.
+  // "All niches" and "Uncategorised" are both organization-wide views, where the
+  // organization default is the right and deliberate answer.
+  const hasSelectedNiche = activeNiche !== null;
 
-  const thresholdSource: ThresholdSource =
-    snapshot.thresholdOverride !== null
-      ? "override"
-      : nicheDefaultThreshold !== null
-        ? "niche"
-        : "account";
+  const { threshold, thresholdSource } = React.useMemo<{
+    threshold: number | null;
+    thresholdSource: ThresholdSource;
+  }>(() => {
+    // An override is a number a person typed on this screen. It outranks
+    // everything, including a niche nobody has configured.
+    if (snapshot.thresholdOverride !== null) {
+      return { threshold: snapshot.thresholdOverride, thresholdSource: "override" };
+    }
+    if (nicheDefaultThreshold !== null) {
+      return { threshold: nicheDefaultThreshold, thresholdSource: "niche" };
+    }
+    // The one case the old `??` chain got wrong: a selected niche with nothing
+    // configured. Borrowing the organization default here is what made the app
+    // report a hit rate nobody had defined.
+    if (hasSelectedNiche) {
+      return { threshold: null, thresholdSource: "unconfigured" };
+    }
+    return { threshold: defaultThreshold, thresholdSource: "account" };
+  }, [snapshot.thresholdOverride, nicheDefaultThreshold, hasSelectedNiche, defaultThreshold]);
 
   // Anchor for trailing windows. A dashboard left open overnight must not keep
   // computing "last 7 days" from yesterday's anchor.
@@ -141,28 +229,46 @@ export function FiltersProvider({
       period: snapshot.period,
       threshold,
       thresholdSource,
+      isThresholdConfigured: thresholdSource !== "unconfigured",
       nicheDefaultThreshold,
       nicheName: activeNiche?.name ?? null,
+      nicheId: activeNiche?.id ?? null,
       hasThresholdOverride: snapshot.thresholdOverride !== null,
       range,
       niche: snapshot.niche,
+      contentType: snapshot.contentType,
+      contentTypeName: activeContentType?.name ?? null,
       ownership: snapshot.ownership,
       ownFirst: snapshot.ownFirst,
-      hasScopeFilter: snapshot.niche !== "all" || snapshot.ownership !== "all",
+      hasScopeFilter:
+        snapshot.niche !== "all" ||
+        snapshot.contentType !== "all" ||
+        snapshot.ownership !== "all",
       setPeriodPreset,
       setCustomRange,
       setThreshold,
       clearThresholdOverride,
-      setNiche: setNicheFilter,
+      setNiche,
+      setContentType: setContentTypeFilter,
       setOwnership: setOwnershipFilter,
       setOwnFirst,
       clearScopeFilters: () => {
         setNicheFilter("all");
+        setContentTypeFilter("all");
         setOwnershipFilter("all");
       },
       resetToDefaults: resetFilters,
     }),
-    [snapshot, range, threshold, thresholdSource, nicheDefaultThreshold, activeNiche],
+    [
+      snapshot,
+      range,
+      threshold,
+      thresholdSource,
+      nicheDefaultThreshold,
+      activeNiche,
+      activeContentType,
+      setNiche,
+    ],
   );
 
   return <FiltersContext.Provider value={value}>{children}</FiltersContext.Provider>;
@@ -191,10 +297,17 @@ export function useFilters(): FiltersState {
  * When a channel sits in several niches that disagree on the threshold there is
  * no single right answer, so it falls back to the account default rather than
  * silently picking one. `source` says which rule applied so the UI can label it.
+ *
+ * The unconfigured state reaches this hook through the first two rules and no
+ * others: if the user has *selected* a niche this channel belongs to and that
+ * niche has no threshold, the page says "Not configured" like every other
+ * screen. With no niche selected, the channel's own configured niches still
+ * answer, and the organization default remains the legitimate last resort —
+ * "no niche selected" is not the unconfigured case.
  */
 export function useChannelThreshold(
   channelNicheRefs: readonly { id: string }[],
-): { threshold: number; source: ThresholdSource; nicheName: string | null } {
+): { threshold: number | null; source: ThresholdSource; nicheName: string | null } {
   const { threshold, thresholdSource, niche, nicheName, hasThresholdOverride } = useFilters();
   // Channel niche refs are lightweight and carry no threshold, so the
   // configured values come from the dataset — the same cache the provider

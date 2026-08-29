@@ -34,6 +34,33 @@ import type { PeriodPresetId, PeriodSelection } from "@/lib/analytics/types";
  */
 export type NicheFilter = "all" | "unassigned" | (string & {});
 
+/**
+ * Which content type the view is scoped to.
+ *
+ * The same sentinels as `NicheFilter`, and for the same reasons. A content type
+ * is an ORG-WIDE TAG, attached to both channels and Shorts, so this filter is
+ * independent of the niche filter — any type may be selected under any niche,
+ * and neither one has to move to accommodate the other.
+ *
+ * IT MEANS SOMETHING SLIGHTLY DIFFERENT ON EACH SURFACE, because the surfaces
+ * have different units, and that is deliberate:
+ *
+ *   • On the CHANNEL LIST it reads the channel's own tags —
+ *     `filterRowsByScope` in `src/hooks/use-channel-analytics.ts`. A row's
+ *     metrics describe everything that channel published, so narrowing the list
+ *     by a per-Short label would put a figure next to a label that did not
+ *     describe it.
+ *   • On the SHORTS surfaces — Winners, Outliers, the feeds, the Shorts table —
+ *     it reads each Short's own classification (`useShortsFeed`), because there
+ *     the row genuinely is a Short.
+ *
+ * `"unassigned"` means "not tagged" in whichever of those two senses applies. It
+ * is offered for the same reason as its niche counterpart: things nobody has
+ * described are invisible to every other option, and a user who cannot see the
+ * gap cannot close it.
+ */
+export type ContentTypeFilter = "all" | "unassigned" | (string & {});
+
 export type OwnershipFilter = "all" | "own" | "competitor";
 
 export interface FiltersSnapshot {
@@ -49,6 +76,7 @@ export interface FiltersSnapshot {
    */
   readonly thresholdOverride: number | null;
   readonly niche: NicheFilter;
+  readonly contentType: ContentTypeFilter;
   readonly ownership: OwnershipFilter;
   /**
    * Float the user's own channels to the top while keeping them in the same
@@ -69,6 +97,7 @@ let serverSnapshot: FiltersSnapshot = {
   period: { preset: DEFAULT_PERIOD_PRESET },
   thresholdOverride: null,
   niche: "all",
+  contentType: "all",
   ownership: "all",
   ownFirst: false,
 };
@@ -104,6 +133,7 @@ function readFromEnvironment(): FiltersSnapshot {
   let period: PeriodSelection = serverSnapshot.period;
   let thresholdOverride = serverSnapshot.thresholdOverride;
   let niche: NicheFilter = serverSnapshot.niche;
+  let contentType: ContentTypeFilter = serverSnapshot.contentType;
   let ownership: OwnershipFilter = serverSnapshot.ownership;
   let ownFirst = serverSnapshot.ownFirst;
 
@@ -120,6 +150,10 @@ function readFromEnvironment(): FiltersSnapshot {
         thresholdOverride = clampThreshold(parsed.thresholdOverride);
       }
       if (typeof parsed.niche === "string") niche = parsed.niche;
+      // Absent from anything stored before content types existed, which is why
+      // this reads defensively rather than bumping the storage key: an old
+      // snapshot is still entirely valid, it simply has no opinion here.
+      if (typeof parsed.contentType === "string") contentType = parsed.contentType;
       if (typeof parsed.ownership === "string" && OWNERSHIP_FILTERS.includes(parsed.ownership)) {
         ownership = parsed.ownership as OwnershipFilter;
       }
@@ -137,6 +171,7 @@ function readFromEnvironment(): FiltersSnapshot {
     const urlStart = params.get("start");
     const urlEnd = params.get("end");
     const urlNiche = params.get("niche");
+    const urlContentType = params.get("contentType");
     const urlOwnership = params.get("ownership");
 
     if (urlPeriod && VALID_PRESETS.includes(urlPeriod)) {
@@ -167,6 +202,7 @@ function readFromEnvironment(): FiltersSnapshot {
       if (urlNiche !== niche && !urlThreshold) thresholdOverride = null;
       niche = urlNiche;
     }
+    if (urlContentType) contentType = urlContentType;
     if (urlOwnership && OWNERSHIP_FILTERS.includes(urlOwnership)) {
       ownership = urlOwnership as OwnershipFilter;
     }
@@ -174,7 +210,7 @@ function readFromEnvironment(): FiltersSnapshot {
     /* malformed URL — defaults stand */
   }
 
-  return { period, thresholdOverride, niche, ownership, ownFirst };
+  return { period, thresholdOverride, niche, contentType, ownership, ownFirst };
 }
 
 function persist(snapshot: FiltersSnapshot): void {
@@ -210,6 +246,9 @@ function persist(snapshot: FiltersSnapshot): void {
     // narrowing something, so a default view keeps a clean, shareable link.
     if (snapshot.niche !== "all") params.set("niche", snapshot.niche);
     else params.delete("niche");
+
+    if (snapshot.contentType !== "all") params.set("contentType", snapshot.contentType);
+    else params.delete("contentType");
 
     if (snapshot.ownership !== "all") params.set("ownership", snapshot.ownership);
     else params.delete("ownership");
@@ -318,6 +357,21 @@ export function setNicheFilter(niche: NicheFilter): void {
   // niche's own definition of a hit — so moving to a different niche drops the
   // override and falls back to that niche's default.
   commit({ ...current, niche, thresholdOverride: null });
+}
+
+/**
+ * Sets the content-type scope.
+ *
+ * Unlike `setNicheFilter`, this does not touch the threshold override. A niche
+ * carries its own definition of a hit, so switching niche has to drop an
+ * override made under the previous one; a content type has no threshold of its
+ * own and never will — what counts as a hit is a property of the audience, not
+ * of the format — so there is nothing here for an override to contradict.
+ */
+export function setContentTypeFilter(contentType: ContentTypeFilter): void {
+  const current = getFiltersSnapshot();
+  if (current.contentType === contentType) return;
+  commit({ ...current, contentType });
 }
 
 export function setOwnershipFilter(ownership: OwnershipFilter): void {

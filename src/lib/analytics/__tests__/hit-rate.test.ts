@@ -112,6 +112,22 @@ describe("evaluateShorts", () => {
 
   it("does not divide by zero when the threshold is zero", () => {
     const [only] = evaluateShorts([makeShort({ views: 100 })], 0);
-    expect(Number.isFinite(only.thresholdRatio)).toBe(true);
+
+    // Still no Infinity and no NaN, which is what this test has always been
+    // for. What changed is the answer: it used to substitute a threshold of 1
+    // and report a ratio of 100, which is a number nobody asked for. "How many
+    // times zero is 100 views" has no answer, so there is none.
+    expect(only.thresholdRatio).toBeNull();
+    expect(Number.isNaN(only.thresholdRatio as unknown as number)).toBe(false);
+  });
+
+  it("reports no hit and no ratio when there is no threshold at all", () => {
+    // `null` is not a threshold of zero. The niche has never been configured,
+    // so nothing can be called a hit — and a ratio of 0 would sort every Short
+    // as an equal, maximal miss.
+    const [only] = evaluateShorts([makeShort({ views: 5_000_000 })], null);
+
+    expect(only.isHit).toBe(false);
+    expect(only.thresholdRatio).toBeNull();
   });
 });

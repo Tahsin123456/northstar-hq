@@ -8,6 +8,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Shapes,
   StickyNote,
   Target,
   Trash2,
@@ -40,20 +41,31 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { nicheColor } from "@/components/niches/niche-chip";
+import {
+  NicheThresholdDialog,
+  useCanConfigureThreshold,
+} from "@/components/niches/niche-threshold-dialog";
+import {
+  NeedsThresholdBadge,
+  NicheByline,
+  needsThresholdConfiguration,
+  unconfiguredFirst,
+} from "@/components/niches/niche-threshold-status";
 import { NotesPanel } from "@/components/notes/notes-panel";
 import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
-import {
-  useCreateNiche,
-  useDeleteNiche,
-  useRenameNiche,
-  useUpdateNicheThreshold,
-} from "@/hooks/use-niches";
+import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
 import type { NicheDTO } from "@/lib/dto";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
-import { THRESHOLD_PRESETS } from "@/lib/analytics/constants";
+import {
+  EMPLOYEE_THRESHOLD_NOTICE,
+  MAX_THRESHOLD,
+  MIN_THRESHOLD,
+  THRESHOLD_PRESETS,
+  UNCONFIGURED_THRESHOLD_SHORT,
+} from "@/lib/analytics/constants";
 import { cn } from "@/lib/utils";
 
 /**
@@ -66,24 +78,51 @@ import { cn } from "@/lib/utils";
  */
 export default function NichesPage() {
   const { data, isLoading, error, refetch } = useDataset();
-  const { threshold } = useFilters();
   const [createOpen, setCreateOpen] = React.useState(false);
 
   const rows = useChannelRows(data);
-  const niches = data?.niches ?? [];
+
+  /*
+   * Unconfigured niches float to the top.
+   *
+   * The brief asks for them to be visible rather than buried, and the default
+   * `sortOrder` buries them by construction — a niche created yesterday sorts
+   * last, and a niche created yesterday is exactly the one still waiting for a
+   * number. This is the ordering for everybody, not just admins: an employee
+   * seeing their own unconfigured niche at the top is the fastest route to them
+   * asking an Admin for the number.
+   */
+  const niches = React.useMemo(
+    () => unconfiguredFirst(data?.niches ?? []),
+    [data?.niches],
+  );
+
+  const unconfiguredCount = niches.filter(needsThresholdConfiguration).length;
 
   const unassigned = React.useMemo(
     () => rows.filter((row) => row.channel.niches.length === 0),
     [rows],
   );
 
+  /*
+   * There is no per-niche content-type count here any more.
+   *
+   * There was one for a round, when each niche owned its own vocabulary and
+   * "does this niche have a working list yet?" was a real question about a real
+   * per-niche number. Content types are one flat org-wide list again, so every
+   * card would print the same figure — which is not a fact about the niche and
+   * would read as if it were.
+   */
+
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="Niches"
-        // Each card is scored at its own configured threshold, so naming a
-        // single figure here would contradict the numbers directly below it.
-        description={`How each niche is performing, each scored at its own hit threshold (${formatCompactNumber(threshold)} where none is set). Click one to open the dashboard filtered to it.`}
+        // No single number belongs in this sentence. Each card is scored at its
+        // own threshold, and the ones with none are not scored at all — the old
+        // copy named the account default as the value used "where none is set",
+        // which is precisely the fallback this round removed.
+        description="How each niche is performing, each scored at its own hit threshold. A niche with no threshold reports no hit rate until one is set. Click one to open the dashboard filtered to it."
         actions={
           <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
             <Plus />
@@ -124,16 +163,17 @@ export default function NichesPage() {
               />
             </Card>
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-              {niches.map((niche) => (
-                <NicheCard
-                  key={niche.id}
-                  niche={niche}
-                  rows={rows}
-                  accountThreshold={threshold}
-                />
-              ))}
-            </div>
+            <>
+              {unconfiguredCount > 0 ? (
+                <UnconfiguredSummary count={unconfiguredCount} />
+              ) : null}
+
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {niches.map((niche) => (
+                  <NicheCard key={niche.id} niche={niche} rows={rows} />
+                ))}
+              </div>
+            </>
           )}
 
           {unassigned.length > 0 ? (
@@ -150,15 +190,24 @@ export default function NichesPage() {
 function NicheCard({
   niche,
   rows,
-  accountThreshold,
 }: {
   niche: NicheDTO;
   rows: readonly ChannelRow[];
-  accountThreshold: number;
 }) {
   const { range } = useFilters();
-  // This niche's own definition of a hit, falling back to the account default.
-  const effectiveThreshold = niche.hitThreshold ?? accountThreshold;
+  /*
+   * This niche's own definition of a hit — and nothing else.
+   *
+   * There is deliberately no `?? accountThreshold` here any more. A card that
+   * borrowed the organization default would print "Hit rate ≥1M · 34.2%" for a
+   * niche whose threshold nobody has chosen, and that percentage is the whole
+   * bug: real arithmetic over an invented input, indistinguishable on screen
+   * from a real measurement.
+   */
+  const nicheThreshold = niche.hitThreshold;
+  const needsThreshold = needsThresholdConfiguration(niche);
+  const canConfigure = useCanConfigureThreshold();
+
   const [renameOpen, setRenameOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [notesOpen, setNotesOpen] = React.useState(false);
@@ -171,6 +220,9 @@ function NicheCard({
 
   // Recomputed at this niche's threshold rather than reusing row.metrics,
   // which was calculated at whatever the page-level threshold happens to be.
+  // With a null threshold the engine returns `hitRate: null` for every channel,
+  // so `averageHitRate` is null and the card renders "Not configured" — the
+  // volume figures beside it are unaffected and still entirely real.
   const summary = React.useMemo(
     () =>
       calculatePortfolioSummary(
@@ -180,11 +232,11 @@ function NicheCard({
           metrics: calculateChannelMetrics({
             videos: row.videos,
             range,
-            threshold: effectiveThreshold,
+            threshold: nicheThreshold,
           }),
         })),
       ),
-    [members, range, effectiveThreshold],
+    [members, range, nicheThreshold],
   );
 
   const best = summary.topChannel;
@@ -221,9 +273,30 @@ function NicheCard({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => setThresholdOpen(true)}>
-                  <Target />
-                  Hit threshold
+                {/* Only for somebody the server will actually let through.
+                    Renaming a niche is `niches.manage`; the threshold is
+                    `settings.manage`, so this one item is gated separately
+                    rather than the whole menu. */}
+                {canConfigure ? (
+                  <DropdownMenuItem onSelect={() => setThresholdOpen(true)}>
+                    <Target />
+                    Hit threshold
+                  </DropdownMenuItem>
+                ) : null}
+                {/* The niche's own page: threshold, author, the settings that
+                    genuinely belong to this niche.
+
+                    It said "Content types" until content types stopped being a
+                    per-niche vocabulary. They are now one flat set of tags the
+                    whole organization shares, so a menu item here would promise
+                    a list scoped to this niche that does not exist — and the
+                    page it opened would have to explain that it had lied. The
+                    catalogue lives at /content-types, in the sidebar. */}
+                <DropdownMenuItem asChild>
+                  <Link href={`/niches/${niche.id}`}>
+                    <Shapes />
+                    Niche settings
+                  </Link>
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setNotesOpen(true)}>
                   <StickyNote />
@@ -243,17 +316,69 @@ function NicheCard({
           </div>
         </div>
 
+        {/* The marker and the byline, together: what needs doing, and whose
+            niche it is. An admin scanning this grid for work to chase needs
+            both in the same glance. */}
+        {needsThreshold ? (
+          <div className="relative z-10 mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <NeedsThresholdBadge />
+            <NicheByline niche={niche} />
+            {canConfigure ? (
+              <button
+                type="button"
+                onClick={() => setThresholdOpen(true)}
+                className="text-[11px] font-medium text-accent transition-colors hover:text-accent-hover"
+              >
+                Set threshold
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border pt-3">
           <MiniStat label="Channels" value={formatNumber(members.length)} />
           <MiniStat label="Shorts" value={formatNumber(summary.totalShorts)} />
           <MiniStat
-            label={`Hit rate ≥${formatCompactNumber(effectiveThreshold)}`}
-            value={formatPercent(summary.averageHitRate)}
+            label={
+              nicheThreshold === null
+                ? "Hit rate"
+                : `Hit rate ≥${formatCompactNumber(nicheThreshold)}`
+            }
+            // Words, not an em dash. "—" is the app's symbol for "no Shorts in
+            // this period", and reusing it here would say the niche was
+            // measured and came up empty.
+            value={
+              nicheThreshold === null
+                ? UNCONFIGURED_THRESHOLD_SHORT
+                : formatPercent(summary.averageHitRate)
+            }
+            muted={nicheThreshold === null}
           />
         </div>
 
+        {/*
+          The way into the niche's own settings — its threshold and its author.
+          It used to lead to the niche's content types; those are one shared
+          list now, reached from `/content-types`, and pointing a per-niche link
+          at an org-wide catalogue would suggest the two were related. `z-10`
+          because the card's title is a stretched link over the whole surface.
+        */}
+        <Link
+          href={`/niches/${niche.id}`}
+          className="relative z-10 mt-3 inline-flex items-center gap-1.5 self-start text-[11px] text-muted-foreground transition-colors hover:text-accent"
+        >
+          <Shapes className="size-3" />
+          Niche settings
+        </Link>
+
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">
-          {best ? (
+          {nicheThreshold === null ? (
+            <span className="text-[12px] text-subtle-foreground">
+              {members.length === 0
+                ? "No channels assigned yet"
+                : `${formatNumber(members.length)} ${members.length === 1 ? "channel" : "channels"}, no hit rate until a threshold is set`}
+            </span>
+          ) : best ? (
             <div className="min-w-0">
               <div className="text-[10px] uppercase tracking-wider text-subtle-foreground">
                 Top channel
@@ -333,13 +458,57 @@ function UncategorisedCard({ rows }: { rows: readonly ChannelRow[] }) {
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function MiniStat({
+  label,
+  value,
+  muted,
+}: {
+  label: string;
+  value: string;
+  /** For a value that is a word rather than a figure — "Not configured". */
+  muted?: boolean;
+}) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
         {label}
       </span>
-      <span className="tnum truncate text-[15px] font-medium text-foreground">{value}</span>
+      <span
+        className={cn(
+          "truncate font-medium",
+          muted
+            ? "text-[12px] text-subtle-foreground"
+            : "tnum text-[15px] text-foreground",
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The count of niches still waiting for a number, above the grid.
+ *
+ * Not an error banner and not dismissible: it is a standing fact about the
+ * team's configuration, and it disappears on its own the moment the last niche
+ * is configured. It exists because the grid can be three screens long, and
+ * "sorted first" only helps somebody who scrolls to the top.
+ */
+function UnconfiguredSummary({ count }: { count: number }) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning-subtle/40 px-3 py-2">
+      <Target className="size-3.5 shrink-0 text-warning" aria-hidden />
+      <p className="text-[12px] text-foreground">
+        {count === 1
+          ? "1 niche has no hit rate threshold"
+          : `${formatNumber(count)} niches have no hit rate threshold`}
+        <span className="text-muted-foreground">
+          {" "}
+          — no hit rate is reported for {count === 1 ? "it" : "them"} until an Admin sets
+          one. Shown first below.
+        </span>
+      </p>
     </div>
   );
 }
@@ -360,24 +529,74 @@ function CreateNicheDialog({
   );
 }
 
+/**
+ * Creating a niche, in the two shapes it legitimately has.
+ *
+ * An Admin — someone holding `settings.manage` alongside `niches.manage` — is
+ * asked for a "Hit Rate View Count" here, because they are the person who can
+ * answer it and the moment of creation is when the answer is cheapest to give.
+ * It stays optional: an admin who does not know the number yet should not be
+ * blocked from making the niche, and the card will carry "Needs hit rate
+ * configuration" until they come back to it.
+ *
+ * An employee — `niches.manage` without `settings.manage` — is not shown the
+ * field at all, and the request their browser sends does not carry the key.
+ * They are told plainly what that means, in the words the brief asked for,
+ * rather than being left to wonder why their niche shows no hit rate. The
+ * server refuses a threshold from them regardless of what this form does, which
+ * is what makes the omission an affordance rather than the security boundary.
+ */
 function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
   const [name, setName] = React.useState("");
+  const [thresholdInput, setThresholdInput] = React.useState("");
+  const [error, setError] = React.useState<string | null>(null);
+  const canConfigure = useCanConfigureThreshold();
   const create = useCreateNiche();
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) return;
-    create.mutate(trimmed, {
-      onSuccess: ({ niche }) => {
-        toast.success(`Niche “${niche.name}” created`);
-        onOpenChange(false);
+
+    let hitThreshold: number | undefined;
+    if (canConfigure) {
+      // People paste view counts: "1,000,000" and "1 000 000" both mean 1M.
+      const cleaned = thresholdInput.replace(/[,\s_]/g, "");
+      if (cleaned) {
+        const parsed = Number(cleaned);
+        if (!Number.isFinite(parsed) || parsed < MIN_THRESHOLD) {
+          setError(`Enter a number of at least ${MIN_THRESHOLD}, or leave it empty.`);
+          return;
+        }
+        if (parsed > MAX_THRESHOLD) {
+          setError("That is higher than any video has ever been viewed.");
+          return;
+        }
+        hitThreshold = Math.trunc(parsed);
+      }
+    }
+
+    // The key is absent, not null, when there is no threshold to send. The
+    // server treats a present `hitThreshold` — null included — as a threshold
+    // write and refuses it without `settings.manage`.
+    create.mutate(
+      hitThreshold === undefined ? { name: trimmed } : { name: trimmed, hitThreshold },
+      {
+        onSuccess: ({ niche }) => {
+          toast.success(`Niche “${niche.name}” created`, {
+            description:
+              niche.hitThreshold === null
+                ? "No hit rate threshold yet, so no hit rate is reported for it."
+                : `A hit in ${niche.name} is ${formatCompactNumber(niche.hitThreshold)} views.`,
+          });
+          onOpenChange(false);
+        },
+        onError: (error) =>
+          toast.error("Could not create that niche", {
+            description: error instanceof Error ? error.message : undefined,
+          }),
       },
-      onError: (error) =>
-        toast.error("Could not create that niche", {
-          description: error instanceof Error ? error.message : undefined,
-        }),
-    });
+    );
   };
 
   return (
@@ -390,17 +609,72 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
         </DialogDescription>
       </DialogHeader>
 
-      <DialogBody className="flex flex-col gap-2">
-        <Label htmlFor="niche-name">Name</Label>
-        <Input
-          id="niche-name"
-          autoFocus
-          value={name}
-          maxLength={48}
-          placeholder="e.g. GTA"
-          onChange={(event) => setName(event.target.value)}
-        />
-        <FieldHint>Names are case-insensitive, so “GTA” and “gta” are the same niche.</FieldHint>
+      <DialogBody className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="niche-name">Name</Label>
+          <Input
+            id="niche-name"
+            autoFocus
+            value={name}
+            maxLength={48}
+            placeholder="e.g. GTA"
+            onChange={(event) => setName(event.target.value)}
+          />
+          <FieldHint>
+            Names are case-insensitive, so “GTA” and “gta” are the same niche.
+          </FieldHint>
+        </div>
+
+        {canConfigure ? (
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="niche-hit-rate">Hit Rate View Count</Label>
+            <Input
+              id="niche-hit-rate"
+              inputMode="numeric"
+              placeholder="e.g. 1000000"
+              value={thresholdInput}
+              invalid={Boolean(error)}
+              onChange={(event) => {
+                setThresholdInput(event.target.value);
+                setError(null);
+              }}
+            />
+            {error ? (
+              <FieldHint tone="danger">{error}</FieldHint>
+            ) : (
+              <FieldHint>
+                How many views make a Short a hit in this niche. Optional — leave it
+                empty and set it later; no hit rate is reported until you do.
+              </FieldHint>
+            )}
+            <div className="flex flex-wrap gap-1.5">
+              {THRESHOLD_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    setThresholdInput(String(preset));
+                    setError(null);
+                  }}
+                  className={cn(
+                    "tnum rounded-md border px-2 py-1 text-[12px] font-medium transition-colors",
+                    Number(thresholdInput) === preset
+                      ? "border-accent bg-accent-subtle text-foreground"
+                      : "border-border text-muted-foreground hover:border-border-strong hover:text-foreground",
+                  )}
+                >
+                  ≥ {formatCompactNumber(preset)}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          /* Friendly and specific, not a permission error. They are allowed to
+             be here; the number is simply somebody else's to choose. */
+          <p className="rounded-md border border-border bg-surface-sunken px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
+            {EMPLOYEE_THRESHOLD_NOTICE}
+          </p>
+        )}
       </DialogBody>
 
       <DialogFooter>
@@ -590,148 +864,5 @@ function NicheNotesDialog({
         </DialogBody>
       </DialogContent>
     </Dialog>
-  );
-}
-
-/**
- * Per-niche hit threshold.
- *
- * A hit is not one number across a whole portfolio: 1M is a reasonable bar for
- * a large gaming niche and an impossible one for a niche science channel.
- * Configuring it here means every analytic for that niche — hit rate, charts,
- * Winners, Our vs Market, the PDF — switches definition automatically when the
- * niche is selected, with no manual step.
- */
-function NicheThresholdDialog({
-  niche,
-  open,
-  onOpenChange,
-}: {
-  niche: NicheDTO;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
-        {open ? <NicheThresholdForm niche={niche} onOpenChange={onOpenChange} /> : null}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function NicheThresholdForm({
-  niche,
-  onOpenChange,
-}: {
-  niche: NicheDTO;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const [value, setValue] = React.useState(
-    niche.hitThreshold === null ? "" : String(niche.hitThreshold),
-  );
-  const [error, setError] = React.useState<string | null>(null);
-  const save = useUpdateNicheThreshold();
-
-  const commit = (hitThreshold: number | null) => {
-    save.mutate(
-      { id: niche.id, hitThreshold },
-      {
-        onSuccess: () => {
-          toast.success(
-            hitThreshold === null
-              ? `${niche.name} now follows the account default`
-              : `${niche.name} hit threshold set to ${formatCompactNumber(hitThreshold)}`,
-          );
-          onOpenChange(false);
-        },
-        onError: (e) =>
-          toast.error("Could not save that threshold", {
-            description: e instanceof Error ? e.message : undefined,
-          }),
-      },
-    );
-  };
-
-  return (
-    <form
-      onSubmit={(event) => {
-        event.preventDefault();
-        // An empty field clears the override rather than erroring — that is the
-        // natural way to say "just use the account default".
-        const cleaned = value.replace(/[,\s_]/g, "");
-        if (!cleaned) {
-          commit(null);
-          return;
-        }
-        const parsed = Number(cleaned);
-        if (!Number.isFinite(parsed) || parsed < 1) {
-          setError("Enter a positive number, or leave it empty to use the account default.");
-          return;
-        }
-        commit(Math.trunc(parsed));
-      }}
-    >
-      <DialogHeader>
-        <DialogTitle>{niche.name} hit threshold</DialogTitle>
-        <DialogDescription>
-          What counts as a hit in this niche. Selecting {niche.name} anywhere in the app
-          uses this number automatically.
-        </DialogDescription>
-      </DialogHeader>
-
-      <DialogBody className="flex flex-col gap-3">
-        <div className="flex flex-col gap-2">
-          <Label htmlFor="niche-threshold">Views required</Label>
-          <Input
-            id="niche-threshold"
-            autoFocus
-            inputMode="numeric"
-            placeholder="e.g. 750000"
-            value={value}
-            invalid={Boolean(error)}
-            onChange={(event) => {
-              setValue(event.target.value);
-              setError(null);
-            }}
-          />
-          {error ? (
-            <FieldHint tone="danger">{error}</FieldHint>
-          ) : (
-            <FieldHint>Leave empty to follow the account default set in Settings.</FieldHint>
-          )}
-        </div>
-
-        <div className="flex flex-wrap gap-1.5">
-          {THRESHOLD_PRESETS.map((preset) => (
-            <button
-              key={preset}
-              type="button"
-              onClick={() => {
-                setValue(String(preset));
-                setError(null);
-              }}
-              className={cn(
-                "tnum rounded-md border px-2 py-1 text-[12px] font-medium transition-colors",
-                Number(value) === preset
-                  ? "border-accent bg-accent-subtle text-foreground"
-                  : "border-border text-muted-foreground hover:border-border-strong hover:text-foreground",
-              )}
-            >
-              ≥ {formatCompactNumber(preset)}
-            </button>
-          ))}
-        </div>
-      </DialogBody>
-
-      <DialogFooter>
-        <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-          Cancel
-        </Button>
-        <Button type="submit" variant="primary" loading={save.isPending}>
-          Save threshold
-        </Button>
-      </DialogFooter>
-    </form>
   );
 }

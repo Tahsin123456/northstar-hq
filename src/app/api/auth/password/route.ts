@@ -15,6 +15,14 @@ const schema = z.object({
 /**
  * PATCH /api/auth/password — change your own password.
  *
+ * SUPERSEDED BY `PATCH /api/me/profile`, which handles the name, the email and
+ * the password together and is what the Settings page calls. This route is kept
+ * because it is a live endpoint on a live deployment and nothing in-app calls
+ * it, so removing it would only risk breaking a caller we cannot see. Both
+ * delegate to the same `changeOwnPassword`, so there is one password path in
+ * the codebase and two doors onto it — not two implementations that can drift.
+ * Retire this once the logs show nothing is using it.
+ *
  * Requires the current password even though the caller is already
  * authenticated: it is what stops an unattended, unlocked browser being turned
  * into permanent access.

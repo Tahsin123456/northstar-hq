@@ -26,7 +26,7 @@ import { MIN_SHORTS_FOR_BASELINE } from "@/lib/analytics/outliers";
  */
 export default function OutliersPage() {
   const { data, isLoading, error, refetch } = useDataset();
-  const { niche } = useFilters();
+  const { niche, contentType } = useFilters();
 
   const controls = useFeedControls({
     defaultWindowDays: 30,
@@ -41,6 +41,7 @@ export default function OutliersPage() {
     range,
     baselineRange,
     niche,
+    contentType,
     ownership: controls.ownership,
     minViews: controls.minViews,
     channelId: controls.channelId,
@@ -52,6 +53,7 @@ export default function OutliersPage() {
     range,
     baselineRange,
     niche,
+    contentType,
     ownership: controls.ownership,
     minViews: controls.minViews,
     channelId: controls.channelId,

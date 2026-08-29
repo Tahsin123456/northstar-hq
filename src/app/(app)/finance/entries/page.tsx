@@ -74,7 +74,7 @@ import {
   parseMoneyToMinor,
 } from "@/lib/finance/money";
 import { toDateInputValue } from "@/lib/date-range";
-import { EM_DASH, formatNumber, pluralize } from "@/lib/format";
+import { EM_DASH, formatDateTime, formatNumber, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /**
@@ -480,6 +480,18 @@ function LedgerSection({
               <span className="text-subtle-foreground">
                 converted to {totals.currency}, for the rows shown
               </span>
+              {/* Said beside the total it qualifies, not in a legend. A reader
+                  who takes this revenue figure to a bank statement needs to
+                  know before they start that part of it has not settled. */}
+              {totals.estimatedMinor > 0 ? (
+                <span className="text-warning">
+                  of which{" "}
+                  <span className="tnum">
+                    {formatMoney(totals.estimatedMinor, totals.currency)}
+                  </span>{" "}
+                  is estimated
+                </span>
+              ) : null}
             </span>
           ) : (
             <span>
@@ -523,6 +535,18 @@ function EntryRow({
 }) {
   const counterparty = entry.kind === "revenue" ? entry.platform : entry.vendor;
 
+  /**
+   * The same fact the source chip renders, read once and used twice.
+   *
+   * An imported row is not deletable — `deleteEntry` refuses it, because the
+   * connector would re-create the month on the next sync and the recreated row
+   * would have lost every revision already recorded against it. The menu has
+   * the row's `source` in hand, so it can say that up front instead of offering
+   * an action that is going to come back as a red toast.
+   */
+  const imported = entry.source !== "manual";
+  const sourceLabel = entry.source === "youtube" ? "YouTube" : entry.source;
+
   return (
     <tr className="group border-b border-border transition-colors last:border-b-0 hover:bg-surface-hover/40">
       <td className="tnum whitespace-nowrap px-4 py-2.5 text-[12px] text-muted-foreground">
@@ -530,7 +554,10 @@ function EntryRow({
       </td>
 
       <td className="px-4 py-2.5">
-        <KindBadge kind={entry.kind} />
+        <div className="flex flex-col items-start gap-1">
+          <KindBadge kind={entry.kind} />
+          <SourceChip source={entry.source} />
+        </div>
       </td>
 
       <td className="px-4 py-2.5 text-right">
@@ -567,7 +594,14 @@ function EntryRow({
       </td>
 
       <td className="whitespace-nowrap px-4 py-2.5 text-[12px] text-subtle-foreground">
-        {entry.createdByName ?? EM_DASH}
+        {/*
+          An imported row has no author, and an em dash here would read as
+          "we lost track of who entered this". Naming the connector is the
+          honest answer to the same question the column asks of every other row.
+        */}
+        {entry.source === "youtube"
+          ? "YouTube import"
+          : (entry.createdByName ?? EM_DASH)}
       </td>
 
       <td className="px-4 py-2.5 text-right">
@@ -583,16 +617,46 @@ function EntryRow({
                 <MoreHorizontal />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
+            <DropdownMenuContent align="end" className="max-w-[17rem]">
               <DropdownMenuItem onSelect={onEdit}>
                 <Pencil />
                 Edit entry
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem tone="danger" onSelect={onDelete}>
-                <Trash2 />
-                Delete entry
-              </DropdownMenuItem>
+              {imported ? (
+                /*
+                  Shown disabled rather than hidden, with the reason beside it.
+                  Dropping the item silently would leave somebody hunting for a
+                  delete that is simply absent on some rows and present on
+                  others; an enabled one would be a 400 dressed up as an
+                  affordance. The reason is rendered as text because a disabled
+                  item takes no pointer events, so a `title` tooltip would never
+                  appear on the one item that needs to explain itself.
+                */
+                <>
+                  <DropdownMenuItem tone="danger" disabled>
+                    <Trash2 />
+                    Delete entry
+                  </DropdownMenuItem>
+                  <p className="px-2 pb-1 pt-0.5 text-[11px] leading-relaxed text-subtle-foreground">
+                    Imported from {sourceLabel}, so it is the connector&rsquo;s row to
+                    remove. The next sync would write the month back and its revision
+                    history would be lost.
+                    {/* Only the connector this app actually ships has a screen
+                        to point at. Sending somebody to Admin → YouTube to turn
+                        off a source that is not YouTube would be advice that
+                        cannot be followed. */}
+                    {entry.source === "youtube"
+                      ? " To stop the import, disconnect the account under Admin → YouTube."
+                      : ""}
+                  </p>
+                </>
+              ) : (
+                <DropdownMenuItem tone="danger" onSelect={onDelete}>
+                  <Trash2 />
+                  Delete entry
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </IfPermitted>
@@ -623,6 +687,44 @@ function KindBadge({ kind }: { kind: FinanceKind }) {
 }
 
 /**
+ * Where a row came from, when that is not "somebody typed it".
+ *
+ * Only imported rows are chipped. Marking the manual ones too would put a badge
+ * on almost every line of an ordinary ledger to say the unremarkable thing, and
+ * the chip would stop being a signal. Absence means typed, which is what the
+ * "Recorded by" column already says by naming a person.
+ *
+ * The chip is not decoration. An imported row answers "who put this number
+ * here" differently, cannot have its amount edited, and may be rewritten by its
+ * connector tomorrow — three consequences the reader can only anticipate if the
+ * row admits what it is.
+ */
+function SourceChip({ source }: { source: string }) {
+  if (source === "manual") return null;
+
+  if (source === "youtube") {
+    return (
+      <Badge
+        variant="accent"
+        size="sm"
+        title="Imported automatically from this channel's YouTube Analytics. Nobody typed it."
+      >
+        YouTube
+      </Badge>
+    );
+  }
+
+  // An unrecognised connector is named rather than hidden. A row this screen
+  // cannot explain is still a row somebody must not mistake for their own
+  // typing.
+  return (
+    <Badge variant="outline" size="sm" title="Imported by a connector, not typed by a person.">
+      {source}
+    </Badge>
+  );
+}
+
+/**
  * The amount, in the currency it was transacted in.
  *
  * The original is the source of truth and is therefore the primary line. The
@@ -630,21 +732,76 @@ function KindBadge({ kind }: { kind: FinanceKind }) {
  * the rate that was in force on the day the entry was written — not today's.
  * Showing only the conversion would quietly restate what somebody was actually
  * invoiced.
+ *
+ * An ESTIMATE is marked as one. YouTube states its revenue figures are subject
+ * to month-end adjustment, so a number imported from it is not the same claim
+ * as an invoice total, and a ledger that renders the two identically invites
+ * somebody to reconcile one against a bank statement and conclude the books are
+ * wrong.
+ *
+ * A FORMER estimate is a third thing, and it takes the row instead of "Est"
+ * rather than sitting beside it. When a connector stops maintaining a month —
+ * YouTube's rollup refuses to total days held in two currencies — the figure it
+ * last stood behind stays on the row, and "Est" would go on promising a
+ * month-end revision that is not coming. Both markers on one row is the row
+ * asserting two things that cannot both be true, so only one is drawn: the
+ * later state wins, in a warning tone rather than the muted grey that reads as
+ * routine, because a figure nobody is re-checking is a thing to notice and not
+ * a footnote. What stopped, and how to restart it, is the note on the row.
+ *
+ * A REVISION gets its own line rather than a tooltip. That this figure has
+ * already moved once — and what it moved from — is the fact that turns "subject
+ * to adjustment" from boilerplate into something the reader can see happening,
+ * and it is exactly the thing somebody hunts for when this month disagrees with
+ * the figure they wrote down last week. A fact that only exists on hover does
+ * not exist on a printout, in a screenshot, or to a keyboard user.
  */
 function AmountCell({ entry }: { entry: FinanceEntryDTO }) {
   const converted = entry.currency !== entry.baseCurrency;
+  const sourceLabel = entry.source === "youtube" ? "YouTube" : entry.source;
 
   return (
     <div className="flex flex-col items-end gap-0.5">
-      <span className="tnum text-[13px] font-medium text-foreground">
+      <span className="tnum flex items-center gap-1.5 text-[13px] font-medium text-foreground">
+        {entry.isUnmaintained ? (
+          <span
+            className="rounded bg-warning-subtle px-1 py-px text-[9px] font-medium uppercase tracking-wider text-warning"
+            title={`A former estimate from ${sourceLabel}. ${sourceLabel} has stopped re-checking this figure, so no month-end revision is coming — and it was never settled cash. The note on this row says what stopped and how to restart it.`}
+          >
+            Stale est
+          </span>
+        ) : entry.isEstimated ? (
+          <span
+            className="rounded bg-surface-hover px-1 py-px text-[9px] font-medium uppercase tracking-wider text-subtle-foreground"
+            title={`An estimate from ${sourceLabel}, subject to month-end adjustment. It is not settled cash.`}
+          >
+            Est
+          </span>
+        ) : null}
         {formatMoney(entry.amountMinor, entry.currency)}
       </span>
+
       {converted ? (
         <span
           className="tnum text-[11px] text-subtle-foreground"
           title={`Converted at 1 ${entry.currency} = ${entry.exchangeRate} ${entry.baseCurrency}, the rate configured when this entry was recorded.`}
         >
           ≈ {formatMoney(entry.baseAmountMinor, entry.baseCurrency, { withCode: true })}
+        </span>
+      ) : null}
+
+      {entry.revisionCount > 0 ? (
+        <span
+          className="tnum text-[11px] text-warning"
+          title={`${sourceLabel} has changed this figure ${entry.revisionCount} time${entry.revisionCount === 1 ? "" : "s"} since it was first imported. It may change again.`}
+        >
+          Revised {entry.revisionCount}×
+          {/* The previous amount is only shown when there is one to show: a row
+              can carry a revision count from before the column existed, and an
+              invented "was" figure would be worse than none. */}
+          {entry.previousAmountMinor !== null
+            ? `, was ${formatMoney(entry.previousAmountMinor, entry.currency)}`
+            : ""}
         </span>
       ) : null}
     </div>
@@ -794,14 +951,46 @@ function EntryForm({
   const patch = <K extends keyof EntryDraft>(key: K, value: EntryDraft[K]) =>
     setDraft((previous) => ({ ...previous, [key]: value }));
 
-  // The same parser the API validates with, so what this preview says will be
-  // stored is what gets stored.
-  const parsedMinor = draft.amountText.trim()
-    ? parseMoneyToMinor(draft.amountText, draft.currency)
-    : null;
+  /**
+   * An imported row is edited through a different, smaller form.
+   *
+   * `assertImportedEntryEditable` in finance-service refuses a change to the
+   * amount, the currency, the kind, the date, the channel or the platform of a
+   * non-manual entry — the next sync would overwrite it — and it refuses by
+   * throwing. Rendering those fields anyway and letting the server say no is
+   * the shape of interface that wastes somebody's afternoon: they retype a
+   * figure they believe is wrong, press save, and get a paragraph explaining
+   * that the last two minutes were never going to work.
+   *
+   * So the fields the service will not accept are not offered at all, the
+   * values are shown as facts instead, and one line above them says why before
+   * the attempt rather than after it. What is left — the category and the notes
+   * — is exactly what the service does accept, which is checked on the VALUE
+   * there rather than on field presence, so the diff this form sends contains
+   * nothing it must not.
+   */
+  const imported = entry !== null && entry.source !== "manual";
 
-  const amountError = amountProblem(draft.amountText, parsedMinor);
-  const dateError = draft.occurredOn ? null : "Pick the date the money moved.";
+  /**
+   * The imported amount is taken from the entry, never re-parsed from the field
+   * that is no longer rendered.
+   *
+   * It also has to bypass `amountProblem`, which rejects zero — correctly, for
+   * something a person typed, since money they meant to record and did not is a
+   * mistake worth stopping. An imported zero is the connector saying "this
+   * month earned nothing", which is a real row somebody may still want to
+   * categorise or annotate. Running it through the typed-entry rules would
+   * disable the save button on a form whose only editable fields are the two
+   * that are perfectly legal to change.
+   */
+  const parsedMinor = imported
+    ? entry.amountMinor
+    : draft.amountText.trim()
+      ? parseMoneyToMinor(draft.amountText, draft.currency)
+      : null;
+
+  const amountError = imported ? null : amountProblem(draft.amountText, parsedMinor);
+  const dateError = imported || draft.occurredOn ? null : "Pick the date the money moved.";
 
   const currencyHasRate =
     draft.currency === baseCurrency || ratedCurrencies.has(draft.currency);
@@ -882,94 +1071,104 @@ function EntryForm({
     <form onSubmit={submit}>
       <DialogHeader>
         <DialogTitle>
-          {isEdit
-            ? kind === "revenue"
-              ? "Edit earnings"
-              : "Edit expense"
-            : kind === "revenue"
-              ? "Add earnings"
-              : "Add expense"}
+          {imported
+            ? "Edit imported entry"
+            : isEdit
+              ? kind === "revenue"
+                ? "Edit earnings"
+                : "Edit expense"
+              : kind === "revenue"
+                ? "Add earnings"
+                : "Add expense"}
         </DialogTitle>
         <DialogDescription>
-          {kind === "revenue"
-            ? "Money the operation brought in. File it against the channel that earned it, or leave it company-wide."
-            : "Money the operation paid out. File it against a channel when it belongs to one, or leave it company-wide."}
+          {imported
+            ? "This figure belongs to its connector. What you can change here is how it is filed and what it says."
+            : kind === "revenue"
+              ? "Money the operation brought in. File it against the channel that earned it, or leave it company-wide."
+              : "Money the operation paid out. File it against a channel when it belongs to one, or leave it company-wide."}
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody className="flex flex-col gap-4">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Date" htmlFor="entry-date" error={dateError}>
-            <Input
-              id="entry-date"
-              type="date"
-              value={draft.occurredOn}
-              invalid={Boolean(dateError)}
-              onChange={(event) => patch("occurredOn", event.target.value)}
-            />
-            <FieldHint>The day the money moved, not the day you are recording it.</FieldHint>
-          </Field>
+        {imported ? (
+          <ImportedEntryFacts entry={entry} />
+        ) : (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Date" htmlFor="entry-date" error={dateError}>
+                <Input
+                  id="entry-date"
+                  type="date"
+                  value={draft.occurredOn}
+                  invalid={Boolean(dateError)}
+                  onChange={(event) => patch("occurredOn", event.target.value)}
+                />
+                <FieldHint>The day the money moved, not the day you are recording it.</FieldHint>
+              </Field>
 
-          <Field label="Currency" htmlFor="entry-currency">
-            <FieldSelect
-              id="entry-currency"
-              value={draft.currency}
-              onChange={(value) => patch("currency", value)}
-              options={CURRENCIES.map((currency) => ({
-                value: currency.code,
-                label: `${currency.code} — ${currency.name}`,
-                hint:
-                  currency.code === baseCurrency
-                    ? "base"
-                    : ratedCurrencies.has(currency.code)
-                      ? undefined
-                      : "no rate set",
-              }))}
-            />
-            {currencyHasRate ? null : (
-              <FieldHint tone="danger">
-                No exchange rate is configured for {draft.currency}, so this entry cannot be
-                converted into the reporting currency and will be refused.{" "}
-                <Link href="/finance/settings" className="text-accent underline-offset-4 hover:underline">
-                  Set one under Finance → Settings
-                </Link>
-                .
-              </FieldHint>
-            )}
-          </Field>
-        </div>
+              <Field label="Currency" htmlFor="entry-currency">
+                <FieldSelect
+                  id="entry-currency"
+                  value={draft.currency}
+                  onChange={(value) => patch("currency", value)}
+                  options={CURRENCIES.map((currency) => ({
+                    value: currency.code,
+                    label: `${currency.code} — ${currency.name}`,
+                    hint:
+                      currency.code === baseCurrency
+                        ? "base"
+                        : ratedCurrencies.has(currency.code)
+                          ? undefined
+                          : "no rate set",
+                  }))}
+                />
+                {currencyHasRate ? null : (
+                  <FieldHint tone="danger">
+                    No exchange rate is configured for {draft.currency}, so this entry cannot be
+                    converted into the reporting currency and will be refused.{" "}
+                    <Link href="/finance/settings" className="text-accent underline-offset-4 hover:underline">
+                      Set one under Finance → Settings
+                    </Link>
+                    .
+                  </FieldHint>
+                )}
+              </Field>
+            </div>
 
-        <Field label="Amount" htmlFor="entry-amount" error={amountError}>
-          <Input
-            id="entry-amount"
-            autoFocus
-            inputMode="decimal"
-            autoComplete="off"
-            placeholder="1,234.56"
-            value={draft.amountText}
-            invalid={Boolean(amountError)}
-            onChange={(event) => patch("amountText", event.target.value)}
-          />
-          {amountError ? null : parsedMinor === null ? (
-            <FieldHint>
-              Type it however you write it — 1,234.56 and 1.234,56 both read as the same
-              amount.
-            </FieldHint>
-          ) : (
-            <FieldHint>
-              Stored as{" "}
-              <span className="tnum font-medium text-foreground">
-                {formatMoney(parsedMinor, draft.currency, { withCode: true })}
-              </span>{" "}
-              <span className="text-subtle-foreground">
-                ({formatNumber(parsedMinor)} minor units — the ledger holds whole cents, never
-                a fraction of one)
-              </span>
-            </FieldHint>
-          )}
-        </Field>
+            <Field label="Amount" htmlFor="entry-amount" error={amountError}>
+              <Input
+                id="entry-amount"
+                autoFocus
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="1,234.56"
+                value={draft.amountText}
+                invalid={Boolean(amountError)}
+                onChange={(event) => patch("amountText", event.target.value)}
+              />
+              {amountError ? null : parsedMinor === null ? (
+                <FieldHint>
+                  Type it however you write it — 1,234.56 and 1.234,56 both read as the same
+                  amount.
+                </FieldHint>
+              ) : (
+                <FieldHint>
+                  Stored as{" "}
+                  <span className="tnum font-medium text-foreground">
+                    {formatMoney(parsedMinor, draft.currency, { withCode: true })}
+                  </span>{" "}
+                  <span className="text-subtle-foreground">
+                    ({formatNumber(parsedMinor)} minor units — the ledger holds whole cents, never
+                    a fraction of one)
+                  </span>
+                </FieldHint>
+              )}
+            </Field>
+          </>
+        )}
 
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className={cn("grid gap-4", !imported && "sm:grid-cols-2")}>
           <Field label="Category" htmlFor="entry-category">
             <FieldSelect
               id="entry-category"
@@ -992,27 +1191,34 @@ function EntryForm({
                 </Link>
                 .
               </FieldHint>
+            ) : imported ? (
+              <FieldHint>
+                Refiling an imported entry sticks. The connector writes the amount on every
+                sync but leaves the category alone.
+              </FieldHint>
             ) : null}
           </Field>
 
-          <Field label="Channel" htmlFor="entry-channel">
-            <FieldSelect
-              id="entry-channel"
-              value={draft.channelId ?? NONE}
-              onChange={(value) => patch("channelId", value === NONE ? null : value)}
-              options={[
-                { value: NONE, label: "Company-wide" },
-                ...channels.map((channel) => ({ value: channel.id, label: channel.name })),
-              ]}
-            />
-            <FieldHint>
-              Company-wide entries count towards the business but against no single
-              channel&rsquo;s profit.
-            </FieldHint>
-          </Field>
+          {imported ? null : (
+            <Field label="Channel" htmlFor="entry-channel">
+              <FieldSelect
+                id="entry-channel"
+                value={draft.channelId ?? NONE}
+                onChange={(value) => patch("channelId", value === NONE ? null : value)}
+                options={[
+                  { value: NONE, label: "Company-wide" },
+                  ...channels.map((channel) => ({ value: channel.id, label: channel.name })),
+                ]}
+              />
+              <FieldHint>
+                Company-wide entries count towards the business but against no single
+                channel&rsquo;s profit.
+              </FieldHint>
+            </Field>
+          )}
         </div>
 
-        {kind === "revenue" ? (
+        {imported ? null : kind === "revenue" ? (
           <Field label="Platform" htmlFor="entry-platform">
             <Input
               id="entry-platform"
@@ -1103,6 +1309,118 @@ function EntryForm({
   );
 }
 
+/**
+ * The half of an imported entry that is not this form's to change, shown as
+ * facts and explained in one line.
+ *
+ * The explanation comes BEFORE the values, not after a failed save. It names
+ * the mechanism ("the next sync would overwrite it") rather than the rule,
+ * because the mechanism is what makes the restriction reasonable instead of
+ * arbitrary, and it names the way out — a separate manual entry — so that
+ * somebody who genuinely believes the figure is wrong is not left with nothing
+ * to do.
+ *
+ * The correction route is deliberately a second row rather than an edit to this
+ * one. Two visible numbers, one from YouTube and one from a person who
+ * disagreed with it, is a ledger that can be audited; one silently overwritten
+ * number is not.
+ */
+function ImportedEntryFacts({ entry }: { entry: FinanceEntryDTO }) {
+  const sourceLabel = entry.source === "youtube" ? "YouTube" : entry.source;
+  const converted = entry.currency !== entry.baseCurrency;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-md border border-border bg-surface-sunken px-3 py-3">
+      <div className="flex items-start gap-2.5">
+        <ReceiptText className="mt-0.5 size-4 shrink-0 text-subtle-foreground" />
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
+          {/* The same three states as the ledger's chip, in the same order and
+              for the same reason: this dialog used to tell the reader the
+              figure is "revised at month end" on exactly the rows where nothing
+              is revising it any more. */}
+          {entry.isUnmaintained ? (
+            <>
+              This entry was imported from {sourceLabel} and was an{" "}
+              <strong className="text-foreground">estimate</strong>, but {sourceLabel} has
+              stopped maintaining it — no further revision is coming. The note below says
+              what stopped.{" "}
+            </>
+          ) : entry.isEstimated ? (
+            <>
+              This entry was imported from {sourceLabel} and is an{" "}
+              <strong className="text-foreground">estimate</strong>, revised at month end.{" "}
+            </>
+          ) : (
+            <>This entry was imported from {sourceLabel}. </>
+          )}
+          Its amount, currency, date, channel and platform are not editable here — the next
+          sync would overwrite the change. If the figure itself is wrong, record a separate
+          manual entry for the difference so both numbers stay visible.
+        </p>
+      </div>
+
+      <dl className="grid gap-x-4 gap-y-2 sm:grid-cols-2">
+        <ReadOnlyFact label="Date">{formatLedgerDate(entry.occurredOn)}</ReadOnlyFact>
+
+        <ReadOnlyFact label="Amount">
+          <span className="tnum text-foreground">
+            {formatMoney(entry.amountMinor, entry.currency)}
+          </span>
+          {converted ? (
+            <span className="tnum text-subtle-foreground">
+              {" "}
+              ≈ {formatMoney(entry.baseAmountMinor, entry.baseCurrency, { withCode: true })}
+            </span>
+          ) : null}
+        </ReadOnlyFact>
+
+        <ReadOnlyFact label="Channel">
+          {entry.channelName ?? "Company-wide"}
+        </ReadOnlyFact>
+
+        <ReadOnlyFact label="Platform">{entry.platform ?? EM_DASH}</ReadOnlyFact>
+
+        {entry.revisionCount > 0 ? (
+          <ReadOnlyFact label="Revisions">
+            <span className="text-warning">
+              Changed {entry.revisionCount} time{entry.revisionCount === 1 ? "" : "s"}
+              {entry.previousAmountMinor !== null
+                ? `, last from ${formatMoney(entry.previousAmountMinor, entry.currency)}`
+                : ""}
+            </span>
+          </ReadOnlyFact>
+        ) : null}
+
+        {/* `formatDateTime`, not the ledger formatter: this is the moment a sync
+            ran, in the reader's own zone, not a calendar date the books are
+            filed under. The two are formatted differently on purpose. */}
+        {entry.lastImportedAt !== null ? (
+          <ReadOnlyFact label="Last imported">
+            {formatDateTime(entry.lastImportedAt)}
+          </ReadOnlyFact>
+        ) : null}
+      </dl>
+    </div>
+  );
+}
+
+function ReadOnlyFact({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
+        {label}
+      </dt>
+      <dd className="mt-0.5 truncate text-[12px] text-muted-foreground">{children}</dd>
+    </div>
+  );
+}
+
 function DeleteEntryDialog({
   entry,
   onOpenChange,
@@ -1147,6 +1465,16 @@ function DeleteEntryDialog({
               audit record, which keeps the amount and currency precisely because the row
               will not be there to look up afterwards.
             </p>
+
+            {/*
+              There is deliberately no imported-row branch here any more.
+              Deleting a connector-owned entry used to be allowed and used to
+              not stick — the sync re-created the month and the recreated row
+              had lost its revision history — so `deleteEntry` now refuses it
+              and the row menu never opens this dialog for one. A warning that
+              a delete "will not last" would only make sense in a dialog that
+              still went through with it.
+            */}
           </DialogBody>
         ) : null}
 
@@ -1513,18 +1841,40 @@ function totalsForShown(entries: readonly FinanceEntryDTO[]): {
   revenueMinor: number;
   expenseMinor: number;
   netMinor: number;
+  /**
+   * How much of `revenueMinor` is not settled cash. A share of that figure,
+   * never an addition to it — so the caption reads "of which", and nobody can
+   * add the two together.
+   *
+   * "Not settled" and not "still to be revised": a month a connector has
+   * stopped maintaining stays in this share, because it never settled either,
+   * even though nothing is going to revise it. The row itself is where that
+   * difference is drawn — see `AmountCell` — and a total is the wrong place to
+   * try to draw it, since the two would have to be added back together to
+   * answer the question this caption exists for.
+   */
+  estimatedMinor: number;
 } | null {
   if (entries.length === 0) return null;
 
   const currency = entries[0].baseCurrency;
   let revenueMinor = 0;
   let expenseMinor = 0;
+  let estimatedMinor = 0;
 
   for (const entry of entries) {
     if (entry.baseCurrency !== currency) return null;
-    if (entry.kind === "revenue") revenueMinor += entry.baseAmountMinor;
-    else expenseMinor += entry.baseAmountMinor;
+    if (entry.kind === "revenue") {
+      revenueMinor += entry.baseAmountMinor;
+      if (entry.isEstimated) estimatedMinor += entry.baseAmountMinor;
+    } else expenseMinor += entry.baseAmountMinor;
   }
 
-  return { currency, revenueMinor, expenseMinor, netMinor: revenueMinor - expenseMinor };
+  return {
+    currency,
+    revenueMinor,
+    expenseMinor,
+    netMinor: revenueMinor - expenseMinor,
+    estimatedMinor,
+  };
 }

@@ -57,7 +57,7 @@ import {
 import { useNicheList } from "@/hooks/use-niches";
 import { useNow } from "@/hooks/use-now";
 import { auditActionLabel } from "@/lib/audit/actions";
-import { PERMISSION_LABELS } from "@/lib/auth/permissions";
+import { isNicheScoped, PERMISSION_LABELS } from "@/lib/auth/permissions";
 import { ApiError, type EmployeePayPatch } from "@/lib/api-client";
 import {
   CURRENCIES,
@@ -212,7 +212,13 @@ function ProfileScreen({ userId }: { userId: string }) {
 
       <AccountSection account={account} now={now} />
 
-      <NichesSection userId={account.userId} assigned={employee.assignedNiches} label={label} />
+      <NichesSection
+        userId={account.userId}
+        assigned={employee.assignedNiches}
+        label={label}
+        role={account.role}
+        roleLabel={account.roleLabel}
+      />
 
       {employee.payroll ? (
         <PayrollSection userId={account.userId} payroll={employee.payroll} label={label} />
@@ -462,21 +468,42 @@ function AccountSection({ account, now }: { account: EmployeeAccountDTO; now: nu
 // NICHES
 // ---------------------------------------------------------------------------
 
+/**
+ * What this person works on, and what it costs them when the answer is nothing.
+ *
+ * The empty state is written from THIS person's role rather than in general,
+ * because an empty assignment is two different situations wearing one label.
+ * `resolveVisibleNicheIds` fails closed for a niche-scoped role: no assignments
+ * means no visible channels, so the account signs in to an empty app — a state
+ * an admin creates by accident, most often by inviting somebody and moving on.
+ * A role that is not niche-scoped is outside that mechanism entirely and keeps
+ * seeing everything. Payroll is the half they share: hits are credited per
+ * assigned niche, so an empty list earns no bonus either way.
+ */
 function NichesSection({
   userId,
   assigned,
   label,
+  role,
+  roleLabel,
 }: {
   userId: string;
   assigned: readonly EmployeeNicheDTO[];
   label: string;
+  role: string;
+  roleLabel: string;
 }) {
   const [editing, setEditing] = React.useState(false);
+  const scoped = isNicheScoped(role);
 
   return (
     <Section
       title="Niches"
-      description="What this person works on. A niche-scoped role sees only these niches' channels, and payroll pays bonuses only for hits inside them."
+      description={
+        scoped
+          ? `What this person works on. ${roleLabel} sees only these niches' channels, and payroll pays bonuses only for hits inside them.`
+          : `What this person works on. ${roleLabel} sees every niche regardless, but payroll pays bonuses only for hits inside the ones listed here.`
+      }
       icon={<Tags className="size-3.5" />}
       action={
         <Button variant="secondary" size="sm" onClick={() => setEditing(true)}>
@@ -486,9 +513,31 @@ function NichesSection({
       }
     >
       {assigned.length === 0 ? (
-        <p className="text-[13px] text-subtle-foreground">
-          No niches assigned. A niche-scoped role with no niches sees no channels
-          at all, and earns no hit bonuses.
+        <p
+          className={cn(
+            "flex gap-2 rounded-lg border px-3.5 py-3 text-[13px] leading-relaxed",
+            scoped
+              ? "border-warning/30 bg-warning-subtle text-warning"
+              : "border-border bg-surface-sunken text-muted-foreground",
+          )}
+        >
+          {scoped ? <ShieldAlert className="mt-0.5 size-4 shrink-0" /> : null}
+          <span>
+            {scoped ? (
+              <>
+                No niches assigned. {roleLabel} sees only assigned niches, so
+                right now this account signs in to an empty app — no channels, no
+                Shorts, no dashboard — and can earn no hit bonus. Add at least one
+                below.
+              </>
+            ) : (
+              <>
+                No niches assigned. {roleLabel} still sees every channel, but hit
+                bonuses are paid per niche, so none can be credited to this
+                person until a niche is assigned.
+              </>
+            )}
+          </span>
         </p>
       ) : (
         <div className="flex flex-wrap gap-1.5">
@@ -514,6 +563,8 @@ function NichesSection({
         userId={userId}
         assigned={assigned}
         label={label}
+        scoped={scoped}
+        roleLabel={roleLabel}
       />
     </Section>
   );
@@ -525,12 +576,16 @@ function EditNichesDialog({
   userId,
   assigned,
   label,
+  scoped,
+  roleLabel,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   userId: string;
   assigned: readonly EmployeeNicheDTO[];
   label: string;
+  scoped: boolean;
+  roleLabel: string;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -542,6 +597,8 @@ function EditNichesDialog({
             userId={userId}
             assigned={assigned}
             label={label}
+            scoped={scoped}
+            roleLabel={roleLabel}
             onOpenChange={onOpenChange}
           />
         ) : null}
@@ -563,11 +620,15 @@ function EditNichesForm({
   userId,
   assigned,
   label,
+  scoped,
+  roleLabel,
   onOpenChange,
 }: {
   userId: string;
   assigned: readonly EmployeeNicheDTO[];
   label: string;
+  scoped: boolean;
+  roleLabel: string;
   onOpenChange: (open: boolean) => void;
 }) {
   const { data, isLoading, error } = useNicheList();
@@ -624,8 +685,9 @@ function EditNichesForm({
       <DialogHeader>
         <DialogTitle>Niches for {label}</DialogTitle>
         <DialogDescription>
-          Tick every niche this person works. This changes what a niche-scoped role
-          can see and which hits earn them a bonus.
+          {scoped
+            ? `Tick every niche this person works. ${roleLabel} sees only what is ticked here, and only hits inside it earn them a bonus.`
+            : `Tick every niche this person works. ${roleLabel} sees every channel either way, but only hits inside the ticked niches earn them a bonus.`}
         </DialogDescription>
       </DialogHeader>
 
@@ -672,6 +734,25 @@ function EditNichesForm({
             );
           })
         )}
+
+        {/*
+          The warning fires at the moment the mistake is made, not on the screen
+          behind. Unticking the last box for a niche-scoped role is how an
+          otherwise working account becomes an empty app, and it looks exactly
+          like every other unticked box while you are doing it. It is a warning
+          and not a block: emptying the list on purpose is legitimate — somebody
+          moving off a niche between projects — and refusing it would leave no
+          way to express that.
+        */}
+        {scoped && selected.size === 0 ? (
+          <p className="mt-1 flex gap-2 rounded-lg border border-warning/30 bg-warning-subtle px-3 py-2.5 text-[12px] leading-relaxed text-warning">
+            <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+            <span>
+              With nothing ticked, {roleLabel} sees no channels at all — {label}{" "}
+              will sign in to an empty app, and can earn no hit bonus.
+            </span>
+          </p>
+        ) : null}
 
         {formError ? <FieldHint tone="danger">{formError}</FieldHint> : null}
       </DialogBody>

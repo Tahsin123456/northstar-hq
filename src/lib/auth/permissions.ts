@@ -43,7 +43,13 @@ export const PERMISSIONS = [
   // --- Operational ----------------------------------------------------------
   /** Add, rename, re-scope and remove tracked channels. */
   "channels.manage",
-  /** Create and edit niches, including their hit thresholds. */
+  /**
+   * Create and edit niches, their content types, and how Shorts are filed
+   * under them. NOT their hit thresholds — `assertMayConfigureThreshold` in
+   * niche-service holds that behind `settings.manage`, because a threshold is
+   * the number every hit rate and every hit bonus is measured against and is
+   * not the same decision as naming a niche.
+   */
   "niches.manage",
   /** Trigger a refresh / sync run by hand. */
   "sync.trigger",
@@ -53,6 +59,23 @@ export const PERMISSIONS = [
   "finance.view",
   /** Create, edit and delete financial entries and categories. */
   "finance.manage",
+
+  // --- Self-service ---------------------------------------------------------
+  /**
+   * See YOUR OWN pay: base salary, hit bonus, and the hits behind them.
+   *
+   * NOT a narrower `payroll.view`, and it must never be widened into one. The
+   * payroll keys below answer "what does the company owe everybody" — every
+   * colleague's salary in one table. This one answers "what am I owed", about
+   * the caller and nobody else, and the service behind it takes the user id
+   * from the session with no parameter that could redirect it.
+   *
+   * Held by every role, which is also why it is not grantable: an employee
+   * asking what they earned is not a privilege an administrator hands out, and
+   * a checklist entry that is already ticked for everyone would only suggest it
+   * could be un-ticked. It cannot — grants are additive.
+   */
+  "earnings.view_own",
 
   // --- Payroll --------------------------------------------------------------
   /**
@@ -133,6 +156,17 @@ export interface RoleDefinition {
 const ALL_PERMISSIONS: readonly Permission[] = PERMISSIONS;
 
 /**
+ * Held by every role, without exception.
+ *
+ * Spread explicitly into each definition below rather than folded into the
+ * research baseline, because it is not research: a Long Form Editor who never
+ * opens a Shorts dashboard still has a salary and is still entitled to see it.
+ * `src/lib/auth/__tests__/permissions.test.ts` pins that every entry in ROLES
+ * carries it, so a role added later cannot quietly ship without it.
+ */
+const SELF_SERVICE: readonly Permission[] = ["earnings.view_own"];
+
+/**
  * What analytics work looks like for everyone who is not an administrator:
  * read the numbers, annotate them, export them.
  */
@@ -161,10 +195,16 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     description:
       "Runs the Shorts operation across every niche: full analytics and research, plus the channel, niche and sync controls the job needs. No payroll, finance or user administration.",
     // Operational capabilities are deliberately included: someone accountable
-    // for Shorts performance who cannot add a competitor channel to track, or
-    // set the hit threshold for their own niche, cannot do the job. Each one is
+    // for Shorts performance who cannot add a competitor channel to track,
+    // organise their niches or trigger a sync cannot do the job. Each one is
     // reversible and audited.
-    permissions: [...RESEARCH_BASELINE, ...HEAD_OPERATIONS],
+    //
+    // Hit thresholds are NOT among them, deliberately. `settings.manage` is an
+    // admin permission and `assertMayConfigureThreshold` requires it, so a Head
+    // can create the niche and an Admin sets what counts as a hit in it. The
+    // number decides hit rates and hit bonuses across the whole operation, and
+    // the person measured by it should not be the person setting it.
+    permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE, ...HEAD_OPERATIONS],
     nicheScoped: false,
     contentScope: "shorts",
   },
@@ -173,7 +213,7 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     label: "Head of Longs",
     description:
       "Runs the Long Form operation. The Long Form features are not built yet, so today this role sees the same analytics and research as a Head of Shorts.",
-    permissions: [...RESEARCH_BASELINE, ...HEAD_OPERATIONS, "longs.view"],
+    permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE, ...HEAD_OPERATIONS, "longs.view"],
     nicheScoped: false,
     contentScope: "longs",
   },
@@ -182,7 +222,7 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     label: "Short Form Editor",
     description:
       "Edits Shorts for their assigned niches. Sees analytics and research for those niches only, and can write notes and save Shorts.",
-    permissions: RESEARCH_BASELINE,
+    permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE],
     nicheScoped: true,
     contentScope: "shorts",
   },
@@ -191,7 +231,7 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     label: "Long Form Editor",
     description:
       "Edits long-form video for their assigned niches. The Long Form features are not built yet; today this role sees the same niche-scoped analytics as a Short Form Editor.",
-    permissions: [...RESEARCH_BASELINE, "longs.view"],
+    permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE, "longs.view"],
     nicheScoped: true,
     contentScope: "longs",
   },
@@ -200,7 +240,7 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     label: "Short Form Clip Producer",
     description:
       "Finds and produces clips for their assigned niches. Sees analytics and research for those niches, and can write notes and save Shorts.",
-    permissions: RESEARCH_BASELINE,
+    permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE],
     nicheScoped: true,
     contentScope: "shorts",
   },
@@ -314,6 +354,11 @@ const NON_GRANTABLE: readonly Permission[] = [
   // Creating administrators is the one capability that lets a person escalate
   // themselves without limit, so it may only arrive with the Admin role.
   "users.manage",
+  // Excluded for the opposite reason to everything else on this list: every
+  // role already holds it, so offering it as a checkbox would imply it could be
+  // cleared. Grants are additive — unticking it would change nothing — and a
+  // control that cannot do what it appears to do is worse than no control.
+  "earnings.view_own",
   // Payroll carries every colleague's salary. It is grantable in principle but
   // deliberately not from the ordinary permission checklist — widening someone
   // into everyone's pay should be a considered act, not a stray tick. An admin
@@ -335,6 +380,7 @@ export const PERMISSION_LABELS: Readonly<Record<Permission, string>> = {
   "sync.trigger": "Trigger data syncs",
   "finance.view": "View finance",
   "finance.manage": "Manage finance",
+  "earnings.view_own": "See your own earnings",
   "payroll.view": "View payroll & salaries",
   "payroll.manage": "Manage payroll",
   "longs.view": "Long Form access (reserved)",

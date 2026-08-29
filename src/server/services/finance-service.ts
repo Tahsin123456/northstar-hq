@@ -11,7 +11,6 @@ import {
   CURRENCY_CODES,
   MAX_MONEY_MINOR,
   convertMinorBetween,
-  formatMoney,
   isSupportedCurrency,
   normalizeCurrencyCode,
   profitMargin,
@@ -33,7 +32,8 @@ import {
   type FinanceSeriesPoint,
   type FinanceSummary,
 } from "@/lib/finance/types";
-import { getCurrentOrgId, getCurrentOrgSettings, getScope } from "./user-service";
+import { isUnmaintainedNote } from "@/lib/finance/unmaintained";
+import { getCurrentOrgId, getCurrentOrgSettings, getOrgSettings, getScope } from "./user-service";
 
 /**
  * =========================================================================
@@ -262,6 +262,11 @@ const ENTRY_SELECT = {
   platform: true,
   vendor: true,
   notes: true,
+  source: true,
+  isEstimated: true,
+  previousAmountMinor: true,
+  revisionCount: true,
+  lastImportedAt: true,
   createdAt: true,
   updatedAt: true,
   category: { select: { name: true } },
@@ -283,6 +288,11 @@ interface FinanceEntryRow {
   platform: string | null;
   vendor: string | null;
   notes: string | null;
+  source: string;
+  isEstimated: boolean;
+  previousAmountMinor: number | null;
+  revisionCount: number;
+  lastImportedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   category: { name: string } | null;
@@ -314,6 +324,16 @@ function toFinanceEntryDTO(
     exchangeRate: row.exchangeRate,
     vendor: row.vendor,
     notes: row.notes,
+    source: row.source,
+    isEstimated: row.isEstimated,
+    // Read here, once, so no screen has to parse the note for itself — and only
+    // on an imported row, because the mark is a connector's statement about its
+    // own figure. A hand-typed note that happens to open the same way is the
+    // author's own sentence and is left to speak for itself.
+    isUnmaintained: row.source !== "manual" && isUnmaintainedNote(row.notes),
+    previousAmountMinor: row.previousAmountMinor,
+    revisionCount: row.revisionCount,
+    lastImportedAt: row.lastImportedAt?.getTime() ?? null,
     createdByName: row.createdBy?.name ?? null,
     createdAt: row.createdAt.getTime(),
     updatedAt: row.updatedAt.getTime(),
@@ -420,11 +440,44 @@ async function getChannelNames(organizationId: string): Promise<Map<string, stri
 }
 
 /**
+ * How a finance entry is named in an audit summary — WITHOUT its amount.
+ *
+ * The figure used to be in the sentence: "Recorded a $4,100.00 revenue entry".
+ * That put it beyond every permission check. `metadata` is redacted on read by
+ * key, exactly, for a reader who lacks `finance.view` (see
+ * `moneyPermissionFor` and `stripMoneyKeys`); the summary was returned verbatim
+ * to anyone holding `audit.view`, which is individually grantable and therefore
+ * a strictly wider group. An admin handing somebody the log to investigate an
+ * incident was handing them every transaction value in the company, in prose.
+ *
+ * So the summary now identifies the entry rather than quoting it: which side of
+ * the ledger, and the day it belongs to. That is enough to find the row — the
+ * event also carries `targetId` — and a reader entitled to the figure still
+ * reads it off `amountMinor` in the metadata sitting beside this line. The date
+ * is the ISO day the metadata already uses, and stays ISO on purpose: a
+ * locale-formatted date is one more thing that varies by whoever's process
+ * wrote the row.
+ */
+function entryAuditLabel(entry: { kind: string; occurredOn: Date }): string {
+  return `${entry.kind} entry dated ${isoDay(entry.occurredOn)}`;
+}
+
+/** The day part of a timestamp, as the log writes dates everywhere. */
+function isoDay(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/**
  * The audit record for a money movement — and, deliberately, what it leaves out.
  *
  * The amount, both currencies and the rate are here because "who moved money,
  * how much, and what it was worth" is the entire reason finance is audited at
- * all. `notes` and `vendor` are not, and that is not squeamishness: they are
+ * all. They are here AND NOWHERE ELSE in the entry, which is what makes them
+ * redactable: `listAuditEvents` strips these keys for a reader without
+ * `finance.view`, and it can only do that for figures that live in a named
+ * field rather than in a sentence.
+ *
+ * `notes` and `vendor` are not here, and that is not squeamishness: they are
  * free text that routinely carries deal terms, rates and counterparty names,
  * and the audit log is readable by anyone holding `audit.view` — a different
  * and wider set of people than `finance.view`. Copying commercial detail into
@@ -444,7 +497,7 @@ function entryAuditMetadata(entry: {
 }): Record<string, unknown> {
   return {
     kind: entry.kind,
-    occurredOn: entry.occurredOn.toISOString().slice(0, 10),
+    occurredOn: isoDay(entry.occurredOn),
     amountMinor: entry.amountMinor,
     currency: entry.currency,
     baseAmountMinor: entry.baseAmountMinor,
@@ -540,6 +593,140 @@ async function resolveConversion(params: {
   }
 
   return { baseAmountMinor, baseCurrency, exchangeRate: configured.rate };
+}
+
+/**
+ * Refuses a hand edit that the next import would undo.
+ *
+ * WHY AN IMPORTED AMOUNT IS NOT EDITABLE
+ * A YouTube row is written from `(organization, source, externalId)` and
+ * rewritten on every sync. If somebody corrected the amount by hand, the next
+ * run would overwrite the correction, the correction would be re-applied, and
+ * the two would fight — silently, on a schedule, with the ledger telling a
+ * different story depending on which ran last. The honest resolution is that
+ * the connector owns the figure and the person owns everything around it.
+ *
+ * So the identity of the transaction is frozen — how much, in what currency,
+ * which side of the ledger, when, and which channel it belongs to, all of which
+ * either ARE the imported fact or are part of the key that finds the row again.
+ * `platform` is frozen for the same mechanical reason: the import rewrites it.
+ * Notes and category stay editable, because those are the team's own
+ * annotations and nothing in the sync path touches them.
+ *
+ * THE TEST IS ON THE VALUE, NOT ON WHETHER THE FIELD WAS SENT.
+ * `financeEntryUpdateSchema` is `createSchema.partial()` and the edit dialog
+ * submits the whole object, so every save carries `amountMinor` whether or not
+ * the user touched it. Keying off presence would make an imported entry's notes
+ * un-editable — a guard that blocks the permitted edit and reads as a bug.
+ */
+function assertImportedEntryEditable(
+  existing: {
+    source: string;
+    kind: string;
+    occurredOn: Date;
+    amountMinor: number;
+    currency: string;
+    channelId: string | null;
+    platform: string | null;
+  },
+  input: FinanceEntryUpdateInput,
+): void {
+  if (existing.source === "manual") return;
+
+  const changed: string[] = [];
+  if (input.amountMinor !== undefined && input.amountMinor !== existing.amountMinor) {
+    changed.push("the amount");
+  }
+  if (
+    input.currency !== undefined &&
+    normalizeCurrencyCode(input.currency) !== normalizeCurrencyCode(existing.currency)
+  ) {
+    changed.push("the currency");
+  }
+  if (input.kind !== undefined && input.kind !== toFinanceKind(existing.kind)) {
+    changed.push("whether it is revenue or an expense");
+  }
+  if (
+    input.occurredOn !== undefined &&
+    toUtcMidnight(input.occurredOn).getTime() !== existing.occurredOn.getTime()
+  ) {
+    changed.push("the date");
+  }
+  if (input.channelId !== undefined && (input.channelId ?? null) !== existing.channelId) {
+    changed.push("the channel");
+  }
+  if (input.platform !== undefined && nullableText(input.platform) !== existing.platform) {
+    changed.push("the platform");
+  }
+
+  if (changed.length === 0) return;
+
+  throw errors.invalidInput(
+    `This entry was imported from YouTube, so ${changed.join(", ")} cannot be edited here — the ` +
+      "next sync would overwrite the change. Its notes and category are yours to edit. If the " +
+      "figure itself is wrong, correct it with a separate manual entry so both numbers stay " +
+      "visible.",
+    { source: existing.source },
+  );
+}
+
+/**
+ * Refuses a delete that the next import would undo — and that would take the
+ * revision history with it.
+ *
+ * THE SAME DOOR AS THE EDIT GUARD, ON THE OTHER SIDE OF THE ROOM.
+ * `assertImportedEntryEditable` above blocks correcting an imported figure by
+ * hand because the connector owns it and the next run would overwrite the
+ * correction. Deleting the row is that same argument with a wider blast radius,
+ * so the two guards have to say the same thing or the restriction is theatre:
+ * whatever cannot be edited because a sync would rewrite it cannot be deleted
+ * because a sync would re-create it.
+ *
+ * IT DOES NOT EVEN STAY DELETED. `upsertImportedEntry` finds its row by the
+ * unique `(organizationId, source, externalId)` key. Remove the row and that
+ * `findUnique` returns null, the CREATE branch runs, and the month is written
+ * back — a deletion undone on a schedule, by nobody, with no page to show it
+ * happening.
+ *
+ * AND IT COMES BACK POORER THAN IT LEFT. A created row starts at
+ * `previousAmountMinor: null` and `revisionCount: 0`. Those two columns are the
+ * only record that a figure ever moved — that YouTube reported one number for
+ * August and later reported another — and they cannot be reconstructed from
+ * anywhere, because the Analytics API reports what a month is worth now, not
+ * what it was previously said to be worth. So the round trip through delete
+ * silently erases the history of every revision made to that month and returns
+ * a row that claims to have always been its current value. Losing an audit
+ * trail should not be something that happens behind a button labelled "Delete".
+ *
+ * The message names the mechanism rather than the rule, for the same reason the
+ * edit guard does, and it names the ways out — annotate it, offset it, or stop
+ * the import at its source. An admin looking at a figure they believe is wrong
+ * has a real need here; refusing without answering it just moves the problem.
+ */
+function assertImportedEntryDeletable(existing: { source: string }): void {
+  if (existing.source === "manual") return;
+
+  // Named rather than assumed: `source` is free text on the schema and
+  // "youtube" is only today's connector. Telling somebody their Stripe row came
+  // from YouTube would be worse than saying nothing — and so would sending them
+  // to the YouTube screen to turn it off.
+  const isYouTube = existing.source === "youtube";
+  const label = isYouTube ? "YouTube" : existing.source;
+  const howToStop = isYouTube
+    ? "To stop importing a channel's revenue altogether, disconnect its Google account under " +
+      "Admin → YouTube"
+    : `To stop importing these figures altogether, disconnect ${label} where it was connected`;
+
+  throw errors.invalidInput(
+    `This entry was imported from ${label}, so it cannot be deleted here — and deleting it ` +
+      "would not keep it away. The next sync looks the row up by its external id, would not " +
+      "find it, and would write the month back from scratch: the record of every figure " +
+      `${label} has already revised for that month would be lost in the process. Its notes ` +
+      "and category are yours to edit. If the amount is wrong, record a separate manual entry " +
+      `for the difference so both numbers stay visible. ${howToStop} — the entries already in ` +
+      "the ledger stay exactly where they are.",
+    { source: existing.source },
+  );
 }
 
 /** A category id is only usable if it belongs to this org and to the same side of the ledger. */
@@ -754,7 +941,7 @@ export async function createEntry(
 
   await auditFinance(request, {
     action: "finance.entry_created",
-    summary: `Recorded a ${formatMoney(input.amountMinor, input.currency)} ${input.kind} entry`,
+    summary: `Recorded a ${entryAuditLabel({ kind: input.kind, occurredOn })}`,
     targetType: "finance_entry",
     targetId: entry.id,
     targetLabel: input.kind,
@@ -794,9 +981,16 @@ export async function updateEntry(
       exchangeRate: true,
       categoryId: true,
       channelId: true,
+      platform: true,
+      source: true,
     },
   });
   if (!existing) throw errors.notFound("finance entry");
+
+  // Before anything is computed: an imported row's figures belong to the
+  // connector that wrote them, and a correction here would be overwritten on
+  // the next sync.
+  assertImportedEntryEditable(existing, input);
 
   const kind = input.kind ?? toFinanceKind(existing.kind);
   const amountMinor = input.amountMinor ?? existing.amountMinor;
@@ -903,7 +1097,7 @@ export async function updateEntry(
 
   await auditFinance(request, {
     action: "finance.entry_updated",
-    summary: `Updated a ${formatMoney(updated.amountMinor, updated.currency)} ${updated.kind} entry`,
+    summary: `Updated a ${entryAuditLabel(updated)}`,
     targetType: "finance_entry",
     targetId: updated.id,
     targetLabel: updated.kind,
@@ -920,6 +1114,15 @@ export async function updateEntry(
   return readEntryDTO(organizationId, updated.id);
 }
 
+/**
+ * Removes a typed entry. Only a typed one.
+ *
+ * `source` is selected for the same reason `updateEntry` selects it: this is
+ * the other half of the imported-row guard, and a delete that did not read the
+ * column would be a hole beside a locked door. See
+ * `assertImportedEntryDeletable` for what the sync does with a row that is no
+ * longer there.
+ */
 export async function deleteEntry(
   entryId: string,
   request?: Request,
@@ -939,18 +1142,25 @@ export async function deleteEntry(
       exchangeRate: true,
       categoryId: true,
       channelId: true,
+      source: true,
     },
   });
   if (!existing) throw errors.notFound("finance entry");
+
+  // Before the row is touched: a connector-owned entry is not this endpoint's
+  // to remove, and the removal would not survive the next sync anyway.
+  assertImportedEntryDeletable(existing);
 
   await prisma.financeEntry.delete({ where: { id: existing.id } });
 
   // The audit entry is what survives the row. It is written after the delete
   // and carries the amount precisely because there is nothing left to look up:
-  // a deletion nobody can quantify afterwards is not an audit trail.
+  // a deletion nobody can quantify afterwards is not an audit trail. The amount
+  // lives in `metadata` and not in the summary, so "nobody can quantify it"
+  // stops meaning "unless they only hold audit.view".
   await auditFinance(request, {
     action: "finance.entry_deleted",
-    summary: `Deleted a ${formatMoney(existing.amountMinor, existing.currency)} ${existing.kind} entry`,
+    summary: `Deleted a ${entryAuditLabel(existing)}`,
     targetType: "finance_entry",
     targetId: existing.id,
     targetLabel: existing.kind,
@@ -958,6 +1168,337 @@ export async function deleteEntry(
   });
 
   return { id: existing.id };
+}
+
+// ---------------------------------------------------------------------------
+// IMPORTED ENTRIES
+//
+// Rows a connector owns rather than a person. Everything here takes its
+// organization as a PARAMETER and never reads a session: the caller is a
+// scheduled job with no cookie, and one accidental `getScope()` would make the
+// nightly import throw 401 in production while passing every test that happened
+// to run signed in.
+//
+// The write still goes through `resolveConversion`, which is the point of
+// putting this in finance-service instead of in the connector. There is exactly
+// one place in this system that decides what a foreign amount is worth in the
+// base currency, and an importer with its own copy would be a second one —
+// free, in time, to assume a rate that the manual path refuses to assume.
+// ---------------------------------------------------------------------------
+
+/** What a connector needs in order to write one entry it owns. */
+export interface ImportedEntryInput {
+  readonly organizationId: string;
+  /** The connector's name. Matches `FinanceEntry.source` and the unique index. */
+  readonly source: string;
+  /** Stable key for this row, e.g. `youtube:UC123:2026-08`. */
+  readonly externalId: string;
+  readonly kind: FinanceKind;
+  /** Already normalised to UTC midnight by the caller. */
+  readonly occurredOn: Date;
+  readonly amountMinor: number;
+  readonly currency: string;
+  readonly categoryId: string;
+  readonly channelId: string | null;
+  readonly platform: string | null;
+  /** Written only on create, so a note added afterwards is never overwritten. */
+  readonly notes?: string | null;
+  /** True when the source may still revise this figure. */
+  readonly isEstimated?: boolean;
+  /** How the audit trail names the connector, e.g. "YouTube revenue sync". */
+  readonly actorLabel: string;
+}
+
+export interface ImportedEntryResult {
+  readonly id: string;
+  readonly created: boolean;
+  /** True when this run overwrote a DIFFERENT figure than the one on file. */
+  readonly revised: boolean;
+  readonly amountMinor: number;
+  readonly previousAmountMinor: number | null;
+  readonly revisionCount: number;
+}
+
+/**
+ * The category an importer files under, created once and then reused.
+ *
+ * Looked up by slug INCLUDING archived rows. If somebody archived "YouTube Ad
+ * Revenue", creating a second one on the next sync would give the ledger two
+ * categories with the same name and split the history between them; filing
+ * under the archived one keeps every month in the same place. Archiving stops a
+ * category being offered for new manual entries, which is a statement about the
+ * form, not about rows that already belong there.
+ */
+export async function ensureImportCategory(
+  organizationId: string,
+  kind: FinanceKind,
+  name: string,
+): Promise<{ id: string; name: string }> {
+  const trimmed = name.trim();
+  const slug = toSlug(trimmed);
+  const key = { organizationId_kind_slug: { organizationId, kind, slug } };
+
+  const existing = await prisma.financeCategory.findUnique({
+    where: key,
+    select: { id: true, name: true },
+  });
+  if (existing) return existing;
+
+  const count = await prisma.financeCategory.count({ where: { organizationId, kind } });
+
+  try {
+    return await prisma.financeCategory.create({
+      data: { organizationId, kind, name: trimmed, slug, sortOrder: count },
+      select: { id: true, name: true },
+    });
+  } catch {
+    // Two runs racing on a first-ever sync both miss the read and both insert.
+    // The unique index is what makes that safe; re-reading is what makes it
+    // invisible. A throw here would fail an import over a collision whose
+    // desired outcome — one category with this name — has just been reached.
+    const raced = await prisma.financeCategory.findUnique({
+      where: key,
+      select: { id: true, name: true },
+    });
+    if (raced) return raced;
+    throw errors.internal(new Error(`could not create the “${trimmed}” finance category`));
+  }
+}
+
+/**
+ * Writes one connector-owned entry, creating it or revising it in place.
+ *
+ * THE IDEMPOTENCY IS THE UNIQUE INDEX, NOT A CHECK.
+ * `@@unique([organizationId, source, externalId])` is what makes re-running a
+ * sync safe. This function reads that key and then creates or updates, so a
+ * month imported ten times is one row; a `findFirst` on shape — same channel,
+ * same total — would produce a second row the first time a figure was revised,
+ * which is precisely when a duplicate is hardest to notice.
+ *
+ * A CHANGED FIGURE IS RECORDED AS A CHANGE.
+ * YouTube states its revenue metrics are subject to month-end adjustment, so a
+ * value moving is expected. `previousAmountMinor` and `revisionCount` mean the
+ * row can say "this used to be something else" instead of silently appearing to
+ * have always been the new number — and the audit entry is written only when
+ * the figure actually moved, so an hourly no-op sync does not bury the log.
+ */
+export async function upsertImportedEntry(
+  input: ImportedEntryInput,
+): Promise<ImportedEntryResult> {
+  const { organizationId } = input;
+  const currency = normalizeCurrencyCode(input.currency);
+
+  if (!Number.isSafeInteger(input.amountMinor)) {
+    throw errors.invalidInput("An imported amount must be a whole number of minor units.");
+  }
+  if (Math.abs(input.amountMinor) > MAX_MONEY_MINOR) {
+    throw errors.invalidInput(
+      `The imported ${input.externalId} figure is too large to record as a single entry.`,
+    );
+  }
+  if (!isSupportedCurrency(currency)) {
+    throw errors.invalidInput(
+      `${currency || "That currency"} is not one this app is configured to handle, so an imported ` +
+        "amount in it cannot be scaled correctly. Add it to CURRENCIES in lib/finance/money.ts.",
+    );
+  }
+
+  const settings = await getOrgSettings(organizationId);
+  const baseCurrency = normalizeCurrencyCode(settings.baseCurrency);
+
+  const existing = await prisma.financeEntry.findUnique({
+    where: {
+      organizationId_source_externalId: {
+        organizationId,
+        source: input.source,
+        externalId: input.externalId,
+      },
+    },
+    select: {
+      id: true,
+      amountMinor: true,
+      currency: true,
+      baseCurrency: true,
+      exchangeRate: true,
+      revisionCount: true,
+      occurredOn: true,
+      categoryId: true,
+      channelId: true,
+    },
+  });
+
+  /**
+   * Zero takes its own path, because `resolveConversion` refuses one on purpose.
+   *
+   * For a TYPED entry, an amount that converts to zero is a mistake worth
+   * stopping — somebody meant to record money and recorded none. An imported
+   * zero is not a mistake: it is the source saying "nothing here", and it has to
+   * be able to overwrite a figure that has since been revised away. Nothing is
+   * being assumed by skipping the rate lookup, because zero converts to zero at
+   * every rate; the previous row's rate is carried forward only so the column
+   * stays comparable month to month.
+   */
+  const conversion =
+    input.amountMinor === 0
+      ? {
+          baseAmountMinor: 0,
+          baseCurrency,
+          exchangeRate:
+            existing && existing.baseCurrency === baseCurrency ? existing.exchangeRate : 1,
+        }
+      : await resolveConversion({
+          organizationId,
+          amountMinor: input.amountMinor,
+          currency,
+          baseCurrency,
+        });
+
+  const now = new Date();
+  const platform = input.kind === "revenue" ? nullableText(input.platform) : null;
+
+  const auditImport = async (
+    action: AuditAction,
+    summary: string,
+    targetId: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> => {
+    await recordAudit(
+      {
+        organizationId,
+        // Null, and deliberately so: nobody did this. Attributing an imported
+        // row to whichever admin happened to connect the Google account would
+        // be a fabricated byline on a financial record.
+        actorUserId: null,
+        actorLabel: input.actorLabel,
+      },
+      { action, summary, targetType: "finance_entry", targetId, metadata },
+    );
+  };
+
+  if (!existing) {
+    const created = await prisma.financeEntry.create({
+      data: {
+        organizationId,
+        kind: input.kind,
+        occurredOn: input.occurredOn,
+        amountMinor: input.amountMinor,
+        currency,
+        baseAmountMinor: conversion.baseAmountMinor,
+        baseCurrency: conversion.baseCurrency,
+        exchangeRate: conversion.exchangeRate,
+        categoryId: input.categoryId,
+        channelId: input.channelId,
+        platform,
+        notes: nullableText(input.notes ?? null),
+        source: input.source,
+        externalId: input.externalId,
+        isEstimated: input.isEstimated ?? true,
+        lastImportedAt: now,
+        createdById: null,
+      },
+      select: { id: true },
+    });
+
+    await auditImport(
+      "finance.entry_imported",
+      `Imported a ${entryAuditLabel({ kind: input.kind, occurredOn: input.occurredOn })} ` +
+        `from ${input.source}`,
+      created.id,
+      {
+        ...entryAuditMetadata({
+          kind: input.kind,
+          occurredOn: input.occurredOn,
+          amountMinor: input.amountMinor,
+          currency,
+          ...conversion,
+          categoryId: input.categoryId,
+          channelId: input.channelId,
+        }),
+        source: input.source,
+        externalId: input.externalId,
+      },
+    );
+
+    return {
+      id: created.id,
+      created: true,
+      revised: false,
+      amountMinor: input.amountMinor,
+      previousAmountMinor: null,
+      revisionCount: 0,
+    };
+  }
+
+  const revised =
+    existing.amountMinor !== input.amountMinor ||
+    normalizeCurrencyCode(existing.currency) !== currency;
+
+  const updated = await prisma.financeEntry.update({
+    where: { id: existing.id },
+    data: {
+      occurredOn: input.occurredOn,
+      amountMinor: input.amountMinor,
+      currency,
+      baseAmountMinor: conversion.baseAmountMinor,
+      baseCurrency: conversion.baseCurrency,
+      exchangeRate: conversion.exchangeRate,
+      channelId: input.channelId,
+      platform,
+      isEstimated: input.isEstimated ?? true,
+      lastImportedAt: now,
+      // Only on a real change, so `revisionCount` counts revisions rather than
+      // counting how many times the scheduler ran.
+      ...(revised
+        ? { previousAmountMinor: existing.amountMinor, revisionCount: { increment: 1 } }
+        : {}),
+      // `categoryId` and `notes` are pointedly absent. Re-filing an imported row
+      // and annotating it are the two edits a person IS allowed to make (see
+      // `assertImportedEntryEditable`), and a sync that rewrote them would undo
+      // the edit it just permitted.
+    },
+    select: { id: true, revisionCount: true },
+  });
+
+  if (revised) {
+    await auditImport(
+      "finance.entry_revised",
+      // The two figures the word "revised" refers to are in the metadata below
+      // as `previousAmountMinor` and `amountMinor`, where a reader without
+      // `finance.view` does not get them. Spelling "from X to Y" out here would
+      // have handed the whole revision to anyone with `audit.view`, which is
+      // the wider group.
+      `${input.source} revised a ${entryAuditLabel({
+        kind: input.kind,
+        occurredOn: input.occurredOn,
+      })}`,
+      updated.id,
+      {
+        ...entryAuditMetadata({
+          kind: input.kind,
+          occurredOn: input.occurredOn,
+          amountMinor: input.amountMinor,
+          currency,
+          ...conversion,
+          categoryId: existing.categoryId,
+          channelId: input.channelId,
+        }),
+        source: input.source,
+        externalId: input.externalId,
+        previousAmountMinor: existing.amountMinor,
+        previousCurrency: existing.currency,
+        revisionCount: updated.revisionCount,
+      },
+    );
+  }
+
+  return {
+    id: updated.id,
+    created: false,
+    revised,
+    amountMinor: input.amountMinor,
+    previousAmountMinor: revised ? existing.amountMinor : null,
+    revisionCount: updated.revisionCount,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,6 +1828,25 @@ export interface FinanceOverview {
    * present the figures as the period's result.
    */
   readonly truncated: boolean;
+  /**
+   * How much of the exact revenue total above is a figure a connector may still
+   * revise, rather than money that has settled.
+   *
+   * Reported as its own number rather than left for the client to add up from
+   * `entries`, for the same reason the headline totals are: the entry list is
+   * capped, so a browser-side sum of estimated rows would understate the caveat
+   * on exactly the busy periods where it matters most. It comes out of the same
+   * grouped aggregate as the totals, so the two cannot disagree.
+   *
+   * `revenueMinor` INCLUDES this — it is a share of that figure, never an
+   * addition to it. Zero means every figure in the period is settled, which is
+   * a different statement from "we do not know", and the dashboard says nothing
+   * at all in that case rather than reassuring the reader about nothing.
+   */
+  readonly estimated: {
+    readonly revenueMinor: number;
+    readonly entryCount: number;
+  };
 }
 
 /**
@@ -1337,7 +1897,12 @@ export async function getFinanceOverview(options: {
    * reported alongside them.
    */
   const totals = await prisma.financeEntry.groupBy({
-    by: ["kind"],
+    // Grouped by estimate-ness as well as by side, which costs nothing — at most
+    // four rows come back — and means the "part of this is an estimate" caveat
+    // is derived from the same exact aggregate as the figure it qualifies. A
+    // second query could see a different moment and put a caveat on the page
+    // that does not match the number above it.
+    by: ["kind", "isEstimated"],
     where: {
       organizationId,
       occurredOn: {
@@ -1346,12 +1911,26 @@ export async function getFinanceOverview(options: {
       },
     },
     _sum: { baseAmountMinor: true },
+    _count: { _all: true },
   });
 
-  const exactRevenueMinor =
-    totals.find((row) => row.kind === "revenue")?._sum.baseAmountMinor ?? 0;
-  const exactExpenseMinor =
-    totals.find((row) => row.kind === "expense")?._sum.baseAmountMinor ?? 0;
+  let exactRevenueMinor = 0;
+  let exactExpenseMinor = 0;
+  let estimatedRevenueMinor = 0;
+  let estimatedEntryCount = 0;
+
+  for (const row of totals) {
+    const amount = row._sum.baseAmountMinor ?? 0;
+    if (toFinanceKind(row.kind) === "revenue") {
+      exactRevenueMinor += amount;
+      if (row.isEstimated) {
+        estimatedRevenueMinor += amount;
+        estimatedEntryCount += row._count._all;
+      }
+    } else {
+      exactExpenseMinor += amount;
+    }
+  }
 
   const pagedSummary = summarizeFinance(entries, options.range);
 
@@ -1377,5 +1956,9 @@ export async function getFinanceOverview(options: {
     channels,
     rates,
     truncated: ledger.truncated,
+    estimated: {
+      revenueMinor: estimatedRevenueMinor,
+      entryCount: estimatedEntryCount,
+    },
   };
 }

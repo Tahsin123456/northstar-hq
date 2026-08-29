@@ -4,14 +4,17 @@ import * as React from "react";
 import { Check, ChevronDown, RotateCcw, Save, Target } from "lucide-react";
 import { toast } from "sonner";
 import {
+  EMPLOYEE_THRESHOLD_NOTICE,
   MAX_THRESHOLD,
   MIN_THRESHOLD,
   THRESHOLD_PRESETS,
+  UNCONFIGURED_THRESHOLD_SHORT,
 } from "@/lib/analytics/constants";
 import {
   useFilters,
   type ThresholdSource,
 } from "@/components/providers/filters-provider";
+import { useCanConfigureThreshold } from "@/components/niches/niche-threshold-dialog";
 import { useUpdateNicheThreshold } from "@/hooks/use-niches";
 import { formatCompactNumber, formatNumber } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -36,6 +39,13 @@ import { cn } from "@/lib/utils";
  * Changing it is always a *temporary override*. Writing the niche default is a
  * separate, explicit action, so experimenting on a view can never silently
  * reconfigure a niche for every future session.
+ *
+ * WHEN THERE IS NO NUMBER
+ * A selected niche with no configured threshold shows "Not configured" rather
+ * than a figure. Anyone can still type an override — that is a deliberate,
+ * clearly-labelled "show me what this would look like at 1M" — but only
+ * somebody with `settings.manage` is offered "Save as … default", because only
+ * they can turn that experiment into the team's answer.
  */
 export function ThresholdSelector({
   className,
@@ -48,7 +58,11 @@ export function ThresholdSelector({
    * threshold, and a chip still reading the account default there would
    * contradict every number beside it.
    */
-  effective?: { threshold: number; source: ThresholdSource; nicheName: string | null };
+  effective?: {
+    threshold: number | null;
+    source: ThresholdSource;
+    nicheName: string | null;
+  };
 }) {
   const {
     threshold: globalThreshold,
@@ -60,9 +74,15 @@ export function ThresholdSelector({
     clearThresholdOverride,
   } = useFilters();
 
-  const threshold = effective?.threshold ?? globalThreshold;
+  // `effective` is present-or-absent as a whole, so its threshold is read from
+  // the same object as its source. `?? globalThreshold` would be wrong here:
+  // an effective threshold of `null` is a real answer ("unconfigured"), not a
+  // missing one, and coalescing it would put the account default back on screen
+  // beside a chip that says the niche has none.
+  const threshold = effective ? effective.threshold : globalThreshold;
   const thresholdSource = effective?.source ?? globalSource;
   const nicheName = effective?.nicheName ?? globalNicheName;
+  const isUnconfigured = thresholdSource === "unconfigured";
 
   const [open, setOpen] = React.useState(false);
   const isPreset = THRESHOLD_PRESETS.includes(
@@ -71,13 +91,18 @@ export function ThresholdSelector({
 
   const saveNicheDefault = useUpdateNicheThreshold();
   const canSaveToNiche = niche !== "all" && niche !== "unassigned";
+  // Writing the niche default is `settings.manage`, the same permission the
+  // service enforces. Without it the "Save as … default" action is not offered.
+  const canConfigure = useCanConfigureThreshold();
 
   const sourceLabel =
     thresholdSource === "override"
       ? "Override"
       : thresholdSource === "niche"
         ? `Default for ${nicheName}`
-        : "Account default";
+        : thresholdSource === "unconfigured"
+          ? `${nicheName ?? "This niche"} has no threshold`
+          : "Account default";
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -88,16 +113,26 @@ export function ThresholdSelector({
             "group inline-flex h-[30px] items-center gap-2 rounded-lg border bg-surface-sunken px-2.5",
             "text-[12px] font-medium transition-colors duration-150",
             // An override is visually distinct so a temporarily changed view is
-            // never mistaken for the configured default.
+            // never mistaken for the configured default. An unconfigured niche
+            // gets the warning tone for the same reason in reverse: the chip
+            // must not look like it is reporting a settled number.
             thresholdSource === "override"
               ? "border-accent/50 hover:border-accent"
-              : "border-border hover:border-border-strong",
+              : isUnconfigured
+                ? "border-warning/50 hover:border-warning"
+                : "border-border hover:border-border-strong",
             className,
           )}
         >
           <Target className="size-3.5 text-subtle-foreground" />
           <span className="text-muted-foreground">Hit</span>
-          <span className="tnum text-foreground">≥ {formatCompactNumber(threshold)}</span>
+          {isUnconfigured || threshold === null ? (
+            <span className="text-warning">{UNCONFIGURED_THRESHOLD_SHORT}</span>
+          ) : (
+            <span className="tnum text-foreground">
+              ≥ {formatCompactNumber(threshold)}
+            </span>
+          )}
           {thresholdSource === "override" ? (
             <span className="rounded bg-accent-subtle px-1 py-px text-[9px] uppercase tracking-wider text-accent">
               Override
@@ -115,10 +150,23 @@ export function ThresholdSelector({
         </div>
 
         <div className="mb-2 rounded-md border border-border bg-surface-sunken px-2 py-1.5">
-          <div className="tnum text-[13px] text-foreground">
-            ≥ {formatNumber(threshold)}
-          </div>
+          {threshold === null ? (
+            <div className="text-[13px] text-foreground">
+              {UNCONFIGURED_THRESHOLD_SHORT}
+            </div>
+          ) : (
+            <div className="tnum text-[13px] text-foreground">
+              ≥ {formatNumber(threshold)}
+            </div>
+          )}
           <div className="mt-0.5 text-[11px] text-subtle-foreground">{sourceLabel}</div>
+          {isUnconfigured ? (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+              {canConfigure
+                ? "Pick a number below and save it as the niche default, or set it on the Niches page."
+                : EMPLOYEE_THRESHOLD_NOTICE}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex flex-col gap-0.5">
@@ -179,13 +227,18 @@ export function ThresholdSelector({
               }}
             >
               <RotateCcw />
-              Reset to{" "}
+              {/* Three destinations, and the third is not a number. Clearing an
+                  override on an unconfigured niche returns the screen to "Not
+                  configured", and saying "Reset to account default" there would
+                  promise exactly the fallback that no longer happens. */}
               {nicheDefaultThreshold !== null
-                ? `${nicheName} default`
-                : "account default"}
+                ? `Reset to ${nicheName} default`
+                : niche !== "all" && niche !== "unassigned"
+                  ? "Clear override (no threshold set)"
+                  : "Reset to account default"}
             </Button>
 
-            {canSaveToNiche ? (
+            {canSaveToNiche && canConfigure && threshold !== null ? (
               <Button
                 variant="secondary"
                 size="sm"
@@ -226,11 +279,14 @@ function CustomThresholdForm({
   isCustom,
   onApply,
 }: {
-  current: number;
+  /** `null` when the active niche has no threshold — the field starts empty. */
+  current: number | null;
   isCustom: boolean;
   onApply: (value: number) => void;
 }) {
-  const [value, setValue] = React.useState(() => (isCustom ? String(current) : ""));
+  const [value, setValue] = React.useState(() =>
+    isCustom && current !== null ? String(current) : "",
+  );
   const [error, setError] = React.useState<string | null>(null);
 
   const submit = (event: React.FormEvent) => {

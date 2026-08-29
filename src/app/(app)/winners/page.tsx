@@ -28,10 +28,14 @@ import { formatCompactNumber } from "@/lib/format";
  */
 export default function WinnersPage() {
   const { data, isLoading, error, refetch } = useDataset();
-  // Only the niche comes from the global filter here; ownership is a
+  // Niche and content type come from the global filter; ownership is a
   // page-local control, because a market-discovery feed defaults to
   // competitors regardless of what the dashboard is scoped to.
-  const { niche } = useFilters();
+  //
+  // The content-type filter is a PER-SHORT predicate here, unlike on the
+  // dashboard where it narrows the channel list — the row on this page is a
+  // Short, so its own classification is the right question. See `useShortsFeed`.
+  const { niche, contentType } = useFilters();
 
   const controls = useFeedControls({
     defaultWindowDays: 7,
@@ -46,6 +50,7 @@ export default function WinnersPage() {
     range,
     baselineRange,
     niche,
+    contentType,
     // The page-level ownership control overrides the global filter here: the
     // global default is "all", and a market-discovery feed that silently
     // included your own channels would be answering a different question.

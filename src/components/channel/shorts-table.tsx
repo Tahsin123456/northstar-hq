@@ -11,6 +11,10 @@ import {
 } from "lucide-react";
 import type { EvaluatedShort } from "@/lib/analytics/types";
 import {
+  UNCONFIGURED_THRESHOLD_EXPLANATION,
+  UNCONFIGURED_THRESHOLD_SHORT,
+} from "@/lib/analytics/constants";
+import {
   EM_DASH,
   formatCompactNumber,
   formatDate,
@@ -21,8 +25,15 @@ import {
   youtubeThumbnailUrl,
 } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  BulkContentTypeButton,
+  ContentTypeControl,
+} from "@/components/content-types/content-type-control";
+import { useOptionalSession } from "@/components/providers/session-provider";
+import { NO_CONTENT_TYPES, useVideoContentTypeIndex } from "@/hooks/use-content-types";
 import { cn } from "@/lib/utils";
 
 type ShortsSortKey = "publishedAt" | "views" | "likes" | "comments" | "duration";
@@ -35,6 +46,17 @@ type Direction = "asc" | "desc";
  * On a channel with a strong hit rate, half the rows are hits — filling them
  * would tint the whole table and stop the marker meaning anything. A thin
  * accent on the leading edge stays scannable at any density.
+ *
+ * CLASSIFICATION LIVES HERE TOO. This is the densest list of a channel's Shorts
+ * in the product, which makes it the natural place to work down a back
+ * catalogue filing each one under a content type — one click per row, or a
+ * selection and one click for all of them.
+ *
+ * The selection is deliberately scoped to what is on screen: the header
+ * checkbox ticks the rows the active filter is showing, and the bulk action
+ * receives exactly the number the bar names. A row selected and then filtered
+ * away is remembered but neither counted nor written, so switching to "Hits"
+ * cannot quietly widen or narrow what is about to be relabelled.
  */
 export function ShortsTable({
   shorts,
@@ -42,12 +64,25 @@ export function ShortsTable({
   className,
 }: {
   shorts: readonly EvaluatedShort[];
-  threshold: number;
+  /**
+   * `null` when the niche in view has no configured threshold. Every Short is
+   * then a non-hit with no ratio, and the "vs threshold" column has nothing to
+   * be a ratio of — see the cell renderer below.
+   */
+  threshold: number | null;
   className?: string;
 }) {
   const [sortKey, setSortKey] = React.useState<ShortsSortKey>("publishedAt");
   const [direction, setDirection] = React.useState<Direction>("desc");
   const [filter, setFilter] = React.useState<"all" | "hits" | "misses">("all");
+  const [selected, setSelected] = React.useState<ReadonlySet<string>>(() => new Set());
+
+  const session = useOptionalSession();
+  // Assigning, not managing — see the note in content-type-control.tsx.
+  const canManage = session?.can("research.write") ?? false;
+  // Built once for the whole table rather than per row: it is one Map lookup
+  // each, but the query subscription behind it is not free a hundred times.
+  const contentTypeIndex = useVideoContentTypeIndex();
 
   const sorted = React.useMemo(() => {
     const factor = direction === "asc" ? 1 : -1;
@@ -87,6 +122,35 @@ export function ShortsTable({
 
   const hitCount = shorts.filter((s) => s.isHit).length;
 
+  const selectedIds = React.useMemo(
+    () => sorted.filter((short) => selected.has(short.id)).map((short) => short.id),
+    [sorted, selected],
+  );
+
+  const allVisibleSelected = sorted.length > 0 && selectedIds.length === sorted.length;
+
+  const toggleRow = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllVisible = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      // Only the rows in view move, so ticking the header inside a filter does
+      // not silently drop a selection made under a different one.
+      for (const short of sorted) {
+        if (allVisibleSelected) next.delete(short.id);
+        else next.add(short.id);
+      }
+      return next;
+    });
+  };
+
   if (shorts.length === 0) {
     return (
       <div className={cn("rounded-lg border border-border bg-surface", className)}>
@@ -100,40 +164,86 @@ export function ShortsTable({
 
   return (
     <div className={cn("overflow-hidden rounded-lg border border-border bg-surface", className)}>
-      {/* --- Filter chips --- */}
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-surface-sunken px-4 py-2">
-        {(
-          [
-            { id: "all", label: "All", count: shorts.length },
-            { id: "hits", label: "Hits", count: hitCount },
-            { id: "misses", label: "Below threshold", count: shorts.length - hitCount },
-          ] as const
-        ).map((option) => (
+      {/* --- Selection bar, or the filter chips when nothing is ticked --- */}
+      {selectedIds.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-accent-subtle px-4 py-2">
+          <span className="tnum text-[12px] font-medium text-foreground">
+            {selectedIds.length} {selectedIds.length === 1 ? "Short" : "Shorts"} selected
+          </span>
+          <BulkContentTypeButton
+            videoIds={selectedIds}
+            onAssigned={() => setSelected(new Set())}
+          />
           <button
-            key={option.id}
             type="button"
-            onClick={() => setFilter(option.id)}
-            className={cn(
-              "rounded px-2 py-1 text-[12px] font-medium transition-colors duration-150",
-              filter === option.id
-                ? "bg-surface-raised text-foreground"
-                : "text-muted-foreground hover:text-foreground",
-            )}
+            onClick={() => setSelected(new Set())}
+            className="text-[12px] text-muted-foreground transition-colors hover:text-foreground"
           >
-            {option.label}
-            <span className="tnum ml-1.5 text-subtle-foreground">{option.count}</span>
+            Clear selection
           </button>
-        ))}
-      </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border bg-surface-sunken px-4 py-2">
+          {(
+            [
+              { id: "all", label: "All", count: shorts.length },
+              { id: "hits", label: "Hits", count: hitCount },
+              { id: "misses", label: "Below threshold", count: shorts.length - hitCount },
+            ] as const
+          ).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => setFilter(option.id)}
+              className={cn(
+                "rounded px-2 py-1 text-[12px] font-medium transition-colors duration-150",
+                filter === option.id
+                  ? "bg-surface-raised text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {option.label}
+              <span className="tnum ml-1.5 text-subtle-foreground">{option.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[720px] border-collapse text-left">
+        <table className="w-full min-w-[860px] border-collapse text-left">
           <thead>
             <tr className="border-b border-border">
-              <th scope="col" className="w-[52px] px-4 py-2" />
+              {canManage ? (
+                <th scope="col" className="w-[36px] py-2 pl-4 pr-0">
+                  <Checkbox
+                    checked={
+                      allVisibleSelected
+                        ? true
+                        : selectedIds.length > 0
+                          ? "indeterminate"
+                          : false
+                    }
+                    onCheckedChange={toggleAllVisible}
+                    aria-label={
+                      allVisibleSelected
+                        ? "Deselect every Short in view"
+                        : "Select every Short in view"
+                    }
+                  />
+                </th>
+              ) : null}
+              <th
+                scope="col"
+                className={cn("py-2 pr-0", canManage ? "w-[46px] pl-2" : "w-[52px] pl-4")}
+              />
               <th scope="col" className="px-2 py-2">
                 <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
                   Short
+                </span>
+              </th>
+              <th scope="col" className="w-[150px] px-2 py-2">
+                <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
+                  Content type
                 </span>
               </th>
               <SortHeader
@@ -158,7 +268,11 @@ export function ShortsTable({
                 onClick={() => toggleSort("views")}
                 align="right"
                 className="hidden w-[96px] md:table-cell"
-                tip={`Views as a multiple of the ${formatCompactNumber(threshold)} threshold. 1.0× is exactly at the line.`}
+                tip={
+                  threshold === null
+                    ? UNCONFIGURED_THRESHOLD_EXPLANATION
+                    : `Views as a multiple of the ${formatCompactNumber(threshold)} threshold. 1.0× is exactly at the line.`
+                }
               />
               <SortHeader
                 label="Likes"
@@ -194,7 +308,14 @@ export function ShortsTable({
 
           <tbody>
             {sorted.map((short) => (
-              <ShortRow key={short.id} short={short} />
+              <ShortRow
+                key={short.id}
+                short={short}
+                contentTypeIds={contentTypeIndex.get(short.id) ?? NO_CONTENT_TYPES}
+                selectable={canManage}
+                isSelected={selected.has(short.id)}
+                onToggleSelected={() => toggleRow(short.id)}
+              />
             ))}
           </tbody>
         </table>
@@ -209,16 +330,39 @@ export function ShortsTable({
   );
 }
 
-function ShortRow({ short }: { short: EvaluatedShort }) {
+function ShortRow({
+  short,
+  contentTypeIds,
+  selectable,
+  isSelected,
+  onToggleSelected,
+}: {
+  short: EvaluatedShort;
+  contentTypeIds: readonly string[];
+  selectable: boolean;
+  isSelected: boolean;
+  onToggleSelected: () => void;
+}) {
   return (
     <tr
       className={cn(
         "group border-b border-border transition-colors duration-100 last:border-b-0 hover:bg-surface-hover/50",
         // Leading rule marks a hit without tinting the whole row.
         short.isHit && "shadow-[inset_2px_0_0_0_var(--success)]",
+        isSelected && "bg-accent-subtle",
       )}
     >
-      <td className="py-2 pl-4 pr-0">
+      {selectable ? (
+        <td className="py-2 pl-4 pr-0">
+          <Checkbox
+            checked={isSelected}
+            onCheckedChange={onToggleSelected}
+            aria-label={"Select " + short.title}
+          />
+        </td>
+      ) : null}
+
+      <td className={cn("py-2 pr-0", selectable ? "pl-2" : "pl-4")}>
         <a
           href={youtubeShortsUrl(short.youtubeVideoId)}
           target="_blank"
@@ -255,6 +399,10 @@ function ShortRow({ short }: { short: EvaluatedShort }) {
       </td>
 
       <td className="px-2 py-2">
+        <ContentTypeControl videoId={short.id} contentTypeIds={contentTypeIds} />
+      </td>
+
+      <td className="px-2 py-2">
         <span className="tnum text-[12px] text-muted-foreground">
           {formatDate(short.publishedAt)}
         </span>
@@ -272,28 +420,37 @@ function ShortRow({ short }: { short: EvaluatedShort }) {
       </td>
 
       <td className="hidden px-2 py-2 text-right md:table-cell">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span
-              className={cn(
-                "tnum text-[12px]",
-                short.thresholdRatio >= 1
-                  ? "text-success"
-                  : short.thresholdRatio >= 0.75
-                    ? "text-warning"
-                    : "text-subtle-foreground",
-              )}
-            >
-              {formatThresholdRatio(short.thresholdRatio)}
-            </span>
-          </TooltipTrigger>
-          <TooltipContent>
-            {formatNumber(short.views)} views
-            {short.thresholdRatio < 1
-              ? ` — ${formatPercentShort(1 - short.thresholdRatio)} short of the threshold`
-              : ""}
-          </TooltipContent>
-        </Tooltip>
+        {/* No threshold, no ratio. `formatThresholdRatio(null)` would render an
+            em dash, which in this column reads as "we could not work it out"
+            rather than "there is nothing to work out". */}
+        {short.thresholdRatio === null ? (
+          <span className="text-[11px] text-subtle-foreground">
+            {UNCONFIGURED_THRESHOLD_SHORT}
+          </span>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                className={cn(
+                  "tnum text-[12px]",
+                  short.thresholdRatio >= 1
+                    ? "text-success"
+                    : short.thresholdRatio >= 0.75
+                      ? "text-warning"
+                      : "text-subtle-foreground",
+                )}
+              >
+                {formatThresholdRatio(short.thresholdRatio)}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              {formatNumber(short.views)} views
+              {short.thresholdRatio < 1
+                ? ` — ${formatPercentShort(1 - short.thresholdRatio)} short of the threshold`
+                : ""}
+            </TooltipContent>
+          </Tooltip>
+        )}
       </td>
 
       <td className="hidden px-2 py-2 text-right lg:table-cell">

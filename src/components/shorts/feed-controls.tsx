@@ -7,7 +7,10 @@ import type { DateRange } from "@/lib/analytics/types";
 import type { DatasetDTO } from "@/lib/dto";
 import type { OwnershipFilter } from "@/lib/filters-store";
 import { useFilters } from "@/components/providers/filters-provider";
-import { NicheFilterControl } from "@/components/dashboard/scope-filters";
+import {
+  ContentTypeFilterControl,
+  NicheFilterControl,
+} from "@/components/dashboard/scope-filters";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -127,8 +130,35 @@ export function FeedControls({
   // Memoised so the fallback [] keeps a stable identity between renders.
   const channels = React.useMemo(() => dataset?.channels ?? [], [dataset]);
   const niches = dataset?.niches ?? [];
+  const contentTypes = dataset?.contentTypes ?? [];
 
   const unassignedCount = channels.filter((c) => c.channel.niches.length === 0).length;
+
+  /*
+   * Shorts with no classification, counted over the Shorts this feed can show.
+   *
+   * The unit is a SHORT here, not a channel — the rows on these pages are
+   * Shorts, and `useShortsFeed` reads each one's own `contentTypeIds`. Counting
+   * channels would offer "Untagged · 4" above a list of two hundred Shorts.
+   *
+   * Deliberately over every stored Short rather than the feed's current window:
+   * the window is a page-local control that moves constantly, and a count that
+   * moved with it would be a different promise on every click. It is an
+   * order-of-magnitude cue for whether the option is worth picking, which is all
+   * a menu badge ever is.
+   */
+  const untaggedShortCount = React.useMemo(
+    () =>
+      channels.reduce(
+        (total, entry) =>
+          total +
+          entry.videos.filter(
+            (video) => video.isShort && video.contentTypeIds.length === 0,
+          ).length,
+        0,
+      ),
+    [channels],
+  );
 
   // The channel picker only offers channels inside the active niche, so the two
   // filters cannot contradict each other.
@@ -177,6 +207,15 @@ export function FeedControls({
       {showNiche ? (
         <NicheFilterControl niches={niches} unassignedCount={unassignedCount} />
       ) : null}
+
+      {/* The global content-type filter, in its per-Short reading. It is shown
+          here rather than left invisible because a filter that narrows a feed
+          without appearing above it is indistinguishable from missing data. */}
+      <ContentTypeFilterControl
+        contentTypes={contentTypes}
+        unassignedCount={untaggedShortCount}
+        unit="short"
+      />
 
       {/* --- Channel type (page-local, not the global filter) --- */}
       {showOwnership ? (

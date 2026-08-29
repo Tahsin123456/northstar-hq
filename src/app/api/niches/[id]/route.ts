@@ -12,12 +12,18 @@ export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-/** PATCH /api/niches/:id — rename or restyle. */
+/**
+ * PATCH /api/niches/:id — rename, restyle, reorder, or set the hit threshold.
+ *
+ * `niches.manage` is the floor for all of it. The threshold is the one field
+ * that needs more — `settings.manage`, because it redefines a hit for every
+ * chart, report and payroll run — and `updateNiche` enforces that itself, so
+ * the rule holds wherever the function is called from rather than only here.
+ */
 export function PATCH(request: Request, context: RouteContext) {
   return handleMutation(request, async () => {
-    // This is where the hit threshold is set, and that number decides what
-    // counts as a winner for the whole team — hence the operational permission
-    // rather than the one that merely reads the charts it moves.
+    // Renaming and recolouring a shared label is an operational act, not part
+    // of the research baseline.
     await requirePermission("niches.manage");
 
     const { id } = await context.params;

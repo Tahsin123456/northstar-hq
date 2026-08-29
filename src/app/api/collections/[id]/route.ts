@@ -14,7 +14,8 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 export function PATCH(request: Request, context: RouteContext) {
   return handleMutation(request, async () => {
-    // Renaming a folder everyone files into is curating the research board.
+    // Renaming is curating a research board. Which board — the service matches
+    // the folder against its owner, or an admin holding `users.manage`.
     await requirePermission("research.write");
 
     const { id } = await context.params;
@@ -31,7 +32,7 @@ export function PATCH(request: Request, context: RouteContext) {
 /** Deletes the folder only. The saved Shorts inside it survive, uncollected. */
 export function DELETE(request: Request, context: RouteContext) {
   return handleMutation(request, async () => {
-    // Dropping a folder rearranges everyone's board, so it needs the same
+    // Dropping a folder rearranges its owner's board, so it needs the same
     // write capability as creating one.
     await requirePermission("research.write");
 

@@ -1,9 +1,12 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import {
   AlertTriangle,
   CheckCircle2,
+  Clock,
+  Coins,
   Copy,
   ExternalLink,
   Lock,
@@ -35,6 +38,7 @@ import { useSession } from "@/components/providers/session-provider";
 import { useNow } from "@/hooks/use-now";
 import {
   useDisconnectYouTube,
+  useSyncYouTubeRevenue,
   useYouTubeConnections,
   YOUTUBE_CONNECT_PATH,
 } from "@/hooks/use-youtube-connections";
@@ -91,9 +95,16 @@ function YouTubeAdminScreen() {
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="YouTube accounts"
-        description="Google accounts that have authorised Northstar HQ to read your channel data. Each connection is what lets your own channels be synced with their real figures rather than only the public ones."
+        description="Google accounts that have authorised Northstar HQ to read your channel data and its estimated revenue. Each connection is what lets your own channels be synced with their real figures rather than only the public ones."
         actions={
-          google?.configured ? <ConnectButton label="Connect YouTube account" /> : null
+          // Only offered when there is something to sync. A button that can
+          // only report "no connections" is a button that teaches nothing. The
+          // connect button is deliberately NOT duplicated up here — it lives in
+          // the panel below, at full size, beside the sentences describing what
+          // pressing it grants.
+          google?.configured && connections.length > 0 ? (
+            <SyncRevenueButton label="Sync all revenue" />
+          ) : null
         }
       />
 
@@ -116,38 +127,15 @@ function YouTubeAdminScreen() {
         <SetupCard google={google} />
       ) : (
         <>
-          {/*
-            Said on the screen where somebody is about to grant access, because
-            that is the only moment the sentence is worth anything. It is also
-            simply true: OAUTH_SCOPES in youtube-oauth-service.ts asks for
-            youtube.readonly and nothing that can write.
-          */}
-          <div className="flex items-start gap-2.5 rounded-lg border border-border bg-surface-sunken px-4 py-3">
-            <ShieldCheck className="mt-0.5 size-4 shrink-0 text-success" />
-            <p className="text-[12px] leading-relaxed text-muted-foreground">
-              Northstar HQ requests <strong className="text-foreground">read-only</strong>{" "}
-              access. It can see your channels, videos and their statistics; it cannot
-              upload, edit, comment, or delete anything on a connected channel — no write
-              scope is ever requested, so the permission to do so does not exist.
-            </p>
-          </div>
+          <ConnectPanel hasConnections={connections.length > 0} />
 
-          {connections.length === 0 ? (
-            <Card>
-              <EmptyState
-                icon={<Youtube />}
-                title="No Google accounts connected"
-                description="Connect the account that owns your channels. Northstar HQ will then read their figures directly instead of relying on what YouTube shows the public."
-                action={<ConnectButton label="Connect YouTube account" size="md" />}
-              />
-            </Card>
-          ) : (
+          {connections.length > 0 ? (
             <div className="flex flex-col gap-3">
               {connections.map((connection) => (
                 <ConnectionCard key={connection.id} connection={connection} />
               ))}
             </div>
-          )}
+          ) : null}
         </>
       )}
     </PageContainer>
@@ -168,18 +156,202 @@ function ConnectButton({
   variant = "primary",
   size = "sm",
   icon,
+  className,
 }: {
   label: string;
   variant?: "primary" | "secondary";
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   icon?: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <Button asChild variant={variant} size={size}>
+    <Button asChild variant={variant} size={size} className={className}>
       <a href={YOUTUBE_CONNECT_PATH}>
         {icon ?? <Plug />}
         {label}
       </a>
+    </Button>
+  );
+}
+
+/**
+ * The connect action, and the three facts somebody deserves before taking it.
+ *
+ * All three are on the screen where the grant happens, not in a help page,
+ * because that is the only moment any of them is worth anything.
+ *
+ * They are also, individually, the three things people get wrong about this
+ * integration. That it might post to their channel — it cannot; OAUTH_SCOPES in
+ * youtube-oauth-service.ts asks for `youtube.readonly` and two `readonly`
+ * Analytics scopes, and no write scope is requested, so the permission to
+ * change anything does not exist. That revenue arrives automatically with the
+ * connection — it does not; the monetary Analytics scope is a separate tick on
+ * Google's consent screen and can be refused on its own, which is why half the
+ * connection card below is about whether it was granted. And that the money
+ * figures are final — they are not; YouTube adjusts them at month end, and a
+ * ledger that presents an estimate as settled cash is how somebody reconciles
+ * against a bank statement and concludes the books are broken.
+ *
+ * This panel stays on screen after the first connection. Connecting a second
+ * account is the normal case for a studio with several channels, and the person
+ * doing it is entitled to read the same three sentences.
+ */
+function ConnectPanel({ hasConnections }: { hasConnections: boolean }) {
+  return (
+    <Card className="flex flex-col gap-5 p-5 lg:flex-row lg:items-center lg:justify-between lg:gap-8">
+      <div className="flex min-w-0 flex-col gap-3">
+        <div>
+          <h2 className="text-[15px] font-medium text-foreground">
+            {hasConnections
+              ? "Connect another YouTube channel"
+              : "No YouTube channel is connected yet"}
+          </h2>
+          <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
+            {hasConnections
+              ? "Each Google account you connect adds the channels it owns, read with their own private figures rather than the ones YouTube shows the public."
+              : "Connect the Google account that owns your channels. Until then, every figure in the app is the public one anybody can see, and there is no revenue to import."}
+          </p>
+        </div>
+
+        <ul className="flex flex-col gap-2">
+          <PanelPoint icon={<ShieldCheck className="text-success" />}>
+            Northstar HQ requests <strong className="text-foreground">read-only</strong>{" "}
+            access and <strong className="text-foreground">can never modify a channel</strong>
+            . It can read your channels, videos, their statistics and the revenue YouTube
+            estimates for them; it cannot upload, edit, comment, delete or change anything.
+            No write permission is ever requested, so the ability to do so does not exist.
+          </PanelPoint>
+
+          <PanelPoint icon={<Coins className="text-subtle-foreground" />}>
+            Revenue needs a{" "}
+            <strong className="text-foreground">separate YouTube Analytics permission</strong>{" "}
+            — a distinct tick on Google&rsquo;s consent screen. Leave every permission
+            ticked to import earnings. Declining it still connects the account and still
+            syncs channels and videos; only the money is left out.
+          </PanelPoint>
+
+          <PanelPoint icon={<AlertTriangle className="text-warning" />}>
+            Every figure YouTube reports is an{" "}
+            <strong className="text-foreground">estimate</strong>, and YouTube revises it —
+            usually at month end, sometimes weeks later. Imported amounts are marked as
+            estimates in{" "}
+            <Link
+              href="/finance/entries"
+              className="text-accent underline-offset-2 hover:underline"
+            >
+              Finance &rarr; Entries
+            </Link>{" "}
+            and must not be treated as settled cash.
+          </PanelPoint>
+        </ul>
+      </div>
+
+      <ConnectButton
+        label="Connect YouTube Channel"
+        size="lg"
+        icon={<Youtube />}
+        className="shrink-0 self-start lg:self-center"
+      />
+    </Card>
+  );
+}
+
+function PanelPoint({
+  icon,
+  children,
+}: {
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <li className="flex items-start gap-2.5">
+      <span className="mt-0.5 shrink-0 [&_svg]:size-3.5">{icon}</span>
+      <span className="min-w-0 text-[12px] leading-relaxed text-muted-foreground">
+        {children}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * "Sync revenue now" — the same work the scheduler does, on demand.
+ *
+ * The two moments it exists for are right after connecting an account and right
+ * after fixing an exchange rate a previous run complained about. In both, the
+ * alternative is waiting hours to learn whether the fix worked, which is the
+ * difference between a setup that feels finished and one that feels broken.
+ *
+ * The result is reported in detail rather than as "done", because a revenue run
+ * has several honest outcomes that are not success and are not errors either: a
+ * channel outside the Partner Programme, a connection that predates the revenue
+ * permission, a month that has not moved. Saying "synced" over any of those
+ * would be the screen's own small lie.
+ *
+ * `connectionId` narrows the run to one account. Every card has its own
+ * instance, so `isPending` — and the spinner it drives — belongs to the button
+ * that was actually pressed rather than to all of them at once. The wording of
+ * the outcome differs too: a run over one connection that reported nothing can
+ * say "this channel", where the sweep can only send the reader to look through
+ * the cards below.
+ */
+function SyncRevenueButton({
+  connectionId = null,
+  label = "Sync revenue now",
+}: {
+  connectionId?: string | null;
+  label?: string;
+}) {
+  const sync = useSyncYouTubeRevenue();
+  const single = connectionId !== null;
+
+  return (
+    <Button
+      variant="secondary"
+      size="sm"
+      loading={sync.isPending}
+      onClick={() =>
+        sync.mutate(connectionId, {
+          onSuccess: (summary) => {
+            const written = summary.entriesCreated + summary.entriesRevised;
+
+            if (summary.errors.length > 0) {
+              toast.warning("Revenue synced, with problems", {
+                // The first error in full: these messages are written to name
+                // the next action, and truncating one to a count would throw
+                // away the only part that helps.
+                description: summary.errors[0]?.message,
+                duration: 12_000,
+              });
+              return;
+            }
+
+            if (written === 0) {
+              toast.success("Revenue is up to date", {
+                description:
+                  summary.connectionsSynced > 0
+                    ? "YouTube reported no change since the last sync."
+                    : single
+                      ? "YouTube reported no revenue for this connection. Its revenue status now says why."
+                      : "No connected channel reported any revenue. Check each connection below for why.",
+              });
+              return;
+            }
+
+            toast.success("Revenue synced", {
+              description:
+                `${summary.entriesCreated} monthly entr${summary.entriesCreated === 1 ? "y" : "ies"} added, ` +
+                `${summary.entriesRevised} revised. Estimates — YouTube adjusts them at month end.`,
+            });
+          },
+          onError: (error) =>
+            toast.error("Could not sync revenue", {
+              description: error instanceof Error ? error.message : undefined,
+            }),
+        })
+      }
+    >
+      <RefreshCw />
+      {label}
     </Button>
   );
 }
@@ -193,6 +365,10 @@ const REQUIRED_SCOPE = "https://www.googleapis.com/auth/youtube.readonly";
 
 const SCOPE_LABELS: Readonly<Record<string, string>> = {
   [REQUIRED_SCOPE]: "Read channels, videos and statistics",
+  "https://www.googleapis.com/auth/yt-analytics.readonly":
+    "Read this channel's own analytics reports",
+  "https://www.googleapis.com/auth/yt-analytics-monetary.readonly":
+    "Read this channel's estimated revenue",
   openid: "Confirm which Google account this is",
   email: "Read the account's email address",
   "https://www.googleapis.com/auth/userinfo.email": "Read the account's email address",
@@ -231,7 +407,7 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
             </div>
           </div>
 
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             {!healthy ? (
               <ConnectButton
                 label="Reconnect"
@@ -239,6 +415,11 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
                 icon={<RefreshCw />}
               />
             ) : null}
+            {/* Offered on every connection, including the ones whose revenue
+                state is currently unhappy. Pressing it there is not futile: the
+                run rewrites the status either way, so it is also the way to
+                confirm that a reconnection or a fixed exchange rate took. */}
+            <SyncRevenueButton connectionId={connection.id} />
             <Button variant="ghost" size="sm" onClick={() => setConfirmOpen(true)}>
               Disconnect
             </Button>
@@ -268,6 +449,8 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
             </p>
           </div>
         ) : null}
+
+        <RevenueNotice connection={connection} />
 
         <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border px-4 py-3 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="Channel">
@@ -305,6 +488,54 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
           </Field>
 
           <Field label="Connected on">{formatDateTime(connection.createdAt)}</Field>
+
+          <Field label="Revenue">
+            <RevenueStatusBadge connection={connection} />
+          </Field>
+
+          <Field label="Last revenue sync">
+            {connection.lastRevenueSyncAt === null ? (
+              // Not "never synced": a connection that has never been ASKED for
+              // revenue and one that was asked and answered nothing are
+              // different facts, and the badge beside this says which.
+              <span className="text-subtle-foreground">Not read yet</span>
+            ) : (
+              <span title={formatDateTime(connection.lastRevenueSyncAt)}>
+                {formatRelativeTime(connection.lastRevenueSyncAt, now === 0 ? undefined : now)}
+              </span>
+            )}
+          </Field>
+
+          <Field label="Next sync">
+            <NextSyncValue nextSyncAt={connection.nextSyncAt} now={now} />
+          </Field>
+
+          <Field label="Monetisation">
+            {connection.monetizationStatus === "monetized" ? (
+              "In the YouTube Partner Programme"
+            ) : connection.monetizationStatus === "not_monetized" ? (
+              /*
+                The refusal is the evidence, so the refusal is what this says.
+                It used to read "Not in the Partner Programme", which is one
+                READING of a 403 and not the only one: Google answers a monetary
+                report with the same status and the same reason code whether the
+                channel is outside the programme or the connected account no
+                longer owns it, and the body names neither. Nothing in the
+                response separates the two, so nothing here pretends to — the
+                notice above this table states both readings and names the fix
+                for each. This line states what was observed and stops.
+              */
+              <span title="YouTube refused to produce a revenue report for this channel even though this connection has permission to read one. That is its answer both for a channel outside the Partner Programme and for a channel this Google account no longer owns; the refusal does not say which. See the note above.">
+                Revenue report refused
+              </span>
+            ) : (
+              // Never guessed at, and a window of zeros does not change that: a
+              // channel earning fractions of a cent reports the same as one that
+              // cannot earn at all. Until something establishes it, there is
+              // nothing here worth asserting either way.
+              <span className="text-subtle-foreground">Not known yet</span>
+            )}
+          </Field>
         </dl>
 
         <div className="border-t border-border px-4 py-3">
@@ -372,6 +603,285 @@ function StatusBadge({ status }: { status: string }) {
     <Badge variant="neutral" size="sm" className="tracking-wider">
       {status.replace(/_/g, " ")}
     </Badge>
+  );
+}
+
+/**
+ * The revenue column, as six distinguishable states rather than a tick or a
+ * cross.
+ *
+ * "Not read yet", "we were never given permission to ask", "we asked and
+ * YouTube refused to answer", "we asked and every day came back zero", "we
+ * asked and it failed" and "working" are six different situations with six
+ * different next actions. Collapsing any of them into "no revenue" would put a
+ * figure of zero in somebody's head that the data never supported.
+ *
+ * "Refused a report" and "Reported no revenue" are close together in wording on
+ * purpose, because the states are close together in fact and the difference is
+ * the whole point: one is what YouTube refused to say, the other is what it
+ * said. Neither says why. The refusal badge used to read "No revenue to
+ * report", which is a third thing again — a claim that the money does not
+ * exist, from a response that only ever said we could not have it.
+ */
+function RevenueStatusBadge({ connection }: { connection: YouTubeConnectionDTO }) {
+  if (!connection.revenueScopeGranted) {
+    return (
+      <Badge variant="near" size="sm" className="tracking-wider">
+        Reconnect to enable
+      </Badge>
+    );
+  }
+
+  switch (connection.revenueSyncStatus) {
+    case "ok":
+      return (
+        <Badge variant="hit" size="sm" className="tracking-wider">
+          Syncing
+        </Badge>
+      );
+    case "not_monetized":
+      return (
+        <Badge variant="neutral" size="sm" className="tracking-wider">
+          Refused a report
+        </Badge>
+      );
+    case "reported_zero":
+      return (
+        <Badge variant="neutral" size="sm" className="tracking-wider">
+          Reported no revenue
+        </Badge>
+      );
+    case "error":
+      return (
+        <Badge variant="danger" size="sm" className="tracking-wider">
+          Failed
+        </Badge>
+      );
+    case "no_scope":
+      return (
+        <Badge variant="near" size="sm" className="tracking-wider">
+          Reconnect to enable
+        </Badge>
+      );
+    default:
+      return (
+        <Badge variant="neutral" size="sm" className="tracking-wider">
+          Not read yet
+        </Badge>
+      );
+  }
+}
+
+/**
+ * When the scheduler will look again.
+ *
+ * A time in the past is shown as "due on the next run" rather than as "2 hours
+ * ago", which would read as though something had already happened. The
+ * scheduler wakes on its own cadence, so a passed due time means waiting, not
+ * failing.
+ */
+function NextSyncValue({ nextSyncAt, now }: { nextSyncAt: number | null; now: number }) {
+  if (nextSyncAt === null) {
+    return (
+      <span className="text-subtle-foreground">
+        After the first sync of this connection
+      </span>
+    );
+  }
+  if (now !== 0 && nextSyncAt <= now) {
+    return <span>Due on the next run</span>;
+  }
+  return (
+    <span title={formatDateTime(nextSyncAt)}>
+      {formatRelativeTime(nextSyncAt, now === 0 ? undefined : now)}
+    </span>
+  );
+}
+
+interface RevenueNoticeContent {
+  readonly tone: "warning" | "danger" | "info";
+  readonly icon: "alert" | "coins" | "clock";
+  readonly body: React.ReactNode;
+  /** True when the fix is a fresh consent, so the banner offers the button. */
+  readonly offerReconnect: boolean;
+}
+
+/**
+ * What to DO about this connection's revenue state.
+ *
+ * EVERY state gets a sentence, including the working one, and every sentence
+ * names the next step — even when that step is "nothing, and here is where the
+ * money will show up". This function used to return null for a healthy
+ * connection, which sounds like restraint and is not: a screen that speaks only
+ * when something is broken leaves "it is working" and "nobody has told you yet"
+ * looking identical, and the person reading it has no way to tell whether the
+ * setup they just finished actually finished.
+ *
+ * The states are genuinely distinct and each one has a different next action:
+ * the permission was never granted (reconnect), YouTube refused a report at all
+ * (wait, nothing to fix), YouTube answered with nothing but zeros (wait, and
+ * here is why that probably is), the last read failed (act on the error),
+ * nothing has been read yet (press sync or wait for the scheduler), and it is
+ * working (go and look at the ledger). Collapsing any pair of these into one
+ * message throws away the only thing this screen knows that the reader does
+ * not.
+ */
+function revenueNoticeFor(connection: YouTubeConnectionDTO): RevenueNoticeContent {
+  if (!connection.revenueScopeGranted) {
+    return {
+      tone: "warning",
+      icon: "alert",
+      body:
+        "This connection cannot read revenue. Either it was authorised before Northstar HQ asked " +
+        "for that permission, or the separate YouTube Analytics permission was unticked on " +
+        "Google's consent screen. Reconnect the account and leave every permission ticked to " +
+        "enable revenue — channel and video syncing is unaffected either way.",
+      offerReconnect: true,
+    };
+  }
+
+  if (connection.revenueSyncStatus === "not_monetized") {
+    return {
+      tone: "info",
+      icon: "coins",
+      // The service composes this sentence and hedges it, because the refusal
+      // has two readings and Google's response does not choose between them.
+      // The fallback below is for a row written before that message existed and
+      // therefore has to hedge in the same terms — a fallback that named only
+      // the Partner Programme would quietly reintroduce the claim the message
+      // above was rewritten to stop making.
+      body:
+        connection.revenueSyncError ??
+        "YouTube refused to produce a revenue report for this channel even though this connection " +
+          "has permission to read one. That is its answer for a channel outside the YouTube " +
+          "Partner Programme — and also for a channel the Google account behind this connection " +
+          "no longer owns; the refusal does not say which. If the channel IS monetised, reconnect " +
+          "using the account that owns it. Otherwise nothing needs fixing, and figures will start " +
+          "appearing on their own once the channel is in the programme.",
+      offerReconnect: false,
+    };
+  }
+
+  /**
+   * What was OBSERVED, then the likeliest reason for it, in that order and in
+   * different voices.
+   *
+   * This branch used to be folded into the one above, which stated "this
+   * channel is not in the YouTube Partner Programme" as a finding. It was not
+   * one. A window of zeros is a report YouTube sent; the Partner Programme is
+   * our reading of that report, and a small channel earning fractions of a cent
+   * a day sends exactly the same zeros. The service composes the sentence
+   * because it is the half of this that knows which days were read and whether
+   * this channel has ever reported revenue before; the fallback below is for a
+   * row written before that message existed.
+   */
+  if (connection.revenueSyncStatus === "reported_zero") {
+    return {
+      tone: "info",
+      icon: "coins",
+      body:
+        connection.revenueSyncError ??
+        "YouTube reported no revenue for this channel over the period it was last read for. The " +
+          "likeliest explanation is that the channel is not in the YouTube Partner Programme, " +
+          "though a channel earning fractions of a cent a day reports the same zeros. Nothing " +
+          "needs fixing either way — figures appear on their own once there are any.",
+      offerReconnect: false,
+    };
+  }
+
+  if (connection.revenueSyncStatus === "error") {
+    return {
+      tone: "danger",
+      icon: "alert",
+      body:
+        connection.revenueSyncError ??
+        "Revenue could not be read on the last run, and no reason was recorded. Press “Sync " +
+          "revenue now” to try again and capture the error.",
+      offerReconnect: false,
+    };
+  }
+
+  // "ok" with a message means the run succeeded but something in it is worth
+  // mentioning — a month that could not be converted, for instance. Reported as
+  // a warning rather than folded into the success sentence, because the run
+  // genuinely did both things.
+  if (connection.revenueSyncStatus === "ok" && connection.revenueSyncError) {
+    return {
+      tone: "warning",
+      icon: "alert",
+      body: connection.revenueSyncError,
+      offerReconnect: false,
+    };
+  }
+
+  if (connection.revenueSyncStatus === "ok") {
+    return {
+      tone: "info",
+      icon: "coins",
+      body: (
+        <>
+          Revenue is importing for this channel. It arrives as one entry per month in{" "}
+          <Link
+            href="/finance/entries"
+            className="text-accent underline-offset-2 hover:underline"
+          >
+            Finance &rarr; Entries
+          </Link>
+          , marked <strong className="text-foreground">Est</strong> because YouTube revises
+          these figures at month end. Nothing here needs doing.
+        </>
+      ),
+      offerReconnect: false,
+    };
+  }
+
+  // Scope granted, no verdict yet: the permission is in place and the first
+  // read simply has not happened. Distinct from every failure above, and the
+  // one state where the sync button is the actual answer.
+  return {
+    tone: "info",
+    icon: "clock",
+    body: "The revenue permission is granted, but no figures have been read yet. Press “Sync revenue now” to read them immediately, or leave it — the scheduler will do it on its next run, shown below.",
+    offerReconnect: false,
+  };
+}
+
+const NOTICE_ICONS = {
+  alert: AlertTriangle,
+  coins: Coins,
+  clock: Clock,
+} as const;
+
+function RevenueNotice({ connection }: { connection: YouTubeConnectionDTO }) {
+  const notice = revenueNoticeFor(connection);
+  const Icon = NOTICE_ICONS[notice.icon];
+
+  return (
+    <div
+      className={cn(
+        "mx-4 mt-3 flex items-start gap-2.5 rounded-lg border px-3 py-2.5",
+        notice.tone === "warning" && "border-warning/25 bg-warning-subtle",
+        notice.tone === "danger" && "border-danger/25 bg-danger-subtle",
+        notice.tone === "info" && "border-border bg-surface-sunken",
+      )}
+    >
+      <Icon
+        className={cn(
+          "mt-0.5 size-3.5 shrink-0",
+          notice.tone === "warning" && "text-warning",
+          notice.tone === "danger" && "text-danger",
+          notice.tone === "info" && "text-subtle-foreground",
+        )}
+      />
+      <div className="min-w-0 flex-1">
+        <p className="text-[12px] leading-relaxed text-muted-foreground">{notice.body}</p>
+        {notice.offerReconnect ? (
+          <div className="mt-2">
+            <ConnectButton label="Reconnect to enable revenue" variant="secondary" icon={<RefreshCw />} />
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -556,10 +1066,24 @@ function SetupCard({ google }: { google: GoogleOAuthStatusDTO }) {
             and create an <strong className="text-foreground">OAuth client ID</strong> of
             type <em>Web application</em>.
           </li>
+          {/*
+            TWO APIs, not one.
+            Revenue does not come from the Data API — it comes from the YouTube
+            Analytics API, which is a separate entry in the Library and is off by
+            default. Enabling only the first one produces a connection that reads
+            channel data perfectly and then fails every revenue report with a 403,
+            which is an hour of debugging nobody should have to do.
+          */}
           <li>
             Under <em>APIs &amp; Services → Library</em>, enable{" "}
             <strong className="text-foreground">YouTube Data API v3</strong> for the same
             project.
+          </li>
+          <li>
+            In the same Library, also enable{" "}
+            <strong className="text-foreground">YouTube Analytics API</strong>. This is a
+            separate API and revenue reporting will not work without it — channel data
+            would sync normally while every revenue figure failed.
           </li>
           <li>Add the redirect URI above to that client.</li>
           <li>

@@ -1,10 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { Check, ChevronDown, Layers, Settings2, Users } from "lucide-react";
+import { Check, ChevronDown, Layers, Settings2, Shapes, Users } from "lucide-react";
 import Link from "next/link";
-import type { NicheDTO } from "@/lib/dto";
-import type { NicheFilter, OwnershipFilter } from "@/lib/filters-store";
+import type { ContentTypeDTO, NicheDTO } from "@/lib/dto";
+import type {
+  ContentTypeFilter,
+  NicheFilter,
+  OwnershipFilter,
+} from "@/lib/filters-store";
 import { useFilters } from "@/components/providers/filters-provider";
 import {
   DropdownMenu,
@@ -17,15 +21,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { nicheColor } from "@/components/niches/niche-chip";
+import { contentTypeColor } from "@/components/content-types/content-type-chip";
 import { cn } from "@/lib/utils";
 
 /**
- * Niche and ownership scope controls.
+ * Niche, content-type and ownership scope controls.
  *
  * Styled identically to the period and threshold selectors so the toolbar reads
  * as one row of equal-weight questions rather than a growing pile of features:
  *
- *   Niche  ·  Channels  ·  Period  ·  Threshold
+ *   Niche  ·  Type  ·  Channels  ·  Period  ·  Threshold
  *
  * Both are pure client-side predicates over the already-fetched dataset, so
  * they cost exactly as much as changing the threshold: nothing.
@@ -117,6 +122,175 @@ export function NicheFilterControl({
           <Link href="/niches">
             <Settings2 />
             Manage niches
+          </Link>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * Content-type scope — ONE FLAT ORG-WIDE MENU.
+ *
+ * This control briefly required a niche to be selected first, because a content
+ * type belonged to one. It does not any more: the vocabulary is a single
+ * centralised list of tags attached to channels and Shorts, so the menu offers
+ * all of it, always, and pairs with any niche or none.
+ *
+ * What that removes is worth naming, because it was a real cost: the previous
+ * version could show "Pick a niche" — a filter that had to be unlocked before it
+ * could be used, in a toolbar whose other four controls are answerable
+ * immediately. A row of equal-weight questions should not contain one that
+ * answers "not yet".
+ *
+ * The catalogue arrives with archived types included. Only active ones are
+ * offered, but a currently-selected archived type is kept in the list so a
+ * shared `?contentType=` link does not silently widen to "All" on the
+ * recipient's screen.
+ *
+ * Still one array pass over data already in memory. Nothing here enters a query
+ * key, so selecting a content type cannot cause a fetch — the same guarantee
+ * the period and threshold controls make.
+ */
+export function ContentTypeFilterControl({
+  contentTypes,
+  unassignedCount,
+  unit = "channel",
+  className,
+}: {
+  contentTypes: readonly ContentTypeDTO[];
+  /**
+   * How many of the rows currently in view carry no tag — the "Untagged" count.
+   *
+   * Counted over the rows the OTHER filters are already showing, not over the
+   * whole tracker, so selecting it can never offer a number and then render a
+   * different one.
+   */
+  unassignedCount: number;
+  /**
+   * What this menu is about to narrow.
+   *
+   * The same filter means two things depending on the surface — the channel
+   * list reads a channel's own tags, the Shorts feeds read each Short's
+   * classification — and the menu has to say which, because the numbers beside
+   * each row are different numbers. A menu that offered "Rankings · 6" on a
+   * page whose rows are Shorts would be counting the wrong thing at the reader.
+   */
+  unit?: "channel" | "short";
+  className?: string;
+}) {
+  const { contentType, setContentType } = useFilters();
+
+  const options = React.useMemo(() => {
+    const active = contentTypes.filter((type) => type.isActive);
+    const selected = contentTypes.find((type) => type.id === contentType);
+    return selected && !selected.isActive ? [...active, selected] : active;
+  }, [contentTypes, contentType]);
+
+  // An organization that has not defined any content types gets no control. The
+  // toolbar is a row of equal-weight questions, and a question with exactly one
+  // possible answer is not one — the sidebar entry is where the feature is
+  // discovered. The `contentType !== "all"` escape hatch matters: a link can
+  // arrive carrying a type this viewer cannot see, and hiding the control would
+  // leave them narrowed with no way to widen.
+  if (contentTypes.length === 0 && contentType === "all") return null;
+
+  const selected = options.find((type) => type.id === contentType) ?? null;
+  const label =
+    contentType === "all"
+      ? "All types"
+      : contentType === "unassigned"
+        ? "Untagged"
+        : (selected?.name ?? "All types");
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button type="button" className={cn(TRIGGER_CLASS, className)}>
+          {selected ? (
+            <span
+              aria-hidden
+              className="size-[6px] shrink-0 rounded-[1px]"
+              style={{ background: contentTypeColor(selected.colorIndex) }}
+            />
+          ) : (
+            <Shapes className="size-3.5 text-subtle-foreground" />
+          )}
+          <span className="text-muted-foreground">Type</span>
+          <span className="max-w-[140px] truncate text-foreground">{label}</span>
+          <ChevronDown className="size-3 text-subtle-foreground transition-transform group-data-[state=open]:rotate-180" />
+        </button>
+      </DropdownMenuTrigger>
+
+      <DropdownMenuContent align="start" className="min-w-[240px]">
+        <DropdownMenuLabel>
+          {unit === "channel" ? "Channels that make…" : "Shorts filed as…"}
+        </DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={contentType}
+          onValueChange={(value) => setContentType(value as ContentTypeFilter)}
+        >
+          <DropdownMenuRadioItem value="all">All types</DropdownMenuRadioItem>
+
+          {options.length > 0 ? <DropdownMenuSeparator /> : null}
+
+          {options.map((item) => (
+            <DropdownMenuRadioItem key={item.id} value={item.id}>
+              <span className="flex w-full items-center justify-between gap-3">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span
+                    aria-hidden
+                    className="size-[6px] shrink-0 rounded-[1px]"
+                    style={{ background: contentTypeColor(item.colorIndex) }}
+                  />
+                  <span className="truncate">{item.name}</span>
+                  {!item.isActive ? (
+                    <span className="shrink-0 text-[10px] text-subtle-foreground">
+                      archived
+                    </span>
+                  ) : null}
+                </span>
+                {/* The count has to be in the unit this menu narrows, or it
+                    promises a number of rows it will not deliver. Both are on
+                    the catalogue row precisely because a tag attaches to both
+                    channels and Shorts. */}
+                <span className="tnum shrink-0 text-[11px] text-subtle-foreground">
+                  {unit === "channel" ? item.channelCount : item.videoCount}
+                </span>
+              </span>
+            </DropdownMenuRadioItem>
+          ))}
+
+          {/* "Untagged" only means something once there is a vocabulary — with
+              an empty list it would select every channel and read as a bug. */}
+          {unassignedCount > 0 && options.length > 0 ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuRadioItem value="unassigned">
+                <span className="flex w-full items-center justify-between gap-3">
+                  <span className="text-muted-foreground">Untagged</span>
+                  <span className="tnum shrink-0 text-[11px] text-subtle-foreground">
+                    {unassignedCount}
+                  </span>
+                </span>
+              </DropdownMenuRadioItem>
+            </>
+          ) : null}
+        </DropdownMenuRadioGroup>
+
+        {options.length === 0 ? (
+          <p className="px-2 py-2 text-[11px] leading-relaxed text-subtle-foreground">
+            No content types yet. They are whatever vocabulary your team actually
+            argues in &mdash; &ldquo;Funny Moment&rdquo;, &ldquo;Ranking&rdquo;,
+            &ldquo;Cutscene&rdquo;.
+          </p>
+        ) : null}
+
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link href="/content-types">
+            <Settings2 />
+            Manage content types
           </Link>
         </DropdownMenuItem>
       </DropdownMenuContent>

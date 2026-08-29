@@ -1,15 +1,27 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 /**
- * The audit log must not become the way around `payroll.view`.
+ * The audit log must not become the way around `payroll.view` — or around
+ * `finance.view`, which is a different permission and must stay one.
  *
  * `employee.pay_updated` is the one entry in this system that carries money in
- * its metadata, and it carries it deliberately: a salary change with no record
- * of what it changed from is not an audit entry. But the entry itself is
- * readable by anyone with `audit.view`, which is a strictly WIDER group —
- * `audit.view` is individually grantable, so an admin can hand somebody the log
- * to investigate an incident and, without the redaction these tests pin down,
- * hand them every salary in the company along with it.
+ * its metadata deliberately: a salary change with no record of what it changed
+ * from is not an audit entry. But the entry itself is readable by anyone with
+ * `audit.view`, which is a strictly WIDER group — `audit.view` is individually
+ * grantable, so an admin can hand somebody the log to investigate an incident
+ * and, without the redaction these tests pin down, hand them every salary in
+ * the company along with it.
+ *
+ * The finance half is the same defect one permission over, and it leaked twice:
+ * the amounts were in `metadata` (closed by the same key-stripping) AND spelled
+ * out in the `summary` prose, which was returned verbatim. Both are covered
+ * here, because the prose path is the one that was missed the first time.
+ *
+ * ONE MONEY FLAG WAS THE OTHER HALF OF THE BUG. `payroll.view` used to decide
+ * whether a reader saw ANY amount, which made it a key to the ledger and left
+ * `finance.view` unlocking nothing. So these tests assert the cross cases in
+ * both directions: payroll alone must not open finance, and finance alone must
+ * not open payroll.
  *
  * So the rule under test is: the row is written whole, and the READ decides how
  * much of it the caller may see. Written-side tests could not prove this —
@@ -113,21 +125,73 @@ function row(overrides: Partial<AuditRow> = {}): AuditRow {
   };
 }
 
-async function firstEntry(includeSensitiveMetadata?: boolean) {
+/**
+ * Reads the fixture row as a caller holding exactly the listed money
+ * permissions — `undefined` for a call site that passed no flag at all.
+ *
+ * Spelled as a permission list rather than a boolean because that is the point
+ * of the change under test: there is no such thing as "may see money", only
+ * "may see payroll figures" and "may see finance figures", and a test helper
+ * that collapsed them would be unable to express the cross cases below.
+ */
+async function firstEntry(held?: readonly ("payroll.view" | "finance.view")[]) {
   const page = await auditService.listAuditEvents({
     organizationId: ORG,
-    ...(includeSensitiveMetadata === undefined ? {} : { includeSensitiveMetadata }),
+    ...(held === undefined
+      ? {}
+      : {
+          moneyAccess: {
+            "payroll.view": held.includes("payroll.view"),
+            "finance.view": held.includes("finance.view"),
+          },
+        }),
   });
   const entry = page.entries[0];
   if (!entry) throw new Error("the fixture row did not come back");
   return entry;
 }
 
+/** Nothing beyond `audit.view`. */
+const NEITHER: readonly ("payroll.view" | "finance.view")[] = [];
+
+/** Exactly what `createEntry` writes alongside a finance summary. */
+const FINANCE_METADATA = {
+  kind: "revenue",
+  occurredOn: "2026-08-14",
+  amountMinor: 410_000,
+  currency: "USD",
+  baseAmountMinor: 13_940_000,
+  baseCurrency: "TRY",
+  exchangeRate: 34,
+  categoryId: "cat_adsense",
+  channelId: "chn_northstar",
+} as const;
+
+/**
+ * A finance row as the log holds it TODAY — the summary written before the
+ * amount was taken out of it.
+ *
+ * The fixture is deliberately the legacy shape, because that is the row that
+ * leaks: every finance entry recorded up to this change still has its figure
+ * spelled out in `summary`, and no write-side fix reaches them.
+ */
+function financeRow(overrides: Partial<AuditRow> = {}): AuditRow {
+  return row({
+    id: "evt_fin",
+    action: "finance.entry_created",
+    summary: "Recorded a $4,100.00 revenue entry",
+    targetType: "finance_entry",
+    targetLabel: "revenue",
+    metadata: JSON.stringify(FINANCE_METADATA),
+    ...overrides,
+  });
+}
+
 describe("a reader without payroll.view", () => {
   it("cannot see any amount in an employee.pay_updated entry", async () => {
     db.rows = [row()];
 
-    const entry = await firstEntry(false);
+    const entry = await firstEntry(NEITHER);
     const metadata = entry.metadata ?? {};
 
     // The keys are GONE, not nulled. `salaryMinorTo: null` would read as "pay
@@ -155,7 +219,7 @@ describe("a reader without payroll.view", () => {
   it("still gets an entry worth reading", async () => {
     db.rows = [row()];
 
-    const entry = await firstEntry(false);
+    const entry = await firstEntry(NEITHER);
 
     // Redacted, not withheld. Who did it, to whom, when, and which parts of the
     // record moved — everything `audit.view` is granted for survives.
@@ -195,7 +259,7 @@ describe("a reader without payroll.view", () => {
     // Redaction is keyed on the action, so it must not quietly thin out the
     // rest of the log — an audit trail that drops fields it was not asked to
     // drop is a different bug in the same place.
-    const entry = await firstEntry(false);
+    const entry = await firstEntry(NEITHER);
     expect(entry.metadata).toEqual({
       fromRole: "short_form_editor",
       toRole: "head_of_shorts",
@@ -217,7 +281,7 @@ describe("a reader without payroll.view", () => {
       }),
     ];
 
-    const entry = await firstEntry(false);
+    const entry = await firstEntry(NEITHER);
     // The whole payroll family is covered even though today's writers keep
     // money out of it — the entry that leaks is always the one written after
     // the redaction list was last reviewed.
@@ -229,7 +293,7 @@ describe("a reader with payroll.view", () => {
   it("sees the amounts, which is the whole point of recording them", async () => {
     db.rows = [row()];
 
-    const entry = await firstEntry(true);
+    const entry = await firstEntry(["payroll.view"]);
     expect(entry.metadata).toEqual(PAY_METADATA);
   });
 
@@ -239,9 +303,220 @@ describe("a reader with payroll.view", () => {
     // The `From`/`To` pair is what makes the entry answer "what changed".
     // Redacting one and keeping the other would leave an entry that looks
     // complete and is not.
-    const entry = await firstEntry(true);
+    const entry = await firstEntry(["payroll.view"]);
     expect(entry.metadata?.salaryMinorFrom).toBe(4_500_00);
     expect(entry.metadata?.salaryMinorTo).toBe(5_200_00);
+  });
+});
+
+describe("a reader without finance.view", () => {
+  it("cannot see a finance amount in the metadata", async () => {
+    db.rows = [financeRow()];
+
+    const entry = await firstEntry(NEITHER);
+    const metadata = entry.metadata ?? {};
+
+    for (const key of ["amountMinor", "baseAmountMinor"]) {
+      expect(key in metadata).toBe(false);
+    }
+  });
+
+  it("cannot see a finance amount in the summary either", async () => {
+    db.rows = [financeRow()];
+
+    // THE ACTUAL BUG. The metadata path was closed and the prose path was not,
+    // so `summary` handed the figure to every holder of `audit.view` — the
+    // same defect class as the salary-through-audit leak, one permission over.
+    const entry = await firstEntry(NEITHER);
+    expect(entry.summary).not.toContain("4,100.00");
+    expect(entry.summary).not.toContain("$");
+
+    // Checked against the whole serialised entry too, so a figure that finds a
+    // third way out — a target label, a field added later — fails this as well.
+    const serialised = JSON.stringify(entry);
+    expect(serialised).not.toContain("410000");
+    expect(serialised).not.toContain("13940000");
+  });
+
+  it("still gets an entry worth reading", async () => {
+    db.rows = [financeRow()];
+
+    // Redacted, not withheld: which side of the ledger, when, in what currency,
+    // under which category and channel. Everything except the figure.
+    const entry = await firstEntry(NEITHER);
+    expect(entry.action).toBe("finance.entry_created");
+    expect(entry.summary).toContain("revenue entry");
+    expect(entry.metadata).toEqual({
+      kind: "revenue",
+      occurredOn: "2026-08-14",
+      currency: "USD",
+      baseCurrency: "TRY",
+      exchangeRate: 34,
+      categoryId: "cat_adsense",
+      channelId: "chn_northstar",
+    });
+  });
+
+  it("reads a summary written the new way exactly as written", async () => {
+    // What `createEntry` writes now: the entry identified, the figure left in
+    // the metadata where redaction is exact. The scrub must pass it through
+    // untouched — an ISO date is not an amount, and a redaction that eats one
+    // is a redaction nobody will trust with the next summary.
+    db.rows = [financeRow({ summary: "Recorded a revenue entry dated 2026-08-14" })];
+
+    const entry = await firstEntry(NEITHER);
+    expect(entry.summary).toBe("Recorded a revenue entry dated 2026-08-14");
+  });
+
+  it("catches the amount however Intl happened to format it", async () => {
+    // `formatMoney` goes through Intl, so a stored summary's shape depends on
+    // the currency and on the locale of whichever process wrote the row. These
+    // are all $4,100.00. The scrub is best-effort by construction — this is the
+    // set of shapes it is known to handle, not a proof it handles every one.
+    const forms = [
+      "Recorded a $4,100.00 revenue entry",
+      "Recorded a US$4,100.00 revenue entry",
+      "Updated a 4.100,00 € expense entry",
+      "Deleted a ¥4100 revenue entry",
+      "Imported a 4 100,00 ₺ revenue entry from youtube_ads",
+      "Recorded a 4,100.00 TRY revenue entry",
+      "Recorded a TRY 4.100,00 revenue entry",
+      // Zero-decimal currencies, where the figure has no separator at all.
+      "Recorded a 4100 JPY revenue entry",
+      "Recorded a JPY 4100 revenue entry",
+      "youtube_ads revised a revenue entry from $4,100.00 to $4,250.00",
+      /*
+       * The two shapes that escaped a review of this scrub, kept here because
+       * both failed in ways worth remembering.
+       *
+       * de-CH groups with an apostrophe. With that character outside the
+       * magnitude class the scrub did not merely miss "EUR 13'940.00" — it
+       * half-ate "$ 4'100.00" into "[redacted]'100.00", which looks like it
+       * worked while the figure is still perfectly readable.
+       *
+       * he-IL separates the number from the symbol with U+200F, the
+       * right-to-left mark: invisible, zero-width, and not matched by JS `\s`,
+       * so a gap written as `\s*` could not bridge it at all.
+       */
+      "Recorded a 4'100.00 CHF revenue entry",
+      "Recorded a $ 4'100.00 revenue entry",
+      "Recorded a ‏4100 ‏$ revenue entry",
+    ];
+
+    for (const summary of forms) {
+      db.rows = [financeRow({ summary })];
+      const entry = await firstEntry(NEITHER);
+
+      /*
+       * ANY run of digits, not the four spellings of "4100".
+       *
+       * Checking for the literal forms let a PARTIAL redaction pass: with the
+       * apostrophe missing from the magnitude class, "$ 4'100.00" came out as
+       * "[redacted]'100.00", which contains none of those four strings and is
+       * still perfectly readable as the amount. A half-eaten figure is the
+       * worst outcome this scrub has — it looks like it worked — so the
+       * assertion is that no multi-digit run survives at all.
+       */
+      expect(entry.summary, `leaked from: ${summary}`).not.toMatch(/\d\d/);
+      // Over-redacting is the accepted cost; erasing the sentence is not. The
+      // entry must still say which side of the ledger moved.
+      expect(entry.summary).toMatch(/revenue|expense/);
+    }
+  });
+
+  it("leaves a summary with no money in it entirely alone", async () => {
+    // Every action outside the money-carrying set skips the scrub, and the
+    // scrub itself matches nothing without a currency marker or a grouped
+    // number — so an ordinary sentence, a year and a headcount all survive.
+    const untouched = [
+      "Changed Deniz's role",
+      "Finalized August 2026 payroll for 12 employees",
+      "Adjusted Deniz's August payroll — corrected hit count",
+      "Short content types assigned to 400 videos",
+    ];
+
+    for (const summary of untouched) {
+      db.rows = [financeRow({ action: "payroll.period_finalized", summary })];
+      const entry = await firstEntry(NEITHER);
+      expect(entry.summary).toBe(summary);
+    }
+  });
+
+  it("does not eat the unit out of an exchange-rate summary", async () => {
+    // `finance.rate_updated` writes "Set 1 USD = 34.15 TRY". The "1 USD" is a
+    // ratio's left-hand side, not an amount, and a scrub that took it would
+    // leave a sentence saying nothing — which is the one failure mode worse
+    // than over-redacting. The rate itself is finance data and may go.
+    db.rows = [
+      financeRow({ action: "finance.rate_updated", summary: "Set 1 USD = 34.15 TRY" }),
+    ];
+
+    const entry = await firstEntry(NEITHER);
+    expect(entry.summary).toContain("1 USD");
+    expect(entry.summary).not.toContain("34.15");
+  });
+});
+
+describe("a reader with finance.view", () => {
+  it("sees the finance amounts, in the metadata and in the prose", async () => {
+    db.rows = [financeRow()];
+
+    const entry = await firstEntry(["finance.view"]);
+    expect(entry.metadata).toEqual(FINANCE_METADATA);
+    // Legacy rows keep their original wording for a reader entitled to it:
+    // the scrub is a permission boundary, not a migration.
+    expect(entry.summary).toBe("Recorded a $4,100.00 revenue entry");
+  });
+});
+
+describe("holding one money permission does not unlock the other", () => {
+  it("does not let payroll.view read a finance figure", async () => {
+    db.rows = [financeRow()];
+
+    // The bug this replaced: ONE flag, resolved from `payroll.view`, decided
+    // whether a reader saw any amount at all. Somebody trusted with salaries
+    // was thereby handed the ledger.
+    const entry = await firstEntry(["payroll.view"]);
+
+    expect("amountMinor" in (entry.metadata ?? {})).toBe(false);
+    expect(entry.summary).not.toContain("4,100.00");
+    expect(JSON.stringify(entry)).not.toContain("410000");
+  });
+
+  it("does not let finance.view read a salary", async () => {
+    db.rows = [row()];
+
+    // The mirror image, and the one the old code would have introduced next:
+    // `finance.view` is individually grantable, so an accountant given the
+    // ledger must not thereby read what their colleagues are paid.
+    const entry = await firstEntry(["finance.view"]);
+
+    expect("salaryMinorTo" in (entry.metadata ?? {})).toBe(false);
+    expect(JSON.stringify(entry)).not.toContain("520000");
+  });
+
+  it("does not let finance.view read a payroll.* figure", async () => {
+    db.rows = [
+      row({
+        id: "evt_pay",
+        action: "payroll.record_adjusted",
+        summary: "Adjusted Deniz's August payroll — corrected hit count",
+        metadata: JSON.stringify({ year: 2026, month: 8, adjustmentMinor: 75_00 }),
+      }),
+    ];
+
+    const entry = await firstEntry(["finance.view"]);
+    expect(entry.metadata).toEqual({ year: 2026, month: 8 });
+  });
+
+  it("gives a reader holding both everything", async () => {
+    db.rows = [financeRow()];
+    expect((await firstEntry(["payroll.view", "finance.view"])).metadata).toEqual(
+      FINANCE_METADATA,
+    );
+
+    db.rows = [row()];
+    expect((await firstEntry(["payroll.view", "finance.view"])).metadata).toEqual(PAY_METADATA);
   });
 });
 
@@ -258,6 +533,18 @@ describe("the money-carrying action set", () => {
     for (const action of ["auth.signed_in", "user.role_changed", "channel.added"]) {
       expect(auditActions.carriesMoneyMetadata(action)).toBe(false);
     }
+  });
+
+  it("says WHICH permission each action's figures belong to", () => {
+    // One classification, not two. The prefixes that decide whether an action
+    // carries money are the same ones that decide whose money it is, so the
+    // two answers cannot drift apart.
+    expect(auditActions.moneyPermissionFor("finance.entry_created")).toBe("finance.view");
+    expect(auditActions.moneyPermissionFor("finance.some_future_key")).toBe("finance.view");
+    expect(auditActions.moneyPermissionFor("payroll.record_adjusted")).toBe("payroll.view");
+    expect(auditActions.moneyPermissionFor("payroll.some_future_key")).toBe("payroll.view");
+    expect(auditActions.moneyPermissionFor("employee.pay_updated")).toBe("payroll.view");
+    expect(auditActions.moneyPermissionFor("user.role_changed")).toBeNull();
   });
 });
 

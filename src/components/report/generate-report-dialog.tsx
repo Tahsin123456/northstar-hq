@@ -21,6 +21,10 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { FieldHint, Input, Label } from "@/components/ui/input";
+import {
+  UNCONFIGURED_THRESHOLD_LABEL,
+  UNCONFIGURED_THRESHOLD_SHORT,
+} from "@/lib/analytics/constants";
 import { formatCompactNumber, formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -96,6 +100,22 @@ export function GenerateReportDialog({ trigger }: { trigger?: React.ReactNode })
       setError("The start date must be before the end date.");
       return;
     }
+    /*
+     * A report with no threshold is refused rather than generated with a
+     * borrowed one.
+     *
+     * The PDF is the one artefact that leaves the app and gets circulated
+     * without the screen around it, so it is the worst possible place for a
+     * figure whose provenance is "the app picked a number". Every page of it —
+     * cover, hit rates, Winners, the market comparison — is a statement about
+     * the threshold, so there is no honest partial report to fall back to.
+     */
+    if (threshold === null) {
+      setError(
+        `${UNCONFIGURED_THRESHOLD_LABEL}. Set a hit rate threshold for ${nicheName ?? "this niche"} before generating a report, or switch to All niches.`,
+      );
+      return;
+    }
 
     setError(null);
     setGenerating(true);
@@ -115,7 +135,9 @@ export function GenerateReportDialog({ trigger }: { trigger?: React.ReactNode })
         periodLabel: selected.label,
         // Passed through as-is: reporting a temporary override as the account
         // default would misstate how the numbers in the report were produced.
-        thresholdSource,
+        // "unconfigured" cannot reach here — the guard above returns first —
+        // so the report's own narrower union stays honest.
+        thresholdSource: thresholdSource === "unconfigured" ? "account" : thresholdSource,
         now: resolvedRange.endMs,
       });
 
@@ -234,13 +256,17 @@ export function GenerateReportDialog({ trigger }: { trigger?: React.ReactNode })
             <Row label="Scope" value={nicheName ?? "All niches"} />
             <Row
               label="Hit threshold"
-              value={`${formatCompactNumber(threshold)} views · ${
-                thresholdSource === "niche"
-                  ? `${nicheName} default`
-                  : thresholdSource === "override"
-                    ? "override"
-                    : "account default"
-              }`}
+              value={
+                threshold === null
+                  ? UNCONFIGURED_THRESHOLD_SHORT
+                  : `${formatCompactNumber(threshold)} views · ${
+                      thresholdSource === "niche"
+                        ? `${nicheName} default`
+                        : thresholdSource === "override"
+                          ? "override"
+                          : "account default"
+                    }`
+              }
             />
             <Row
               label="Period"
@@ -277,7 +303,10 @@ export function GenerateReportDialog({ trigger }: { trigger?: React.ReactNode })
             variant="primary"
             onClick={handleGenerate}
             loading={generating}
-            disabled={!data || !resolvedRange}
+            // Disabled rather than allowed-then-refused: the summary directly
+            // above already says "Not configured", so the button being dead is
+            // the consistent reading of it rather than a surprise.
+            disabled={!data || !resolvedRange || threshold === null}
           >
             {generating ? "Building PDF…" : "Download PDF"}
             {generating ? null : <Download />}

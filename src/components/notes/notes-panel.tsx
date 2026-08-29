@@ -3,20 +3,23 @@
 import * as React from "react";
 import { Pencil, Plus, StickyNote, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
-import type { NoteDTO, NoteTargetType } from "@/lib/dto";
+import {
+  UNKNOWN_AUTHOR_LABEL,
+  type NoteDTO,
+  type NoteTargetType,
+  type NoteVisibility,
+} from "@/lib/dto";
 import { useCreateNote, useDeleteNote, useNotes, useUpdateNote } from "@/hooks/use-research";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { formatRelativeTime } from "@/lib/format";
+import {
+  NoteVisibilityToggle,
+  VisibilityBadge,
+  VisibilityChoice,
+} from "@/components/notes/note-visibility";
+import { useSession } from "@/components/providers/session-provider";
+import { formatDate, formatRelativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /**
@@ -26,6 +29,13 @@ import { cn } from "@/lib/utils";
  * working observations ("payoff lands at 6 seconds"), written in seconds
  * between looking at numbers. Anything heavier would sit unused, and the point
  * is to keep the research loop fast.
+ *
+ * The list now holds two kinds of row: the reader's own, and the ones a
+ * colleague shared about this same channel / niche / Short. That is the whole
+ * value of sharing — the observation shows up where the thing it is about is
+ * being looked at — so the panel has to make three things obvious: whose a note
+ * is, that a shared one is shared, and that somebody else's is not yours to
+ * edit.
  */
 export function NotesPanel({
   targetType,
@@ -46,6 +56,10 @@ export function NotesPanel({
   const notes = data?.notes ?? [];
 
   const [draft, setDraft] = React.useState("");
+  // Private until the writer says otherwise, and reset to private after every
+  // save: a sticky "shared" would quietly share the next note, which is the one
+  // decision this control must never make on somebody's behalf.
+  const [visibility, setVisibility] = React.useState<NoteVisibility>("personal");
   const create = useCreateNote();
 
   const submit = (event: React.FormEvent) => {
@@ -54,11 +68,12 @@ export function NotesPanel({
     if (!body) return;
 
     create.mutate(
-      { targetType, targetId, body },
+      { targetType, targetId, body, visibility },
       {
         onSuccess: () => {
           setDraft("");
-          toast.success("Note added");
+          setVisibility("personal");
+          toast.success(visibility === "shared" ? "Note shared" : "Note added");
         },
         onError: (error) =>
           toast.error("Could not add that note", {
@@ -107,6 +122,11 @@ export function NotesPanel({
             "focus:border-accent focus:outline-none focus:ring-2 focus:ring-[var(--accent-ring)]",
           )}
         />
+        {/* The choice sits with the draft, not behind a menu on the saved row:
+            who can read a note is part of writing it, and a control you find
+            afterwards is one people find after the note is already shared. */}
+        <VisibilityChoice value={visibility} onChange={setVisibility} />
+
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] text-subtle-foreground">
             {draft.trim() ? "⌘/Ctrl + Enter to save" : ""}
@@ -151,6 +171,28 @@ function NoteRow({ note }: { note: NoteDTO }) {
   const update = useUpdateNote();
   const remove = useDeleteNote();
 
+  // EVERY note says who wrote it, the viewer's own included.
+  //
+  // This list is the viewer's own notes, plus any a colleague shared about this
+  // same thing, plus — for an admin — everybody's. It printed a byline only on
+  // the rows that were not "mine", which made a missing byline carry meaning by
+  // its absence; next to Edit and Delete that is the mistake worth preventing,
+  // and on an admin's screen it read as missing data rather than as ownership.
+  //
+  // The name comes from the stored `createdBy` relation, never the session, so
+  // it survives a rename and stays attached after the author leaves.
+  // `createdById` is `SetNull`, so a departed author arrives as a null id AND a
+  // null name; the fallback says so plainly rather than guessing why.
+  const session = useSession();
+  const viewerId = session.user.id;
+  const isMine = note.createdById === viewerId;
+  const byline = note.createdByName ?? UNKNOWN_AUTHOR_LABEL;
+
+  // A shared note is somebody else's writing that you happen to be able to
+  // read. The server refuses the edit anyway; showing the pencil would only
+  // mean finding that out after typing.
+  const canEdit = isMine || session.can("users.manage");
+
   if (editing) {
     return (
       <li className="px-5 py-3">
@@ -184,42 +226,55 @@ function NoteRow({ note }: { note: NoteDTO }) {
         <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">
           {note.body}
         </p>
-        <p className="mt-1 text-[11px] text-subtle-foreground">
-          {formatRelativeTime(note.createdAt)}
-          {note.updatedAt !== note.createdAt
-            ? ` · edited ${formatRelativeTime(note.updatedAt)}`
-            : ""}
+        <p className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-subtle-foreground">
+          {/* Spelled out rather than a bare name: this line sits under a note
+              about a channel or a Short, where an unlabelled name is as easily
+              read as the subject as the author. */}
+          <span className="text-foreground/70">Created by {byline} · </span>
+          {/* Absolute, matching the notes log. An edit stays relative: "edited
+              2 days ago" is about how stale what you are reading is, which is a
+              question about now, where the creation date is about when. */}
+          <span title={formatRelativeTime(note.createdAt)}>
+            {formatDate(note.createdAt)}
+            {note.updatedAt !== note.createdAt
+              ? ` · edited ${formatRelativeTime(note.updatedAt)}`
+              : ""}
+          </span>
+          <VisibilityBadge visibility={note.visibility} />
         </p>
       </div>
 
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Edit note"
-          onClick={() => setEditing(true)}
-        >
-          <Pencil />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Delete note"
-          loading={remove.isPending}
-          onClick={() =>
-            remove.mutate(note.id, {
-              onSuccess: () => toast.success("Note deleted"),
-              onError: (error) =>
-                toast.error("Could not delete that note", {
-                  description: error instanceof Error ? error.message : undefined,
-                }),
-            })
-          }
-          className="text-subtle-foreground hover:text-danger"
-        >
-          {remove.isPending ? null : <Trash2 />}
-        </Button>
-      </div>
+      {canEdit ? (
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          <NoteVisibilityToggle note={note} />
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Edit note"
+            onClick={() => setEditing(true)}
+          >
+            <Pencil />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Delete note"
+            loading={remove.isPending}
+            onClick={() =>
+              remove.mutate(note.id, {
+                onSuccess: () => toast.success("Note deleted"),
+                onError: (error) =>
+                  toast.error("Could not delete that note", {
+                    description: error instanceof Error ? error.message : undefined,
+                  }),
+              })
+            }
+            className="text-subtle-foreground hover:text-danger"
+          >
+            {remove.isPending ? null : <Trash2 />}
+          </Button>
+        </div>
+      ) : null}
     </li>
   );
 }
@@ -266,45 +321,14 @@ function EditNoteForm({
   );
 }
 
-/**
- * Notes on a single Short, in a dialog.
+/*
+ * The single-Short dialog used to live here as `ShortNotesDialog`.
  *
- * A Short lives inside a scrolling feed, so its notes cannot be an inline
- * panel without wrecking the list. The dialog keeps the discovery flow intact:
- * note it, close, keep scanning.
+ * It is now `ShortDetailDialog` in `components/shorts/short-detail-dialog.tsx`,
+ * because it stopped being about notes: a Short opened on its own also shows
+ * its niche and lets its content type be changed, and a notes module is the
+ * wrong place for a component that composes two taxonomies. It still renders
+ * `NotesPanel` — that is the part that belongs here.
  */
-export function ShortNotesDialog({
-  videoId,
-  videoTitle,
-  open,
-  onOpenChange,
-}: {
-  videoId: string | null;
-  videoTitle: string;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="pr-6">Notes</DialogTitle>
-          <DialogDescription className="truncate">{videoTitle}</DialogDescription>
-        </DialogHeader>
-        <DialogBody className="pt-0">
-          {open && videoId ? (
-            <NotesPanel
-              targetType="video"
-              targetId={videoId}
-              title="Notes on this Short"
-              compact
-              className="border-0 bg-transparent"
-            />
-          ) : null}
-        </DialogBody>
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 export { X };

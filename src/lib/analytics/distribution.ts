@@ -20,11 +20,13 @@ function findBucketIndex(views: number, buckets: readonly ViewBucket[]): number 
  * carried by two outliers with nothing in between. The shape tells you which.
  *
  * `isHitBucket` marks buckets that sit entirely at or above the threshold, so
- * the chart can shade the "hit zone" without re-deriving it.
+ * the chart can shade the "hit zone" without re-deriving it. With a `null`
+ * threshold there is no hit zone to shade — the shape of the distribution is
+ * still entirely real and worth drawing, it simply carries no verdict.
  */
 export function calculateViewDistribution(
   shorts: readonly AnalyticsVideo[],
-  threshold: number,
+  threshold: number | null,
   buckets: readonly ViewBucket[] = VIEW_BUCKETS,
 ): ViewDistributionBin[] {
   const counts = new Array<number>(buckets.length).fill(0);
@@ -40,6 +42,6 @@ export function calculateViewDistribution(
     ...bucket,
     count: counts[i],
     share: total === 0 ? 0 : counts[i] / total,
-    isHitBucket: bucket.min >= threshold,
+    isHitBucket: threshold !== null && bucket.min >= threshold,
   }));
 }

@@ -14,6 +14,29 @@
  * dashboard, the charts and the PDF report read. Payroll asks the same question
  * the rest of the product asks; it just attaches money to the answer.
  *
+ * AN UNCONFIGURED NICHE CANNOT PRODUCE A HIT
+ * A niche whose `hitThreshold` is null has never had a bar chosen for it. Every
+ * other consumer reads that as "not measurable" — the dashboard prints "Hit
+ * rate threshold: Not configured", the report dialog refuses to generate — and
+ * payroll reads it the same way. `isHit` is already false for a null threshold,
+ * so no bonus can arise from a bar nobody set.
+ *
+ * This module used to substitute the organization default here, and that made
+ * payroll the one place in the product where an unset threshold still produced
+ * a number. The number it produced was money: an admin who created a niche and
+ * never configured it was told on screen that its hit rate could not be
+ * measured, and was then billed on the 1st for hits measured against 1,000,000
+ * anyway. The fallback is gone, and `thresholdFor` returns null rather than
+ * coercing so that no caller can quietly put it back.
+ *
+ * BECAUSE THAT SUBSTITUTION PAID REAL MONEY, ITS REMOVAL IS NOT SILENT
+ * Dropping it reduces somebody's pay for Shorts that used to count. So the
+ * calculation reports what it could not judge as well as what it could:
+ * `skippedNiches` names every unconfigured niche that had Shorts in it and
+ * counts them, and the payroll screen shows that to an admin BEFORE they
+ * finalize. A bonus that quietly disappears and a bonus that disappears with a
+ * named reason are different events, and only the second one can be fixed.
+ *
  * WHAT COUNTS, AND WHY
  *   • Only Shorts from channels Northstar OWNS. Paying an editor a bonus
  *     because a competitor went viral would be absurd, and the ownership flag
@@ -38,7 +61,12 @@ import { isHit } from "@/lib/analytics/hit-rate";
 export interface PayrollNiche {
   readonly id: string;
   readonly name: string;
-  /** Null means "inherit the organization default", exactly as elsewhere. */
+  /**
+   * Null means NOBODY HAS SET ONE, and therefore that nothing in this niche can
+   * be a hit — not "inherit the organization default". See the note at the top:
+   * substituting a number here is what paid bonuses the product had already
+   * said it could not measure.
+   */
   readonly hitThreshold: number | null;
 }
 
@@ -103,6 +131,31 @@ export interface NicheBreakdown {
   readonly bonusMinor: number;
 }
 
+/**
+ * A niche that had Shorts in it and no threshold to judge them by.
+ *
+ * The counterpart to `NicheBreakdown`: that one says what was paid, this one
+ * says what could not even be asked. Both are needed to read a payroll run,
+ * because a niche missing from the breakdown looks exactly like a niche where
+ * nothing happened, and one of those is an admin's job to fix.
+ *
+ * `shortCount` counts DISTINCT Shorts that were not considered — published in
+ * the period, on an owned channel, filed under this niche, and not credited
+ * through some other niche that did have a bar. A Short that earned a bonus
+ * elsewhere was considered; counting it here would overstate what the missing
+ * threshold cost.
+ *
+ * One Short filed under two unconfigured niches is counted once in each, so
+ * summing `shortCount` across niches can exceed the number of Shorts involved.
+ * The per-niche figure is the one that means something — it is what changes
+ * when somebody configures THAT niche.
+ */
+export interface SkippedNiche {
+  readonly nicheId: string;
+  readonly nicheName: string;
+  readonly shortCount: number;
+}
+
 export interface PayrollCalculation {
   readonly userId: string;
   readonly name: string;
@@ -122,6 +175,14 @@ export interface PayrollCalculation {
   readonly byNiche: readonly NicheBreakdown[];
   /** Every Short that earned a bonus, for the audit trail. */
   readonly hits: readonly QualifyingHit[];
+  /**
+   * What this figure could NOT take into account, and why.
+   *
+   * Empty for anybody whose niches all have a threshold, which is the ordinary
+   * case. Non-empty means this person's bonus is smaller than it looks like it
+   * should be, for a reason that is a configuration gap rather than their work.
+   */
+  readonly skippedNiches: readonly SkippedNiche[];
 }
 
 // ---------------------------------------------------------------------------
@@ -188,9 +249,34 @@ function employedDuring(employee: PayrollEmployee, period: PayrollPeriodWindow):
   return true;
 }
 
-/** The threshold in force for a niche, falling back to the org default. */
-function thresholdFor(niche: PayrollNiche, organizationDefault: number): number {
-  return niche.hitThreshold ?? organizationDefault;
+/**
+ * The threshold in force for a niche, or null when nobody has set one.
+ *
+ * The null is the answer, not a gap to paper over. There is deliberately no
+ * organization-default parameter to fall back to: a caller that wants a number
+ * out of this has to decide what a missing bar means, in the open, rather than
+ * inheriting one with a `??`.
+ */
+function thresholdFor(niche: PayrollNiche): number | null {
+  return niche.hitThreshold;
+}
+
+/**
+ * Could this person earn a hit bonus at all, before any Short is looked at?
+ *
+ * Employment, an assignment and a rate are the three preconditions, and they
+ * are checked in one place because the skipped-niche report has to use exactly
+ * the same test as the bonus itself. Reporting "14 Shorts were not counted for
+ * Alex" about somebody who has no per-hit rate — and would therefore have been
+ * paid nothing either way — would raise an alarm about money that was never at
+ * stake.
+ */
+function canEarnBonus(employee: PayrollEmployee, period: PayrollPeriodWindow): boolean {
+  return (
+    employedDuring(employee, period) &&
+    employee.nicheIds.length > 0 &&
+    employee.hitPaymentMinor > 0
+  );
 }
 
 /**
@@ -213,12 +299,15 @@ function thresholdFor(niche: PayrollNiche, organizationDefault: number): number 
  * under a niche with a higher bar. The credited niche is recorded on the hit,
  * so every bonus can be traced back to the exact threshold it was judged
  * against.
+ *
+ * A niche with no threshold is not in the running at all — it has no bar to
+ * clear and no bar to rank. What that costs is reported separately, by
+ * `collectSkippedNiches`, rather than smuggled in here as a zero.
  */
 function attributeShort(
   short: PayrollShort,
   assignedNicheIds: ReadonlySet<string>,
   nicheById: ReadonlyMap<string, PayrollNiche>,
-  organizationDefault: number,
 ): { niche: PayrollNiche; threshold: number } | null {
   let best: { niche: PayrollNiche; threshold: number } | null = null;
 
@@ -228,7 +317,11 @@ function attributeShort(
     const niche = nicheById.get(nicheId);
     if (!niche) continue;
 
-    const threshold = thresholdFor(niche, organizationDefault);
+    const threshold = thresholdFor(niche);
+    // Narrowed before `isHit` rather than left to it. `isHit` answers false for
+    // null too, but returning early is what keeps `threshold` a number for the
+    // ranking below — there is no sane way to order "no bar" against 500,000.
+    if (threshold === null) continue;
     if (!isHit(short.views, threshold)) continue;
 
     if (
@@ -244,6 +337,62 @@ function attributeShort(
 }
 
 /**
+ * The Shorts a missing threshold left unjudged, grouped by the niche that is
+ * missing it.
+ *
+ * IN SCOPE means exactly what the bonus loop means by it — own channel, inside
+ * the period — because a report about what a payroll run skipped has to be
+ * drawn from the same population the run considered. Anything else and the
+ * count on the screen would answer a question nobody asked.
+ *
+ * `creditedVideoIds` is what the caller actually paid for. Those Shorts WERE
+ * considered, through a niche that had a bar, so they are not evidence of
+ * anything missing. The same rule serves both scopes: for one employee it is
+ * that person's hits, and for a whole run it is every hit on it.
+ */
+function collectSkippedNiches(
+  shorts: readonly PayrollShort[],
+  relevantNicheIds: ReadonlySet<string>,
+  nicheById: ReadonlyMap<string, PayrollNiche>,
+  creditedVideoIds: ReadonlySet<string>,
+  period: PayrollPeriodWindow,
+): SkippedNiche[] {
+  if (relevantNicheIds.size === 0) return [];
+
+  const buckets = new Map<string, { name: string; videoIds: Set<string> }>();
+
+  for (const short of shorts) {
+    if (!short.isOwnChannel) continue;
+    if (short.publishedAtMs < period.startsAtMs) continue;
+    if (short.publishedAtMs >= period.endsAtMs) continue;
+    if (creditedVideoIds.has(short.videoId)) continue;
+
+    for (const nicheId of short.nicheIds) {
+      if (!relevantNicheIds.has(nicheId)) continue;
+
+      const niche = nicheById.get(nicheId);
+      if (!niche || thresholdFor(niche) !== null) continue;
+
+      const bucket = buckets.get(nicheId);
+      // A Set rather than a counter, for the same reason the bonus loop keeps
+      // one: a duplicated row in the input must not inflate the report either.
+      if (bucket) bucket.videoIds.add(short.videoId);
+      else buckets.set(nicheId, { name: niche.name, videoIds: new Set([short.videoId]) });
+    }
+  }
+
+  return [...buckets.entries()]
+    .map(([nicheId, bucket]) => ({
+      nicheId,
+      nicheName: bucket.name,
+      shortCount: bucket.videoIds.size,
+    }))
+    // Worst first, then by name so equal rows do not shuffle — the ordering
+    // `summariseByNiche` uses, so the two lists read the same way.
+    .sort((a, b) => b.shortCount - a.shortCount || a.nicheName.localeCompare(b.nicheName));
+}
+
+/**
  * What one person earned in one period.
  *
  * Deterministic: the same inputs always produce the same figure, which is what
@@ -254,9 +403,8 @@ export function calculateEmployeePayroll(options: {
   shorts: readonly PayrollShort[];
   niches: readonly PayrollNiche[];
   period: PayrollPeriodWindow;
-  organizationDefaultThreshold: number;
 }): PayrollCalculation {
-  const { employee, shorts, niches, period, organizationDefaultThreshold } = options;
+  const { employee, shorts, niches, period } = options;
 
   const employed = employedDuring(employee, period);
   const assignedNicheIds = new Set(employee.nicheIds);
@@ -268,19 +416,16 @@ export function calculateEmployeePayroll(options: {
   // function safe on its own terms too.
   const countedVideoIds = new Set<string>();
 
-  if (employed && assignedNicheIds.size > 0 && employee.hitPaymentMinor > 0) {
+  const eligible = canEarnBonus(employee, period);
+
+  if (eligible) {
     for (const short of shorts) {
       if (!short.isOwnChannel) continue;
       if (countedVideoIds.has(short.videoId)) continue;
       if (short.publishedAtMs < period.startsAtMs) continue;
       if (short.publishedAtMs >= period.endsAtMs) continue;
 
-      const attribution = attributeShort(
-        short,
-        assignedNicheIds,
-        nicheById,
-        organizationDefaultThreshold,
-      );
+      const attribution = attributeShort(short, assignedNicheIds, nicheById);
       if (!attribution) continue;
 
       countedVideoIds.add(short.videoId);
@@ -305,6 +450,13 @@ export function calculateEmployeePayroll(options: {
 
   const byNiche = summariseByNiche(hits, employee.hitPaymentMinor);
 
+  // Only for somebody who could have been paid. For anybody else the bonus is
+  // zero for a reason that has nothing to do with a threshold, and saying
+  // "Shorts were skipped" would point at the wrong problem.
+  const skippedNiches = eligible
+    ? collectSkippedNiches(shorts, assignedNicheIds, nicheById, countedVideoIds, period)
+    : [];
+
   return {
     userId: employee.userId,
     name: employee.name,
@@ -319,6 +471,7 @@ export function calculateEmployeePayroll(options: {
     totalMinor: baseSalaryMinor + hitBonusMinor,
     byNiche,
     hits,
+    skippedNiches,
   };
 }
 
@@ -359,12 +512,13 @@ export function calculatePayrollRun(options: {
   shorts: readonly PayrollShort[];
   niches: readonly PayrollNiche[];
   period: PayrollPeriodWindow;
-  organizationDefaultThreshold: number;
 }): {
   period: PayrollPeriodWindow;
   calculations: readonly PayrollCalculation[];
   totalMinor: number;
   currency: string;
+  /** What the run could not judge. See `SkippedNiche`. */
+  skippedNiches: readonly SkippedNiche[];
 } {
   const calculations = options.employees
     .map((employee) =>
@@ -373,7 +527,6 @@ export function calculatePayrollRun(options: {
         shorts: options.shorts,
         niches: options.niches,
         period: options.period,
-        organizationDefaultThreshold: options.organizationDefaultThreshold,
       }),
     )
     .filter((calculation) => calculation.employedDuringPeriod)
@@ -387,5 +540,48 @@ export function calculatePayrollRun(options: {
     // caller is expected to keep one currency per organization, and the first
     // employee's is reported so the UI can label the total honestly.
     currency: calculations[0]?.currency ?? "USD",
+    skippedNiches: runSkippedNiches(options, calculations),
   };
+}
+
+/**
+ * The run's own skipped-niche report, counted over DISTINCT Shorts.
+ *
+ * Not the sum of the per-employee lists. Two editors assigned to the same
+ * unconfigured niche see the same Shorts go uncounted, and adding their figures
+ * would tell an admin that twice as many Shorts were affected as exist. What
+ * this answers is "how many Shorts in this niche could nobody be paid for",
+ * which is the number that changes when the threshold is set.
+ *
+ * Scoped to niches somebody could actually have earned from. A niche nobody is
+ * assigned to costs no money whether or not it has a bar, and this banner is
+ * about pay — the niches list is where an unassigned one gets chased.
+ */
+function runSkippedNiches(
+  options: {
+    employees: readonly PayrollEmployee[];
+    shorts: readonly PayrollShort[];
+    niches: readonly PayrollNiche[];
+    period: PayrollPeriodWindow;
+  },
+  calculations: readonly PayrollCalculation[],
+): SkippedNiche[] {
+  const bonusEligibleNicheIds = new Set<string>();
+  for (const employee of options.employees) {
+    if (!canEarnBonus(employee, options.period)) continue;
+    for (const nicheId of employee.nicheIds) bonusEligibleNicheIds.add(nicheId);
+  }
+
+  const creditedVideoIds = new Set<string>();
+  for (const calculation of calculations) {
+    for (const hit of calculation.hits) creditedVideoIds.add(hit.videoId);
+  }
+
+  return collectSkippedNiches(
+    options.shorts,
+    bonusEligibleNicheIds,
+    new Map(options.niches.map((niche) => [niche.id, niche])),
+    creditedVideoIds,
+    options.period,
+  );
 }

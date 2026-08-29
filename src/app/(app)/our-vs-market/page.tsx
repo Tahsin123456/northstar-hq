@@ -46,6 +46,7 @@ import {
   TOOLTIP_CONTAINMENT,
   xAxisHeight,
 } from "@/components/charts/chart-layout";
+import { ThresholdNotConfiguredNotice } from "@/components/metrics/threshold-not-configured";
 import { EM_DASH, formatCompactNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -202,6 +203,14 @@ export default function OurVsMarketPage() {
         </Card>
       ) : (
         <>
+          {/* Hit rate is one row of the comparison rather than the whole of it,
+              so the page still earns its place with a null threshold — median
+              views, upload cadence and market share are all unaffected. The
+              banner says which row is missing and why. */}
+          {threshold === null ? (
+            <ThresholdNotConfiguredNotice nicheName={nicheName} />
+          ) : null}
+
           <Scoreboard
             comparison={comparison}
             nicheName={nicheName}
@@ -572,7 +581,8 @@ function DistributionComparison({
 }: {
   ourViews: number[];
   marketViews: number[];
-  threshold: number;
+  /** `null` when the selected niche has none — no bucket is then a hit zone. */
+  threshold: number | null;
 }) {
   const ourBins = calculateViewDistribution(
     ourViews.map((views, i) => ({

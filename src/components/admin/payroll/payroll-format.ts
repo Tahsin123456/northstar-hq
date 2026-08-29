@@ -57,6 +57,54 @@ export function formatUtcDay(ms: number, options: { withYear?: boolean } = {}): 
 }
 
 /**
+ * ─────────────────────────────────────────────────────────────────────────────
+ * READING AND WRITING `<input type="date">` IN THE PAYROLL CALENDAR
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `src/lib/date-range.ts` already exports a pair of these and they are NOT
+ * interchangeable with the pair below. That module snaps to LOCAL midnight,
+ * correctly, because the dashboard's windows are trailing hours anchored to the
+ * viewer's own day. Payroll is the other kind of date entirely: every period is
+ * built with `Date.UTC` in `payroll-engine.ts`, and the earnings service labels
+ * a custom range by slicing an ISO string. Feeding a local-midnight bound into
+ * that machinery means a range picked in Istanbul as "1 August" arrives as
+ * 31 July 21:00Z and comes back labelled 31 July.
+ *
+ * Hence the `Utc` in both names, rather than a second `toDateInputValue` an
+ * import could silently pick the wrong one of. The calendar is visible at the
+ * call site, which is the only place anybody would notice it was the wrong one.
+ */
+
+/** A UTC-midnight day -> the `YYYY-MM-DD` an `<input type="date">` wants. */
+export function toUtcDayInputValue(ms: number): string {
+  if (!Number.isFinite(ms)) return "";
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * `YYYY-MM-DD` -> UTC midnight, or null for anything that is not a date.
+ *
+ * Total rather than throwing: the value comes from an input a person is midway
+ * through typing, and an empty or half-finished field is the normal case, not
+ * an error condition.
+ */
+export function fromUtcDayInputValue(value: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+
+  const [, year, month, day] = match;
+  const ms = Date.UTC(Number(year), Number(month) - 1, Number(day));
+  if (!Number.isFinite(ms)) return null;
+
+  // `Date.UTC(2026, 1, 31)` is 3 March, not a rejection — the constructor rolls
+  // overflow forward rather than refusing it. Round-tripping catches that, so
+  // "2026-02-31" from a hand-edited value is null instead of a silent March.
+  return toUtcDayInputValue(ms) === value ? ms : null;
+}
+
+/**
  * The period, stated plainly: "August 2026 · paid 1 September".
  *
  * The year comes back onto the pay date only when it is not the period's own —

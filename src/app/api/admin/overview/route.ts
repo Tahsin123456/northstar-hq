@@ -38,15 +38,28 @@ export const dynamic = "force-dynamic";
  * rows are returned — see listAuditEvents. Dropping `recentActivity` wholesale
  * would also work and would cost every admin without payroll the activity feed,
  * which is a real capability to lose over four numbers.
+ *
+ * AND WHY `finance.view` IS ASKED AT ALL, ON A PAGE WITH NO FINANCE TILE.
+ * `recentActivity` is not filtered by action, so `finance.entry_*` rows arrive
+ * here through the same door as pay ones, carrying transaction amounts in their
+ * metadata. Those figures belong to `finance.view` and to nothing else —
+ * passing `payroll.view` for both, as this once did, would have made the
+ * payroll permission a key to the ledger.
  */
 export function GET() {
   return handle(async () => {
     await requirePermission("users.manage");
 
-    const canViewPayroll = await actorCan("payroll.view");
+    const [canViewPayroll, canViewFinance] = await Promise.all([
+      actorCan("payroll.view"),
+      actorCan("finance.view"),
+    ]);
     const overview = await getAdminOverview({
       includePayroll: canViewPayroll,
-      includeSensitiveAuditMetadata: canViewPayroll,
+      auditMoneyAccess: {
+        "payroll.view": canViewPayroll,
+        "finance.view": canViewFinance,
+      },
     });
 
     if (await actorCan("audit.view")) return overview;
