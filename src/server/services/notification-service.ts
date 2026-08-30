@@ -550,6 +550,11 @@ function toMessageInput(
       byNiche: record.byNiche.map((line) => ({
         nicheName: line.nicheName,
         hitCount: line.hitCount,
+        // The rate travels with the line, because the rate is per niche now.
+        // Passed through as-is, nulls included: a message that invented a price
+        // the screen refused to state would be the two disagreeing about the
+        // same payslip, which is the one thing this mapping exists to prevent.
+        hitPaymentMinor: line.hitPaymentMinor,
         bonusMinor: line.bonusMinor,
       })),
     })),

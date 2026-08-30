@@ -2,12 +2,14 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Check, Minus, Plus, Settings2 } from "lucide-react";
+import { Check, Minus, Plus, Radio, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import type { ContentTypeDTO } from "@/lib/dto";
 import {
   useActiveContentTypes,
   useContentTypesByIds,
+  useApplyContentTypeToChannel,
+  useChannelForVideo,
   useCreateContentType,
 } from "@/hooks/use-content-types";
 import { Button } from "@/components/ui/button";
@@ -87,6 +89,20 @@ export function ContentTypeMenu({
   onSelect,
   /** The trailing +/− was clicked. Only rendered when `showToggle`. */
   onToggle,
+  /**
+   * THE CHANNEL-WIDE GESTURE, offered per tag beside the per-Short one.
+   *
+   * OFFERED HERE AND NOWHERE ELSE, and the placement is the design. Somebody
+   * decides a channel only makes Funny Memes while looking at a Funny Meme it
+   * published — that is the moment the thought exists, and the old answer sent
+   * them to a dialog on the channel page to have it again. It is also the only
+   * moment the app has what a rule needs: a Short, and therefore a date the
+   * claim can start from.
+   *
+   * Absent for the bulk control, whose subject is a selection that may span a
+   * dozen channels and has no single channel to say anything about.
+   */
+  applyToChannel,
   busy = false,
   disabled = false,
   showToggle = true,
@@ -99,6 +115,20 @@ export function ContentTypeMenu({
   hint: string | null;
   onSelect: (id: string, contentType: ContentTypeDTO) => void;
   onToggle: (id: string, contentType: ContentTypeDTO) => void;
+  applyToChannel?: {
+    readonly channelName: string;
+    /**
+     * Tags a rule already claims for this channel's new uploads.
+     *
+     * Not offered again: the request is idempotent and would return the rule
+     * that already exists, but an affordance that does nothing is worse than one
+     * that is absent — somebody clicks it, nothing changes, and they conclude
+     * the feature is broken rather than already done.
+     */
+    readonly appliedIds: readonly string[];
+    readonly onApply: (contentType: ContentTypeDTO) => void;
+    readonly pending: boolean;
+  };
   busy?: boolean;
   disabled?: boolean;
   showToggle?: boolean;
@@ -190,6 +220,48 @@ export function ContentTypeMenu({
           ) : null}
           {selected ? <Check className="ml-auto size-3.5 shrink-0 text-accent" /> : null}
         </button>
+
+        {/*
+         * THE CHANNEL-WIDE ACTION, as a third control on the row.
+         *
+         * A third button is a real cost on a row that already has two, and it is
+         * paid deliberately: the alternative placements are all worse. A footer
+         * button would have to ask "which tag?" a second time. A confirmation
+         * step would put a dialog in front of the lightest gesture in the
+         * product. Reusing the row click would make the biggest write in this
+         * menu the one that happens by accident.
+         *
+         * It is the quietest of the three — an outline icon, no colour — because
+         * it is the least often wanted, and it disappears entirely on a tag the
+         * channel already claims, which on a tagged channel is most of the rows
+         * somebody looks at.
+         */}
+        {applyToChannel && !applyToChannel.appliedIds.includes(contentType.id) ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                disabled={disabled || busy || applyToChannel.pending}
+                onClick={() => applyToChannel.onApply(contentType)}
+                aria-label={`Apply ${contentType.name} to every Short on ${applyToChannel.channelName}`}
+                className={cn(
+                  "flex size-6 shrink-0 items-center justify-center rounded text-subtle-foreground transition-colors",
+                  "hover:bg-surface-hover hover:text-foreground",
+                  "disabled:pointer-events-none disabled:opacity-50",
+                )}
+              >
+                <Radio className="size-3" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {/* The reach, stated before the click rather than discovered
+                  after it. "Apply to this channel" alone does not say that it
+                  reaches Shorts published years ago, and that is the half
+                  somebody would be surprised by. */}
+              {`Apply ${contentType.name} to everything ${applyToChannel.channelName} has published, and everything it publishes next`}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
 
         {showToggle ? (
           <Tooltip>
@@ -390,4 +462,75 @@ function InlineCreate({
       </Button>
     </div>
   );
+}
+
+/**
+ * The `applyToChannel` prop, assembled for one Short.
+ *
+ * A HOOK RATHER THAN FOUR CALL SITES BUILDING THE SAME OBJECT. Both pickers that
+ * offer this — the row control and the Short detail panel — need the identical
+ * four things: which channel published this Short, which tags it already claims,
+ * the mutation, and a toast that says what just happened. Assembling that twice
+ * is how one of them ends up naming the wrong channel, or telling somebody a
+ * rule was written when the request failed.
+ *
+ * Returns `undefined` when there is no channel to act on — the dataset has not
+ * arrived, or this Short sits outside the viewer's niche scope. The menu then
+ * renders no channel affordance at all, which is the correct answer in both
+ * cases and particularly in the second: that is a channel they may not change.
+ */
+export function useApplyToChannelAction(
+  videoId: string,
+): React.ComponentProps<typeof ContentTypeMenu>["applyToChannel"] {
+  const channel = useChannelForVideo(videoId);
+  const apply = useApplyContentTypeToChannel();
+
+  /*
+   * Tags a rule ALREADY claims for new uploads.
+   *
+   * Open rules only. A retired rule is exactly the case where the action should
+   * be offered again — somebody looking at a recent upload and deciding the
+   * channel does make these after all is re-opening the claim, and hiding the
+   * button because a closed rule exists would leave them with no way to say so
+   * from here.
+   */
+  const appliedIds = React.useMemo(
+    () =>
+      (channel?.contentTypeRules ?? [])
+        .filter((rule) => rule.effectiveUntil === null)
+        .map((rule) => rule.contentTypeId),
+    [channel],
+  );
+
+  return React.useMemo(() => {
+    if (!channel) return undefined;
+
+    return {
+      channelName: channel.displayName,
+      appliedIds,
+      pending: apply.isPending,
+      onApply: (contentType: ContentTypeDTO) =>
+        apply.mutate(
+          { channelId: channel.id, contentTypeId: contentType.id },
+          {
+            onSuccess: () =>
+              // The REACH, restated after the fact. The tooltip said it before
+              // the click; this is the only confirmation that it actually
+              // happened, and "Saved" would leave somebody unsure whether they
+              // had just relabelled four hundred Shorts.
+              toast.success(
+                `“${contentType.name}” now applies to every Short on ${channel.displayName}`,
+                {
+                  description:
+                    "Including everything it publishes next. Take it off three uploads in a row and the rule stops applying to new ones.",
+                },
+              ),
+            onError: (error) =>
+              toast.error("Could not apply that to the channel", {
+                description: error instanceof Error ? error.message : undefined,
+              }),
+          },
+        ),
+    };
+  }, [apply, appliedIds, channel]);
 }

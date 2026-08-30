@@ -6,7 +6,13 @@ import { toAppError, type AppErrorCode } from "@/server/errors";
 import { pruneAuditEvents, recordAudit } from "@/server/audit/audit-service";
 import { pruneDeadSessions } from "@/server/auth/session";
 import { pruneRateLimits } from "@/server/auth/rate-limit";
-import { syncChannel, type SyncOptions, type SyncResult } from "./channel-sync";
+import {
+  syncChannel,
+  type ChannelCredential,
+  type SyncOptions,
+  type SyncResult,
+} from "./channel-sync";
+import { resolveChannelCredential } from "./youtube-oauth-service";
 import { getOrgSettings } from "./user-service";
 import {
   evaluateHitsForOrganization,
@@ -294,11 +300,39 @@ export async function buildChannelSyncOptions(
   channelId: string,
   trigger: SyncOptions["trigger"],
 ): Promise<SyncOptions> {
-  const [base, windows] = await Promise.all([
+  const [base, windows, credential] = await Promise.all([
     buildSyncOptions(organizationId, trigger),
     resolveChannelHitWindows(organizationId, [channelId]),
+    credentialForChannelRow(organizationId, channelId),
   ]);
-  return { ...base, hitWindowHours: windows.get(channelId) ?? null };
+  return {
+    ...base,
+    hitWindowHours: windows.get(channelId) ?? null,
+    credential,
+  };
+}
+
+/**
+ * The credential for one channel, looked up by its internal row id.
+ *
+ * `resolveChannelCredential` is keyed on the YOUTUBE id — it matches against
+ * connections, which store that and not our row id — so this is the translation
+ * between the two, kept in one place rather than repeated at each call site.
+ *
+ * A channel row that has vanished falls through to the public key rather than
+ * throwing: `syncChannel` is about to fail on the same missing row with a far
+ * better message, and racing it to raise a worse one helps nobody.
+ */
+async function credentialForChannelRow(
+  organizationId: string,
+  channelRowId: string,
+): Promise<ChannelCredential> {
+  const channel = await prisma.channel.findUnique({
+    where: { id: channelRowId },
+    select: { youtubeChannelId: true },
+  });
+  if (!channel) return { source: "public" };
+  return resolveChannelCredential(organizationId, channel.youtubeChannelId);
 }
 
 /**
@@ -345,6 +379,8 @@ export async function runHousekeeping(organizationId: string): Promise<Housekeep
 
 interface DueChannel {
   readonly channelId: string;
+  /** Carried so the credential can be resolved without a second lookup. */
+  readonly youtubeChannelId: string;
   readonly label: string;
   readonly lastFetchedAt: Date | null;
   /** The window judging this channel's Shorts, passed straight to the sync. */
@@ -417,7 +453,7 @@ async function findDueChannels(
     select: {
       channelId: true,
       label: true,
-      channel: { select: { title: true, lastFetchedAt: true } },
+      channel: { select: { title: true, lastFetchedAt: true, youtubeChannelId: true } },
     },
   });
 
@@ -431,6 +467,7 @@ async function findDueChannels(
   return tracked
     .map((row) => ({
       channelId: row.channelId,
+      youtubeChannelId: row.channel.youtubeChannelId,
       label: row.label ?? row.channel.title,
       lastFetchedAt: row.channel.lastFetchedAt,
       hitWindowHours: windowByChannelId.get(row.channelId) ?? null,
@@ -614,9 +651,18 @@ export async function runScheduledSync(
       // The window rides along per channel: everything else in these options is
       // an organization-wide setting, but the snapshot cadence is decided by
       // the rule that will judge THIS channel's Shorts.
+      //
+      // So does the credential, and it is resolved HERE rather than once before
+      // the loop. Two reasons, and the second is the one that bites: a channel's
+      // source is a per-channel fact (ours or a competitor's), and an access
+      // token minted before a twenty-channel sweep can expire partway down the
+      // list — `resolveChannelCredential` refreshes on demand, so asking it
+      // immediately before the request is what keeps the last channel in a long
+      // run as well authorised as the first.
       result = await syncChannel(channel.channelId, {
         ...syncOptions,
         hitWindowHours: channel.hitWindowHours,
+        credential: await resolveChannelCredential(organizationId, channel.youtubeChannelId),
       });
     } catch (caught) {
       // syncChannel records upstream failures on the row and returns them, so

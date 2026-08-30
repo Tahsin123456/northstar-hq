@@ -10,22 +10,36 @@ import {
   getVisibleNicheIds,
   trackedChannelNicheFilter,
 } from "@/server/auth/niche-scope";
-import { toContentTypeDTO } from "@/server/mappers";
-import type { ContentTypeDTO } from "@/lib/dto";
+import { toChannelContentTypeRuleDTO, toContentTypeDTO } from "@/server/mappers";
+import type { ChannelContentTypeRuleDTO, ContentTypeDTO } from "@/lib/dto";
 /*
  * THE RULE ITSELF LIVES IN `src/lib/`, NOT HERE.
  *
  * Imported rather than reimplemented, and imported from a module the browser
  * also imports, because the client re-slices the dataset in memory without
  * refetching and therefore has to reach the same answer this file does. Two
- * implementations of `(channel − exclusions) ∪ manual` is the drift this whole
- * round exists to prevent.
+ * implementations of `(inherited − exclusions) ∪ manual` — or of "which rules
+ * cover this publish date" — is the drift this whole round exists to prevent.
  */
 import {
   effectiveContentTypeIds,
+  inheritedContentTypeIds,
   planDeviations,
   type DeviationPlan,
 } from "@/lib/content-types/resolve";
+/*
+ * And the state machine that retires a rule is a sibling of it, for the same
+ * reason: what happens to three columns after somebody removes a tag is a claim
+ * worth running in a test rather than reconstructing from Prisma stubs. This
+ * file decides WHEN to feed it a signal; it decides what the signal does.
+ */
+import {
+  RULE_AUTO_CLOSE_STREAK,
+  recordConfirmation,
+  recordOverride,
+  type RuleStreakChange,
+  type RuleStreakState,
+} from "@/lib/content-types/rules";
 import { getCurrentOrgId, getScope } from "./user-service";
 
 /**
@@ -55,19 +69,21 @@ import { getCurrentOrgId, getScope } from "./user-service";
  * two teams have to agree on a word, and the owner has decided that is the
  * trade they want.
  *
- * A TAG ATTACHES TO A CHANNEL AND IS INHERITED BY ITS SHORTS
+ * A TAG ATTACHES TO A STRETCH OF A CHANNEL'S OUTPUT AND IS INHERITED BY THE
+ * SHORTS PUBLISHED INSIDE IT
  *
- *   • `ChannelContentType` — what this channel makes. Hangs off `TrackedChannel`
- *     rather than `Channel` because the same YouTube channel is one global row
- *     that two organizations would describe differently.
- *   • `VideoContentType` — NOT what one Short was. A DEVIATION from its channel,
- *     and nothing else.
+ *   • `ChannelContentTypeRule` — what this channel made, and BETWEEN WHEN AND
+ *     WHEN. Hangs off `TrackedChannel` rather than `Channel` because the same
+ *     YouTube channel is one global row that two organizations would describe
+ *     differently.
+ *   • `VideoContentType` — NOT what one Short was. A DEVIATION from what its
+ *     channel's rules say, and nothing else.
  *
  * =========================================================================
  * THE RULE EVERYTHING IN THIS FILE FOLLOWS FROM
  * =========================================================================
  *
- *     effective(short) = (channel's tags − short's exclusions) ∪ short's manual tags
+ *     effective(short) = (rules covering its publish date − exclusions) ∪ manual
  *
  * INHERITED TAGS ARE NEVER STORED. There is no row for an inherited tag and
  * there must never be one — see `src/lib/content-types/resolve.ts`, which is
@@ -81,14 +97,23 @@ import { getCurrentOrgId, getScope } from "./user-service";
  * Shorts is nowhere at all.
  *
  * What falls out of that, for free, and is pinned by
- * `src/lib/__tests__/content-type-inheritance.test.ts`:
- *   • tagging a channel labels every existing Short immediately, no backfill;
+ * `src/lib/__tests__/content-type-inheritance.test.ts` and
+ * `src/lib/__tests__/channel-content-type-rules.test.ts`:
+ *   • applying a tag to a channel labels its whole back catalogue immediately,
+ *     no backfill;
  *   • a Short imported tomorrow inherits, because nothing was written per Short;
- *   • untagging a channel removes it everywhere, leaving no stale rows;
- *   • an exclusion is a TOMBSTONE that survives the channel dropping the tag, so
- *     re-adding it does not silently undo somebody's explicit "no".
+ *   • closing a rule un-labels exactly the Shorts after the switch and none
+ *     before it, leaving no stale rows on either side;
+ *   • an exclusion is a TOMBSTONE that survives its rule closing, so re-opening
+ *     the rule does not silently undo somebody's explicit "no".
  *
- * The gap between what a channel is expected to make and what its Shorts turned
+ * THE RULE RETIRES ITSELF, AND THIS FILE IS WHERE IT LEARNS TO. Every removal of
+ * an inherited tag is fed to the streak machine in
+ * `src/lib/content-types/rules.ts`; three consecutive ones close the rule at the
+ * date the channel actually changed. See `signalChannelRules` below for which
+ * gestures count as evidence and which deliberately do not.
+ *
+ * The gap between what a channel was expected to make and what its Shorts turned
  * out to be is still visible — it is exactly the set of deviations, which is now
  * the only thing this table stores.
  *
@@ -224,17 +249,25 @@ function toSlug(name: string): string {
 }
 
 /**
- * The channel count, as a filtered relation count.
+ * The channel-rule count, as a filtered relation count.
  *
- * `ChannelContentType` reaches the tenant through `TrackedChannel`, so its
- * filter is a join. This is the count that describes REACH: a tag on six
- * channels labels every Short those channels have published, and there is no
- * row per Short to count anywhere.
+ * `ChannelContentTypeRule` reaches the tenant through `TrackedChannel`, so its
+ * filter is a join. This is the count that describes REACH: a tag with six rules
+ * labels every Short inside those six windows, and there is no row per Short to
+ * count anywhere.
+ *
+ * RULES, NOT DISTINCT CHANNELS, and the honest reason is that Prisma's `_count`
+ * cannot express the second — but it is also the number this is wanted for. Both
+ * places that read it are asking what a change to this tag would disturb, and a
+ * channel carrying "Ranking until March" and "Ranking again from September" has
+ * two separate stretches of history at stake. Reporting "1 channel" would
+ * understate it. Closed and retired rules count for the same reason: they still
+ * label a back catalogue.
  */
-function channelCountSelect(organizationId: string) {
+function channelRuleCountSelect(organizationId: string) {
   return {
     select: {
-      channels: { where: { trackedChannel: { organizationId } } },
+      channelRules: { where: { trackedChannel: { organizationId } } },
     },
   } as const;
 }
@@ -282,7 +315,7 @@ async function videoDeviationCounts(
 const NO_DEVIATIONS = { manual: 0, excluded: 0 } as const;
 
 type CountedContentType = Parameters<typeof toContentTypeDTO>[0] & {
-  _count: { channels: number };
+  _count: { channelRules: number };
 };
 
 function toDTO(
@@ -293,7 +326,7 @@ function toDTO(
   return toContentTypeDTO(row, {
     manualVideoCount: counts.manual,
     excludedVideoCount: counts.excluded,
-    channelCount: row._count.channels,
+    channelRuleCount: row._count.channelRules,
   });
 }
 
@@ -305,7 +338,7 @@ async function loadContentType(
   const [row, deviations] = await Promise.all([
     prisma.contentType.findFirstOrThrow({
       where: { id: contentTypeId, organizationId },
-      include: { _count: channelCountSelect(organizationId) },
+      include: { _count: channelRuleCountSelect(organizationId) },
     }),
     videoDeviationCounts(organizationId, [contentTypeId]),
   ]);
@@ -423,7 +456,7 @@ export async function listContentTypes(
         ...(search ? { slug: { contains: search } } : {}),
       },
       orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-      include: { _count: channelCountSelect(organizationId) },
+      include: { _count: channelRuleCountSelect(organizationId) },
     }),
     // One grouped read for the whole catalogue, unnarrowed by the filters
     // above: an extra entry in this map for a type the listing excluded costs
@@ -495,7 +528,7 @@ export async function createContentType(
   return toContentTypeDTO(created, {
     manualVideoCount: 0,
     excludedVideoCount: 0,
-    channelCount: 0,
+    channelRuleCount: 0,
   });
 }
 
@@ -546,7 +579,7 @@ export async function renameContentType(
   const updated = await prisma.contentType.update({
     where: { id: contentType.id },
     data,
-    include: { _count: channelCountSelect(organizationId) },
+    include: { _count: channelRuleCountSelect(organizationId) },
   });
 
   // Only a name change is worth an entry. Nudging a colour or a sort position
@@ -592,7 +625,7 @@ export async function setContentTypeActive(
   const updated = await prisma.contentType.update({
     where: { id: contentType.id },
     data: { isActive },
-    include: { _count: channelCountSelect(organizationId) },
+    include: { _count: channelRuleCountSelect(organizationId) },
   });
 
   const deviations = await videoDeviationCounts(organizationId, [updated.id]);
@@ -607,12 +640,12 @@ export async function setContentTypeActive(
     targetId: updated.id,
     targetLabel: updated.name,
     // The counts are what make the entry meaningful a year later: archiving a
-    // type nothing uses and archiving one that six channels hand to their whole
-    // back catalogue are very different acts, and the row itself will not
-    // remember which this was. The channel count is the one that describes
-    // reach — the two video counts describe only the exceptions.
+    // type nothing uses and archiving one that six rules hand to whole back
+    // catalogues are very different acts, and the row itself will not remember
+    // which this was. The rule count is the one that describes reach — the two
+    // video counts describe only the exceptions.
     metadata: {
-      channelCount: updated._count.channels,
+      channelRuleCount: updated._count.channelRules,
       manualVideoCount: counts.manual,
       excludedVideoCount: counts.excluded,
     },
@@ -657,24 +690,28 @@ export async function deleteContentType(
   // destroy anything?", and a classification on a channel the team removed from
   // the tracker is still a classification — the channel can be restored, and it
   // would come back stripped of its labels.
-  const [manual, excluded, channels] = await Promise.all([
+  const [manual, excluded, rules] = await Promise.all([
     prisma.videoContentType.count({
       where: { contentTypeId: contentType.id, state: "manual" },
     }),
     prisma.videoContentType.count({
       where: { contentTypeId: contentType.id, state: "excluded" },
     }),
-    prisma.channelContentType.count({ where: { contentTypeId: contentType.id } }),
+    // CLOSED AND RETIRED RULES COUNT. A rule that stopped claiming new uploads
+    // in March still labels everything the channel published before then, and
+    // deleting the type would take that year of history with it — silently, and
+    // with no way to tell afterwards that it had ever been labelled.
+    prisma.channelContentTypeRule.count({ where: { contentTypeId: contentType.id } }),
   ]);
 
-  if (manual > 0 || excluded > 0 || channels > 0) {
+  if (manual > 0 || excluded > 0 || rules > 0) {
     throw errors.invalidInput(
-      describeInUse(contentType.name, { manual, excluded, channels }),
+      describeInUse(contentType.name, { manual, excluded, rules }),
       {
         contentTypeId: contentType.id,
         manualVideoCount: manual,
         excludedVideoCount: excluded,
-        channelCount: channels,
+        channelRuleCount: rules,
         // The client does not have to parse the sentence to offer the button.
         canDeactivate: contentType.isActive,
       },
@@ -697,20 +734,21 @@ export async function deleteContentType(
 /**
  * The refusal message, written as a sentence a person can act on.
  *
- * The channel clause comes first and says what it implies, because "6 channels"
- * on its own reads as the smallest of the three numbers when it is by far the
- * largest consequence: those channels hand the tag to every Short they have.
+ * The rule clause comes first and says what it implies, because "6 channel
+ * rules" on its own reads as the smallest of the three numbers when it is by far
+ * the largest consequence: each of those rules hands the tag to every Short
+ * inside its window.
  */
 function describeInUse(
   name: string,
-  counts: { manual: number; excluded: number; channels: number },
+  counts: { manual: number; excluded: number; rules: number },
 ): string {
   const parts: string[] = [];
-  if (counts.channels > 0) {
+  if (counts.rules > 0) {
     parts.push(
-      `${counts.channels} ${counts.channels === 1 ? "channel" : "channels"} (and every Short ${
-        counts.channels === 1 ? "it has" : "they have"
-      } published)`,
+      `${counts.rules} channel ${counts.rules === 1 ? "rule" : "rules"} (and every Short ${
+        counts.rules === 1 ? "it covers" : "they cover"
+      })`,
     );
   }
   if (counts.manual > 0) {
@@ -814,8 +852,39 @@ export interface TaggableVideo {
   readonly id: string;
   readonly title: string;
   readonly channelId: string;
-  /** The channel's tags — the live source this Short deviates from. */
-  readonly channelTypeIds: readonly string[];
+  /**
+   * OUR tracking row for the channel — where the rules hang.
+   *
+   * Carried rather than re-resolved because the streak bookkeeping below writes
+   * to rules on this exact row, and looking it up a second time from
+   * `channelId` would be a second chance to write to a different organization's
+   * reading of the same YouTube channel.
+   */
+  readonly trackedChannelId: string;
+  /** Epoch ms. What decides which rules reach this Short — see `inheritedIds`. */
+  readonly publishedAt: number;
+  /**
+   * Every rule on this channel, windows included.
+   *
+   * ALL of them, not the covering ones. Two different questions are asked of
+   * this list: which rules give THIS Short its tags (the covering ones), and
+   * which rule a removal is evidence against (also the covering ones, but
+   * identified by id so the streak can be written back). Filtering in the query
+   * would answer the first and lose the second.
+   */
+  readonly rules: readonly ChannelRuleRow[];
+  /**
+   * The tags this Short inherits — the rules that cover its publish date.
+   *
+   * Derived here, once, so nothing downstream has to remember that "the
+   * channel's tags" is no longer a thing a Short can be resolved against.
+   */
+  readonly inheritedIds: readonly string[];
+}
+
+/** One rule as the assignment paths read it: a window plus its streak state. */
+interface ChannelRuleRow extends RuleStreakState {
+  readonly id: string;
 }
 
 /**
@@ -849,6 +918,9 @@ async function loadTaggableVideos(
       id: true,
       title: true,
       channelId: true,
+      // The instant that decides which of the channel's rules reach this Short.
+      // Nothing in this file can be answered without it any more.
+      publishedAt: true,
       channel: {
         select: {
           /*
@@ -857,7 +929,7 @@ async function loadTaggableVideos(
            * `Channel` is global and several organizations may track it, so this
            * `where` is not an optimisation — without it a Short would inherit
            * another team's editorial read of the same channel, which is the
-           * exact cross-tenant leak `ChannelContentType` hangs off
+           * exact cross-tenant leak `ChannelContentTypeRule` hangs off
            * `TrackedChannel` to prevent.
            *
            * `isActive` is deliberately not required, matching
@@ -867,28 +939,57 @@ async function loadTaggableVideos(
            */
           trackedBy: {
             where: { organizationId },
-            select: { contentTypes: { select: { contentTypeId: true } } },
+            select: {
+              id: true,
+              contentTypeRules: {
+                select: {
+                  id: true,
+                  contentTypeId: true,
+                  effectiveFrom: true,
+                  effectiveUntil: true,
+                  consecutiveOverrides: true,
+                  overrideStreakFrom: true,
+                },
+              },
+            },
           },
         },
       },
     },
   });
 
-  return new Map(
-    rows.map((row) => [
-      row.id,
-      {
-        id: row.id,
-        title: row.title,
-        channelId: row.channelId,
-        // At most one tracking row per (organization, channel), so the flatten
-        // is a formality — but it is the honest way to read a list.
-        channelTypeIds: row.channel.trackedBy.flatMap((tracked) =>
-          tracked.contentTypes.map((assignment) => assignment.contentTypeId),
-        ),
-      },
-    ]),
-  );
+  const videos = new Map<string, TaggableVideo>();
+
+  for (const row of rows) {
+    // At most one tracking row per (organization, channel). A Short whose
+    // channel this organization does not track cannot reach here — the `where`
+    // above already required it — so an empty array is unreachable rather than
+    // a case; skipping is the narrowing, not a policy.
+    const tracked = row.channel.trackedBy[0];
+    if (!tracked) continue;
+
+    const publishedAt = row.publishedAt.getTime();
+    const rules: ChannelRuleRow[] = tracked.contentTypeRules.map((rule) => ({
+      id: rule.id,
+      contentTypeId: rule.contentTypeId,
+      effectiveFrom: rule.effectiveFrom.getTime(),
+      effectiveUntil: rule.effectiveUntil?.getTime() ?? null,
+      consecutiveOverrides: rule.consecutiveOverrides,
+      overrideStreakFrom: rule.overrideStreakFrom?.getTime() ?? null,
+    }));
+
+    videos.set(row.id, {
+      id: row.id,
+      title: row.title,
+      channelId: row.channelId,
+      trackedChannelId: tracked.id,
+      publishedAt,
+      rules,
+      inheritedIds: inheritedContentTypeIds(rules, publishedAt),
+    });
+  }
+
+  return videos;
 }
 
 /** One Short's row or a 404, so the endpoints never confirm an id. */
@@ -907,10 +1008,11 @@ async function requireTaggableVideo(
  *
  * Takes the `Channel` id — what `ChannelDTO.id` is, and what every channel URL
  * in the app carries — and resolves this organization's `TrackedChannel` for
- * it. That resolution is the whole point: `ChannelContentType` hangs off the
+ * it. That resolution is the whole point: `ChannelContentTypeRule` hangs off the
  * tracking row precisely so two teams watching the same channel can describe it
- * differently, and exposing the tracking id in a URL would be a second
- * addressing scheme for an object the client already names one way.
+ * differently — and disagree about when it changed — and exposing the tracking
+ * id in a URL would be a second addressing scheme for an object the client
+ * already names one way.
  *
  * Same scope reasoning as the video path, and it deliberately does NOT require
  * `isActive`: removing a channel from the tracker is a soft delete that keeps
@@ -1101,7 +1203,7 @@ async function reconcileVideoDeviations(
 
     const before: CurrentDeviations = {
       effectiveIds: effectiveContentTypeIds({
-        channelTypeIds: video.channelTypeIds,
+        inheritedIds: video.inheritedIds,
         manualIds,
         excludedIds,
       }),
@@ -1110,7 +1212,7 @@ async function reconcileVideoDeviations(
     };
 
     const wanted = planDeviations({
-      channelTypeIds: video.channelTypeIds,
+      inheritedIds: video.inheritedIds,
       desiredIds: [...new Set(desired(before, video))],
       existingManualIds: manualIds,
       existingExcludedIds: excludedIds,
@@ -1121,7 +1223,7 @@ async function reconcileVideoDeviations(
       after: {
         ...wanted,
         effectiveIds: effectiveContentTypeIds({
-          channelTypeIds: video.channelTypeIds,
+          inheritedIds: video.inheritedIds,
           manualIds: wanted.manualIds,
           excludedIds: wanted.excludedIds,
         }),
@@ -1222,14 +1324,60 @@ export interface VideoContentTypeState {
   readonly manualContentTypeIds: readonly string[];
   readonly excludedContentTypeIds: readonly string[];
   readonly effectiveContentTypeIds: readonly string[];
+  /**
+   * Rules this edit RETIRED, if it happened to be the third removal.
+   *
+   * TRAVELS BACK WITH THE WRITE, and that is the whole reason it exists on this
+   * shape rather than being left for the next dataset fetch to reveal. A rule
+   * that stops applying itself is a change to hundreds of Shorts, made as a side
+   * effect of one click, and a person who is not told about it has no way to
+   * distinguish it from a bug. So the click that caused it is the moment they
+   * hear about it, and the payload carries everything the toast needs to say
+   * which tag, which channel, and from what date — plus the id it needs to offer
+   * the undo.
+   *
+   * Empty on every ordinary edit, which is almost all of them.
+   */
+  readonly closedRules: readonly ChannelRuleClosure[];
 }
 
-function toState(videoId: string, result: VideoReconcileResult): VideoContentTypeState {
+function toState(
+  videoId: string,
+  result: VideoReconcileResult,
+  closedRules: readonly ChannelRuleClosure[],
+): VideoContentTypeState {
   return {
     videoId,
     manualContentTypeIds: result.after.manualIds,
     excludedContentTypeIds: result.after.excludedIds,
     effectiveContentTypeIds: result.after.effectiveIds,
+    closedRules,
+  };
+}
+
+/**
+ * What the deviation write says to the rules above it.
+ *
+ * ONE GESTURE, TWO CONSEQUENCES, and they are deliberately computed from the
+ * SAME before/after pair rather than from the request. "Remove Rankings from
+ * this Short" and "set this Short's tags to exactly Memes" are different
+ * requests that can both amount to taking Rankings off, and a signal derived
+ * from what was asked for would see the first and miss the second.
+ *
+ * `removed` and `added` are movements in the EFFECTIVE set, not in the stored
+ * rows. That is the distinction the whole streak depends on: a Short losing a
+ * manual row it never needed is not evidence about the channel, whereas a Short
+ * that stops carrying a tag its rule gave it is exactly that.
+ */
+function effectiveMovement(result: VideoReconcileResult): {
+  removed: readonly string[];
+  added: readonly string[];
+} {
+  const before = new Set(result.before.effectiveIds);
+  const after = new Set(result.after.effectiveIds);
+  return {
+    removed: result.before.effectiveIds.filter((id) => !after.has(id)),
+    added: result.after.effectiveIds.filter((id) => !before.has(id)),
   };
 }
 
@@ -1299,7 +1447,20 @@ export async function setVideoContentTypes(
     });
   }
 
-  return toState(video.id, result);
+  // A whole-set write is as much a removal as the single-tag route is, and the
+  // rules must hear about it either way — a person who clears a Short's tags in
+  // the picker has taken the inherited one off just as deliberately as one who
+  // pressed "×" on the chip.
+  const movement = effectiveMovement(result);
+  const closedRules = await signalChannelRules(
+    organizationId,
+    video,
+    movement.removed,
+    movement.added,
+    request,
+  );
+
+  return toState(video.id, result, closedRules);
 }
 
 /**
@@ -1373,7 +1534,23 @@ export async function excludeContentTypeFromVideo(
     });
   }
 
-  return toState(video.id, result);
+  /*
+   * THE SIGNAL, AT ITS SOURCE.
+   *
+   * This is the gesture the whole retirement mechanism listens for — a person
+   * looking at one upload and saying "not this one". Everything else that feeds
+   * the streak feeds it because it amounts to the same act; this is the act.
+   */
+  const movement = effectiveMovement(result);
+  const closedRules = await signalChannelRules(
+    organizationId,
+    video,
+    movement.removed,
+    movement.added,
+    request,
+  );
+
+  return toState(video.id, result, closedRules);
 }
 
 /**
@@ -1430,7 +1607,28 @@ export async function restoreInheritedContentType(
     });
   }
 
-  return toState(video.id, result);
+  /*
+   * THE COUNTER-SIGNAL, and the reason this route feeds the machine at all.
+   *
+   * Putting a tag back on a Short newer than the streak's start is somebody
+   * saying the channel is still doing this — the only evidence that clears an
+   * accumulating streak short of re-opening the rule by hand. Without it a rule
+   * would inch towards retirement across months and never step back, and the
+   * three removals that finally closed it might be a year apart with a hundred
+   * confirmations in between.
+   *
+   * It never re-opens a rule that already closed: see `recordConfirmation`.
+   */
+  const movement = effectiveMovement(result);
+  const closedRules = await signalChannelRules(
+    organizationId,
+    video,
+    movement.removed,
+    movement.added,
+    request,
+  );
+
+  return toState(video.id, result, closedRules);
 }
 
 export interface BulkAssignResult {
@@ -1608,105 +1806,524 @@ export async function assignContentTypeToVideos(
 }
 
 // ---------------------------------------------------------------------------
-// Assignment — channels
+// CHANNEL RULES
+//
+// "Everything this channel makes is a Funny Meme" — with an expiry date it
+// writes for itself.
+//
+// WHAT WENT, AND WHY NOTHING REPLACES IT ONE-FOR-ONE. There used to be a
+// `setChannelContentTypes` here that took a channel and a complete set of tags
+// and stored the difference. It is gone at the owner's instruction, and not
+// because a rule is a nicer way to say the same thing: the flat set could not
+// express the only fact that matters about a channel's output, which is that it
+// CHANGES. A channel that made rankings all last year and switched to cutscenes
+// in March had exactly two options under the old model — go on falsely tagging
+// every new upload, or untag the channel and strip the label off the year of
+// rankings that genuinely were rankings. Neither is a thing anybody wants, and
+// no amount of care at the call site could have avoided choosing between them.
+//
+// So there is no "set this channel's tags" any more. There is APPLYING one tag
+// from a Short (`applyContentTypeToChannel`), which is where somebody actually
+// forms the opinion, and there is opening and closing a window by hand
+// (`setChannelContentTypeRuleWindow`). Removing a tag from a channel wholesale
+// is not an operation, because it was never an honest one.
 // ---------------------------------------------------------------------------
 
 /**
- * Replace one tracked channel's content types wholesale.
+ * A rule that has just stopped claiming new uploads, described well enough to
+ * tell somebody about it.
  *
- * The restored half of the taxonomy, and worth having back for a reason the
- * video side cannot cover: "this channel makes Rankings" is a statement of what
- * the team watches it FOR, made once when the channel is added, and it is what
- * lets somebody find the competitors in a format before a single Short of
- * theirs has been classified.
- *
- * Same set semantics as the video path — the client sends the complete desired
- * list — and the same reachability rule. `channelId` is the GLOBAL channel id,
- * matching every other channel endpoint; the tracking row the join hangs off is
- * resolved from it, which is what makes the tag ours rather than a fact about
- * the channel that every other tenant would inherit.
+ * EVERYTHING A TOAST NEEDS AND NOTHING IT DOES NOT. The names travel resolved
+ * rather than as ids because the sentence is the point — "Stopped applying Funny
+ * Memes to new uploads on this channel from 4 March" — and a client assembling
+ * it from three lookups would be one stale cache away from naming the wrong tag.
+ * `ruleId` is what makes the undo one action.
  */
-export async function setChannelContentTypes(
-  channelId: string,
-  contentTypeIds: readonly string[],
+export interface ChannelRuleClosure {
+  readonly ruleId: string;
+  readonly contentTypeId: string;
+  readonly contentTypeName: string;
+  /** The GLOBAL channel id, so the client can find the channel it already holds. */
+  readonly channelId: string;
+  readonly channelName: string;
+  /** The date the channel actually changed — where the rule now ends. */
+  readonly effectiveUntil: number;
+  /** True when the streak closed it; false when a person did. Always true here. */
+  readonly automatic: boolean;
+}
+
+/**
+ * TELL THE RULES WHAT JUST HAPPENED TO ONE SHORT.
+ *
+ * Called by every per-Short write, with the movement in that Short's EFFECTIVE
+ * tags. What each movement means to a rule is decided in
+ * `src/lib/content-types/rules.ts`; what this function decides is which rules
+ * hear about it and what is written when one closes.
+ *
+ * ONLY RULES THAT COVER THIS SHORT ARE CANDIDATES, which falls out of the state
+ * machine's own coverage check rather than being filtered here — a removal on a
+ * Short published before a rule began is not evidence about that rule, and the
+ * schema's whole reason for windows is that the two cases are now
+ * distinguishable.
+ *
+ * =========================================================================
+ * WHAT DELIBERATELY DOES NOT REACH THIS FUNCTION: THE BULK PATH
+ * =========================================================================
+ *
+ * `assignContentTypeToVideos` can strip an inherited tag off five hundred Shorts
+ * in one request, and it does not feed a single override in. That is a decision,
+ * not an oversight, and it rests on what the streak is evidence OF.
+ *
+ * The streak is a claim that a channel CHANGED AT A POINT IN TIME: three
+ * consecutive uploads that a person looked at and said were no longer this.
+ * A bulk run is the opposite shape of act — one statement about a selection
+ * somebody assembled, made once, usually while relabelling a back catalogue.
+ * Feeding it in would satisfy the threshold instantly and, because the close is
+ * dated to the EARLIEST Short in the streak, would date the retirement to the
+ * oldest Short in the selection — retiring the rule across the very history the
+ * person was in the middle of tidying.
+ *
+ * The person doing that already has the honest lever: close the rule by hand, at
+ * the date they mean. Making the bulk path guess at that date from a selection
+ * would be exactly the inference this design refuses to make.
+ *
+ * ATTRIBUTION: the close is audited against whoever made the removal that
+ * completed the streak. They did not ask for it, but they caused it, and an
+ * accountability log with an unattributable change to shared data in it is worse
+ * than one that names the person who can explain what they were doing.
+ */
+async function signalChannelRules(
+  organizationId: string,
+  video: TaggableVideo,
+  removedIds: readonly string[],
+  addedIds: readonly string[],
   request?: Request,
-): Promise<void> {
+): Promise<ChannelRuleClosure[]> {
+  if (video.rules.length === 0) return NO_CLOSURES;
+  if (removedIds.length === 0 && addedIds.length === 0) return NO_CLOSURES;
+
+  const removed = new Set(removedIds);
+  const added = new Set(addedIds);
+
+  const pending: Array<{ rule: ChannelRuleRow; change: RuleStreakChange }> = [];
+  for (const rule of video.rules) {
+    /*
+     * A tag cannot be both removed and added by one edit — they are movements
+     * in the same set — so the branch is exclusive by construction rather than
+     * by precedence. Written as an if/else anyway, because a future caller that
+     * passed overlapping arrays should get one signal rather than two
+     * contradictory ones applied in whatever order this loop happens to take.
+     */
+    const change = removed.has(rule.contentTypeId)
+      ? recordOverride(rule, video.publishedAt)
+      : added.has(rule.contentTypeId)
+        ? recordConfirmation(rule, video.publishedAt)
+        : null;
+    if (change) pending.push({ rule, change });
+  }
+
+  if (pending.length === 0) return NO_CLOSURES;
+
+  // One instant for the whole write, so a Short that happens to close two rules
+  // records them as the single act it was.
+  const noticedAt = new Date();
+
+  /*
+   * NO `organizationId` IN THESE `where` CLAUSES, AND NONE NEEDED.
+   *
+   * Every rule here came out of `loadTaggableVideos`, which read them through
+   * `trackedBy: { where: { organizationId } }` — our tracking row, and only
+   * ours. They are this organization's by construction, which is the entire
+   * reason `ChannelContentTypeRule` hangs off `TrackedChannel` rather than off
+   * the globally shared `Channel`. An id filter is the tenancy check here.
+   */
+  await prisma.$transaction(
+    pending.map(({ rule, change }) =>
+      prisma.channelContentTypeRule.update({
+        where: { id: rule.id },
+        data: {
+          consecutiveOverrides: change.consecutiveOverrides,
+          overrideStreakFrom:
+            change.overrideStreakFrom === null ? null : new Date(change.overrideStreakFrom),
+          // TWO DATES, KEPT APART. `effectiveUntil` is when the channel changed
+          // — the publish date of the first Short in the streak. `autoClosedAt`
+          // is when we worked that out. Collapsing them would give a tidy
+          // history and a wrong one, and would leave every upload between the
+          // switch and the discovery falsely tagged forever.
+          ...(change.closesAt === null
+            ? {}
+            : { effectiveUntil: new Date(change.closesAt), autoClosedAt: noticedAt }),
+        },
+      }),
+    ),
+  );
+
+  const closed = pending.filter((entry) => entry.change.closesAt !== null);
+  if (closed.length === 0) return NO_CLOSURES;
+
+  // Names, fetched only now: a streak grows on most removals and closes on very
+  // few, so the common path pays for no lookups at all.
+  const [tracked, contentTypes] = await Promise.all([
+    prisma.trackedChannel.findUnique({
+      where: { id: video.trackedChannelId },
+      select: { label: true, channel: { select: { title: true } } },
+    }),
+    prisma.contentType.findMany({
+      where: {
+        id: { in: closed.map((entry) => entry.rule.contentTypeId) },
+        organizationId,
+      },
+      select: { id: true, name: true },
+    }),
+  ]);
+
+  // The team's own label wins, as it does everywhere else: it is the name they
+  // read on the channel page and the one the toast has to match.
+  const channelName = tracked?.label ?? tracked?.channel.title ?? "this channel";
+  const nameById = new Map(contentTypes.map((type) => [type.id, type.name]));
+
+  const closures: ChannelRuleClosure[] = [];
+  for (const { rule, change } of closed) {
+    // Narrowing, not a possibility: `closed` is filtered on exactly this.
+    if (change.closesAt === null) continue;
+    const contentTypeName = nameById.get(rule.contentTypeId) ?? "that content type";
+
+    closures.push({
+      ruleId: rule.id,
+      contentTypeId: rule.contentTypeId,
+      contentTypeName,
+      channelId: video.channelId,
+      channelName,
+      effectiveUntil: change.closesAt,
+      automatic: true,
+    });
+
+    await auditContentType(request, {
+      action: "contenttype.channel_rule_closed",
+      targetType: "channel",
+      summary: `Stopped applying “${contentTypeName}” to new uploads on “${channelName}” from ${formatRuleDate(
+        change.closesAt,
+      )} — ${RULE_AUTO_CLOSE_STREAK} Shorts in a row had it removed`,
+      targetId: video.channelId,
+      targetLabel: channelName,
+      metadata: {
+        ruleId: rule.id,
+        contentTypeId: rule.contentTypeId,
+        contentTypeName,
+        // WHICH DOOR IT WENT THROUGH. "The app retired this after three
+        // corrections" and "Ada closed it" send a reader to entirely different
+        // questions, and the summary alone would not survive being skimmed.
+        automatic: true,
+        effectiveUntil: change.closesAt,
+        // The Short whose removal completed the streak. The thread back to the
+        // evidence, for anybody who thinks the rule retired wrongly.
+        triggeredByVideoId: video.id,
+        consecutiveOverrides: change.consecutiveOverrides,
+      },
+    });
+  }
+
+  return closures;
+}
+
+/** Shared empty result, so the overwhelmingly common outcome allocates nothing. */
+const NO_CLOSURES: ChannelRuleClosure[] = [];
+
+/**
+ * A date as it appears in a sentence somebody reads — "4 March 2025".
+ *
+ * `en-GB` and UTC, both deliberate. The app's dates are epoch milliseconds and
+ * every other summary in the audit log is written in the same voice; formatting
+ * against the server's local zone would put a different day in the log than the
+ * one on the rule for anything published near midnight.
+ */
+function formatRuleDate(epochMs: number): string {
+  return new Date(epochMs).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/**
+ * "APPLY TO THIS CHANNEL" — one action that covers the whole back catalogue and
+ * everything published next.
+ *
+ * THE ONLY WAY A TAG REACHES A CHANNEL NOW, and it is reached from a Short
+ * rather than from a channel settings screen, because that is where the opinion
+ * is actually formed: somebody watches an upload, files it as a Funny Meme, and
+ * realises the channel only makes those. Making them navigate to the channel to
+ * say so is how the thought gets lost.
+ *
+ * WHERE THE WINDOW STARTS, and why it is not "the earliest Short we have
+ * stored". The library grows BACKWARDS as well as forwards — the lookback window
+ * is a setting, and a sync run can import Shorts older than anything currently
+ * held. A rule dated to today's earliest Short would silently fail to cover them
+ * when they arrived, and nobody would connect the missing labels to a rule
+ * written months earlier. So it starts at the earliest instant this channel
+ * COULD have published anything: the channel's own YouTube creation date, or the
+ * earliest Short we hold if that is older still, or the epoch if we know
+ * neither. "At or before the channel's earliest Short" is then true permanently
+ * rather than true today.
+ *
+ * IDEMPOTENT, AND IT ABSORBS THE THREE WAYS IT CAN BE RE-RUN:
+ *
+ *   • an open rule that already covers the whole history → nothing to write;
+ *   • an open rule that starts too late → its start is pulled back, which is the
+ *     "back catalogue" half of the promise being kept on a rule that was only
+ *     keeping the forward half;
+ *   • only closed rules → the one starting at this date is RE-OPENED rather than
+ *     duplicated, because a second row for the same tag and the same start would
+ *     violate the schema's uniqueness and, more to the point, would say the same
+ *     thing twice.
+ */
+export async function applyContentTypeToChannel(
+  channelId: string,
+  contentTypeId: string,
+  request?: Request,
+): Promise<ChannelContentTypeRuleDTO> {
   const { organizationId, userId } = await getScope();
 
   const channel = await requireVisibleTrackedChannel(organizationId, channelId);
-  const unique = [...new Set(contentTypeIds)];
-  const owned = await requireOwnContentTypes(organizationId, unique);
+  const [contentType] = await requireOwnContentTypes(organizationId, [contentTypeId]);
+  // Unreachable — `requireOwnContentTypes` throws on a miss — but narrowing an
+  // array index beats asserting one.
+  if (!contentType) throw errors.notFound("content type");
 
-  /*
-   * RECONCILED, NOT REWRITTEN, and the difference is attribution.
-   *
-   * A delete-everything-then-recreate would be simpler and would store the same
-   * final set — but it would stamp `assignedById` and `createdAt` on every
-   * surviving row with whoever happened to press Save. Re-opening this dialog
-   * and confirming an unchanged selection would then quietly reassign a
-   * colleague's decision to the person who looked at it, which is precisely the
-   * kind of silent authorship change the stored-column rule exists to prevent.
-   *
-   * Reading first and subtracting is also what makes the write idempotent
-   * without `createMany({ skipDuplicates })` — unavailable on SQLite, which
-   * this schema must still run on.
-   *
-   * No `organizationId` filter on any of these queries, and none needed: the
-   * join rows hang off OUR tracking row, so they are ours by construction —
-   * which is exactly why the tag lives on `TrackedChannel` and not on
-   * `Channel`.
-   */
-  const existing = await prisma.channelContentType.findMany({
-    where: { trackedChannelId: channel.trackedChannelId },
-    select: { contentTypeId: true },
+  const effectiveFrom = await earliestPossiblePublish(channel.channelId);
+
+  const existing = await prisma.channelContentTypeRule.findMany({
+    where: { trackedChannelId: channel.trackedChannelId, contentTypeId: contentType.id },
+    orderBy: { effectiveFrom: "asc" },
   });
-  const before = new Set(existing.map((row) => row.contentTypeId));
 
-  const toRemove = [...before].filter((id) => !unique.includes(id));
-  const toCreate = unique.filter((id) => !before.has(id));
+  const open = existing.find((rule) => rule.effectiveUntil === null);
 
-  // Nothing moved: no write, and no audit entry claiming one happened.
-  if (toRemove.length === 0 && toCreate.length === 0) return;
+  if (open) {
+    if (open.effectiveFrom.getTime() <= effectiveFrom.getTime()) {
+      // Already says exactly this. No write, and therefore no audit entry
+      // claiming a channel was re-characterised when nothing moved.
+      return toChannelContentTypeRuleDTO(open);
+    }
 
-  await prisma.$transaction([
-    ...(toRemove.length > 0
-      ? [
-          prisma.channelContentType.deleteMany({
-            where: {
-              trackedChannelId: channel.trackedChannelId,
-              contentTypeId: { in: toRemove },
-            },
-          }),
-        ]
-      : []),
-    ...(toCreate.length > 0
-      ? [
-          prisma.channelContentType.createMany({
-            data: toCreate.map((contentTypeId) => ({
-              trackedChannelId: channel.trackedChannelId,
-              contentTypeId,
-              assignedById: userId,
-            })),
-          }),
-        ]
-      : []),
-  ]);
+    // A rule that was claiming new uploads but not the back catalogue. Pulling
+    // its start back is the whole of what this action means, so it is an edit
+    // rather than a second row — two overlapping rules for one tag would resolve
+    // identically and read as a mistake to the next person.
+    const widened = await prisma.channelContentTypeRule.update({
+      where: { id: open.id },
+      data: { effectiveFrom },
+    });
+
+    await auditContentType(request, {
+      action: "contenttype.channel_rule_applied",
+      targetType: "channel",
+      summary: `Applied “${contentType.name}” to “${channel.name}” back to ${formatRuleDate(
+        effectiveFrom.getTime(),
+      )}`,
+      targetId: channel.channelId,
+      targetLabel: channel.name,
+      metadata: {
+        ruleId: widened.id,
+        contentTypeId: contentType.id,
+        contentTypeName: contentType.name,
+        effectiveFrom: effectiveFrom.getTime(),
+        widenedFrom: open.effectiveFrom.getTime(),
+      },
+    });
+
+    return toChannelContentTypeRuleDTO(widened);
+  }
+
+  const sameStart = existing.find(
+    (rule) => rule.effectiveFrom.getTime() === effectiveFrom.getTime(),
+  );
+
+  const rule = sameStart
+    ? await prisma.channelContentTypeRule.update({
+        where: { id: sameStart.id },
+        // Re-opening clears the streak AND the auto-close stamp: the evidence
+        // that retired it has just been overruled by a person, and leaving it
+        // behind would make the rule look retired on every screen that reads
+        // `autoClosedAt` to explain itself.
+        data: {
+          effectiveUntil: null,
+          autoClosedAt: null,
+          consecutiveOverrides: 0,
+          overrideStreakFrom: null,
+        },
+      })
+    : await prisma.channelContentTypeRule.create({
+        data: {
+          organizationId,
+          trackedChannelId: channel.trackedChannelId,
+          contentTypeId: contentType.id,
+          effectiveFrom,
+          createdById: userId,
+        },
+      });
 
   await auditContentType(request, {
-    action: "contenttype.channel_assigned",
+    action: sameStart
+      ? "contenttype.channel_rule_reopened"
+      : "contenttype.channel_rule_applied",
     targetType: "channel",
-    summary:
-      owned.length > 0
-        ? `Set content types on “${channel.name}” to ${owned.map((t) => t.name).join(", ")}`
-        : `Cleared the content types on “${channel.name}”`,
-    // The global channel id, so the entry is findable from the same URL the
-    // rest of the app uses for this channel.
+    summary: sameStart
+      ? `Re-applied “${contentType.name}” to “${channel.name}” — the rule claims new uploads again`
+      : `Applied “${contentType.name}” to “${channel.name}” and everything it publishes next`,
+    // The global channel id, so the entry is findable from the same URL the rest
+    // of the app uses for this channel.
     targetId: channel.channelId,
     targetLabel: channel.name,
     metadata: {
-      contentTypeCount: owned.length,
-      added: toCreate.length,
-      removed: toRemove.length,
+      ruleId: rule.id,
+      contentTypeId: contentType.id,
+      contentTypeName: contentType.name,
+      effectiveFrom: effectiveFrom.getTime(),
     },
   });
+
+  return toChannelContentTypeRuleDTO(rule);
+}
+
+/**
+ * The earliest instant this channel could have published anything.
+ *
+ * Not a guess and not a fudge: a video cannot predate the channel that hosts it,
+ * so `channelPublishedAt` is a true lower bound on everything that will ever be
+ * imported for it. The stored earliest video is consulted too and wins if it is
+ * older, because YouTube's channel creation date is occasionally wrong in ways
+ * ours is not.
+ *
+ * Falls back to the epoch when neither is known — a brand-new channel with no
+ * videos fetched yet. That is the honest floor rather than "now": a rule written
+ * before the first sync must still cover what the first sync brings back.
+ */
+async function earliestPossiblePublish(channelId: string): Promise<Date> {
+  const [channel, earliest] = await Promise.all([
+    prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { channelPublishedAt: true },
+    }),
+    prisma.video.findFirst({
+      where: { channelId },
+      orderBy: { publishedAt: "asc" },
+      select: { publishedAt: true },
+    }),
+  ]);
+
+  const candidates = [channel?.channelPublishedAt, earliest?.publishedAt].filter(
+    (value): value is Date => value !== null && value !== undefined,
+  );
+
+  if (candidates.length === 0) return new Date(0);
+  return new Date(Math.min(...candidates.map((value) => value.getTime())));
+}
+
+/**
+ * THE MANUAL LEVER — close a rule at a date, or re-open it.
+ *
+ * The automatic path is a safety net, not the only door, and this is the door.
+ * Somebody who KNOWS a channel switched in March should not have to remove the
+ * tag from three Shorts to say so, and somebody who thinks the streak got it
+ * wrong must be able to undo it in one action — which is the same action, with
+ * `effectiveUntil: null`.
+ *
+ * RE-OPENING CLEARS THE EVIDENCE, all of it: `effectiveUntil`, `autoClosedAt`,
+ * and the streak that produced them. Leaving the streak at two would arm the
+ * rule to retire itself again on the very next removal, for reasons a person had
+ * already rejected — a re-open that lasts one click is not an undo.
+ *
+ * CLOSING BY HAND NEVER SETS `autoClosedAt`. That column is the difference
+ * between "the app decided this" and "Ada decided this", and the UI says which.
+ * Stamping it here would make every deliberate close read as something the
+ * system did on its own.
+ */
+export async function setChannelContentTypeRuleWindow(
+  channelId: string,
+  ruleId: string,
+  effectiveUntil: number | null,
+  request?: Request,
+): Promise<ChannelContentTypeRuleDTO> {
+  const organizationId = await getCurrentOrgId();
+  const channel = await requireVisibleTrackedChannel(organizationId, channelId);
+
+  /*
+   * BOTH IDS IN THE `where`, and the tracking id is the tenancy check.
+   *
+   * A rule id from another team's channel simply does not match, so it 404s
+   * exactly as an id that never existed does — the endpoint never confirms that
+   * somebody else's rule is real. The same collapse `requireOwnContentType`
+   * makes, for the same reason.
+   */
+  const rule = await prisma.channelContentTypeRule.findFirst({
+    where: { id: ruleId, trackedChannelId: channel.trackedChannelId },
+  });
+  if (!rule) throw errors.notFound("content type rule");
+
+  const contentType = await prisma.contentType.findFirst({
+    where: { id: rule.contentTypeId, organizationId },
+    select: { name: true },
+  });
+  const contentTypeName = contentType?.name ?? "that content type";
+
+  if (effectiveUntil !== null && effectiveUntil <= rule.effectiveFrom.getTime()) {
+    // A window that ends before it starts covers nothing, and a rule covering
+    // nothing is a delete wearing a close's clothes — it would strip the tag off
+    // the whole back catalogue while the UI went on describing it as "closed on
+    // the 4th". Refused with the date it would have to beat.
+    throw errors.invalidInput(
+      `That rule starts on ${formatRuleDate(
+        rule.effectiveFrom.getTime(),
+      )}. Close it on a later date, or remove the tag from the Shorts instead.`,
+    );
+  }
+
+  // Already exactly this. Returned rather than re-written, so re-opening an open
+  // rule does not put a second entry in the log saying it happened again.
+  if ((rule.effectiveUntil?.getTime() ?? null) === effectiveUntil) {
+    return toChannelContentTypeRuleDTO(rule);
+  }
+
+  const updated = await prisma.channelContentTypeRule.update({
+    where: { id: rule.id },
+    data: {
+      effectiveUntil: effectiveUntil === null ? null : new Date(effectiveUntil),
+      autoClosedAt: null,
+      consecutiveOverrides: 0,
+      overrideStreakFrom: null,
+    },
+  });
+
+  const reopened = effectiveUntil === null;
+
+  await auditContentType(request, {
+    action: reopened
+      ? "contenttype.channel_rule_reopened"
+      : "contenttype.channel_rule_closed",
+    targetType: "channel",
+    summary: reopened
+      ? `Re-opened “${contentTypeName}” on “${channel.name}” — it claims new uploads again`
+      : `Stopped applying “${contentTypeName}” to new uploads on “${channel.name}” from ${formatRuleDate(
+          effectiveUntil,
+        )}`,
+    targetId: channel.channelId,
+    targetLabel: channel.name,
+    metadata: {
+      ruleId: rule.id,
+      contentTypeId: rule.contentTypeId,
+      contentTypeName,
+      automatic: false,
+      effectiveUntil,
+      // What was undone, when it was a self-retirement. The one fact a reader
+      // needs to tell "somebody disagreed with the app" from "somebody changed
+      // their own mind".
+      ...(reopened && rule.autoClosedAt
+        ? { reopenedAutoClose: rule.autoClosedAt.getTime() }
+        : {}),
+    },
+  });
+
+  return toChannelContentTypeRuleDTO(updated);
 }

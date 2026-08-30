@@ -10,7 +10,6 @@ import {
   ShieldCheck,
   Wallet,
   Flame,
-  GitCompareArrows,
   Layers,
   LayoutDashboard,
   Moon,
@@ -57,14 +56,19 @@ interface NavSection {
  * "Tracker" is the underlying data being managed. Without the grouping this
  * would be nine flat items, which is the point at which a sidebar stops being
  * scannable.
+ *
+ * EVERY SECTION HERE IS A PLACE TO DO THE WORK. Settings is not, so it is not
+ * in this table at all — see `SidebarFooterNav` at the bottom of this file.
  */
 const NAV_SECTIONS: NavSection[] = [
   {
     label: null,
     items: [
+      // Compare is gone, and nothing replaced it. The Overview table already
+      // ranks every channel on the same metrics and sorts by any of them, so
+      // the one thing Compare added over it was a six-channel ceiling.
       { href: "/", label: "Overview", icon: LayoutDashboard },
       { href: "/our-vs-market", label: "Our vs Market", icon: Swords },
-      { href: "/compare", label: "Compare", icon: GitCompareArrows },
     ],
   },
   {
@@ -80,10 +84,7 @@ const NAV_SECTIONS: NavSection[] = [
     label: "Tracker",
     items: [
       { href: "/channels", label: "Channels", icon: Tv2, matchPrefix: true },
-      // `matchPrefix` because a niche's own page is `/niches/[id]`, and the
-      // sidebar losing its highlight there would suggest the user had left the
-      // Tracker.
-      { href: "/niches", label: "Niches", icon: Layers, matchPrefix: true },
+      { href: "/niches", label: "Niches", icon: Layers },
       // Beside Niches because they are the two taxonomies — which slice of the
       // operation owns a channel, and what the work itself is — and a reader
       // looking for one is usually deciding between them.
@@ -94,7 +95,6 @@ const NAV_SECTIONS: NavSection[] = [
       // words: you go looking for "content types", not for the niche you
       // happened to define them under.
       { href: "/content-types", label: "Content Types", icon: Shapes },
-      { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
   {
@@ -119,7 +119,13 @@ const NAV_SECTIONS: NavSection[] = [
         label: "Finance",
         icon: Wallet,
         matchPrefix: true,
-        requires: ["finance.view"],
+        // Either capability opens a real tab in there. Payroll moved into
+        // Finance and kept `payroll.view`, which is individually grantable —
+        // so somebody may hold it with no finance access at all, and listing
+        // only `finance.view` here would hide the section from the one person
+        // an admin deliberately gave payroll to. The section's layouts decide
+        // which half of it they actually reach.
+        requires: ["finance.view", "payroll.view"],
       },
     ],
   },
@@ -166,39 +172,98 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
               {section.label}
             </div>
           ) : null}
-          {section.items.map((item) => {
-            const isActive = item.matchPrefix
-              ? pathname === item.href || pathname.startsWith(`${item.href}/`)
-              : pathname === item.href;
-
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                onClick={onNavigate}
-                aria-current={isActive ? "page" : undefined}
-                className={cn(
-                  "group relative flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium",
-                  "transition-colors duration-150",
-                  isActive
-                    ? "bg-surface-hover text-foreground"
-                    : "text-muted-foreground hover:bg-surface-hover/60 hover:text-foreground",
-                )}
-              >
-                <item.icon
-                  className={cn(
-                    "size-4 shrink-0 transition-colors",
-                    isActive
-                      ? "text-accent"
-                      : "text-subtle-foreground group-hover:text-muted-foreground",
-                  )}
-                />
-                {item.label}
-              </Link>
-            );
-          })}
+          {section.items.map((item) => (
+            <NavLink
+              key={item.href}
+              item={item}
+              pathname={pathname}
+              onNavigate={onNavigate}
+            />
+          ))}
         </div>
       ))}
+    </nav>
+  );
+}
+
+/**
+ * One row of the sidebar.
+ *
+ * Extracted so the footer's Settings link is the same component rather than the
+ * same classes copied — the two sit two elements apart in the finished sidebar,
+ * and a divergence between them would be visible at a glance.
+ */
+function NavLink({
+  item,
+  pathname,
+  onNavigate,
+}: {
+  item: NavItem;
+  pathname: string;
+  onNavigate?: () => void;
+}) {
+  const isActive = item.matchPrefix
+    ? pathname === item.href || pathname.startsWith(`${item.href}/`)
+    : pathname === item.href;
+
+  return (
+    <Link
+      href={item.href}
+      onClick={onNavigate}
+      aria-current={isActive ? "page" : undefined}
+      className={cn(
+        "group relative flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium",
+        "transition-colors duration-150",
+        isActive
+          ? "bg-surface-hover text-foreground"
+          : "text-muted-foreground hover:bg-surface-hover/60 hover:text-foreground",
+      )}
+    >
+      <item.icon
+        className={cn(
+          "size-4 shrink-0 transition-colors",
+          isActive ? "text-accent" : "text-subtle-foreground group-hover:text-muted-foreground",
+        )}
+      />
+      {item.label}
+    </Link>
+  );
+}
+
+/**
+ * Settings, and where it went.
+ *
+ * IT WAS IN "TRACKER", WHICH WAS WRONG. Nothing on that screen tracks anything:
+ * for an employee it is their own name, email and password, and for an admin it
+ * is the organization's analysis defaults, collection cadence and currency.
+ * Filed beside Channels and Niches it read as a fourth kind of tracked data.
+ *
+ * IT IS NOT IN A SECTION AT ALL, AND THAT IS THE POINT. Every group above is a
+ * place to do the work — find something, manage it, get paid for it. Settings
+ * is where you go to change the tool you were doing that work with, which is a
+ * different kind of destination and belongs apart from them rather than as the
+ * odd item inside one. Inventing a "Personal" or "You" heading for a section of
+ * one would have been a heading that describes a single link.
+ *
+ * So it sits in the sidebar's footer, immediately above the theme toggle — the
+ * app's other "change the tool, not the data" control, which has always lived
+ * there unlabelled for exactly this reason. Same row height, same icon
+ * treatment and the same active state as any nav item, because it is still
+ * navigation; only its position says it is a different sort of place.
+ *
+ * NO PERMISSION GATE, deliberately. Every signed-in person has an account to
+ * manage, and the screen already shows the organization half only to
+ * `settings.manage` — which is a decision the page makes about its own content,
+ * not a reason to hide the door.
+ */
+const SETTINGS_ITEM: NavItem = { href: "/settings", label: "Settings", icon: Settings };
+
+export function SidebarFooterNav({ onNavigate }: { onNavigate?: () => void }) {
+  const pathname = usePathname();
+
+  return (
+    <nav aria-label="Account" className="flex flex-col gap-0.5">
+      <NavLink item={SETTINGS_ITEM} pathname={pathname} onNavigate={onNavigate} />
     </nav>
   );
 }

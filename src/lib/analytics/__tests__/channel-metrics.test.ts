@@ -362,9 +362,10 @@ describe("calculateChannelMetrics — descriptive statistics", () => {
 });
 
 describe("calculatePortfolioSummary", () => {
-  const channelWith = (id: string, views: number[], days = 5) => ({
+  const channelWith = (id: string, views: number[], days = 5, countsTowardHitRate = true) => ({
     id,
     name: id,
+    countsTowardHitRate,
     metrics: calculateChannelMetrics({
       videos: views.map((v, i) =>
         v >= BAR
@@ -394,6 +395,7 @@ describe("calculatePortfolioSummary", () => {
     const withWaiting = {
       id: "C",
       name: "C",
+      countsTowardHitRate: true,
       metrics: calculateChannelMetrics({
         videos: [
           makeHit({ views: 2_000_000, publishedAt: daysAgo(20, NOW) }),
@@ -419,7 +421,12 @@ describe("calculatePortfolioSummary", () => {
   it("excludes channels with no decided Shorts from the average rather than scoring them 0", () => {
     const summary = calculatePortfolioSummary([
       channelWith("A", [2_000_000, 2_000_000]), // 100%
-      { id: "B", name: "B", metrics: calculateChannelMetrics({ videos: [], range: range(30), threshold: BAR }) },
+      {
+        id: "B",
+        name: "B",
+        countsTowardHitRate: true,
+        metrics: calculateChannelMetrics({ videos: [], range: range(30), threshold: BAR }),
+      },
     ]);
 
     expect(summary.channelCount).toBe(2);
@@ -432,6 +439,7 @@ describe("calculatePortfolioSummary", () => {
     const inFlight = {
       id: "B",
       name: "B",
+      countsTowardHitRate: true,
       metrics: calculateChannelMetrics({
         videos: Array.from({ length: 12 }, (_, i) =>
           makePending({ views: 30_000, publishedAt: daysAgo(i + 1, NOW) }),
@@ -454,5 +462,64 @@ describe("calculatePortfolioSummary", () => {
     expect(summary.averageHitRate).toBeNull();
     expect(summary.pooled.rate).toBeNull();
     expect(summary.topChannel).toBeNull();
+  });
+
+  /**
+   * THE MEASUREMENT PROBLEM `countsTowardHitRate` EXISTS TO FIX.
+   *
+   * A watchlist niche is full of channels nobody at Northstar is trying to be.
+   * Averaging them into the portfolio produces a number describing work the
+   * studio does not do — arithmetic that is correct over a population nobody
+   * chose. The volume figures keep counting them, because those describe the
+   * tracker rather than the studio, and the table under the headline shows the
+   * same rows.
+   */
+  describe("the scorecard split", () => {
+    it("leaves watchlist channels out of the rate and keeps them in the volume", () => {
+      const summary = calculatePortfolioSummary([
+        // Ours: 50%.
+        channelWith("A", [2_000_000, 100_000]),
+        // Watched: 100%, and it must not drag the headline up to 75%.
+        channelWith("W", [2_000_000, 2_000_000], 5, false),
+      ]);
+
+      expect(summary.averageHitRate).toBe(50);
+      expect(summary.pooled.hits).toBe(1);
+      expect(summary.pooled.judged).toBe(2);
+
+      // Volume counts everything. "Tracked channels: 2" has to mean the two
+      // rows in the table, or the header is lying about the page it sits on.
+      expect(summary.channelCount).toBe(2);
+      expect(summary.totalShorts).toBe(4);
+
+      // And the gap between the two populations is reportable, so a caption can
+      // say what the rate is actually over.
+      expect(summary.scorecardChannelCount).toBe(1);
+    });
+
+    it("cannot be won by a watchlist channel", () => {
+      const summary = calculatePortfolioSummary([
+        channelWith("A", [2_000_000, 100_000]), // 50%
+        channelWith("W", [2_000_000, 2_000_000], 5, false), // 100%, watched
+      ]);
+
+      // "Best performing" is read as "the strongest thing we have". A channel
+      // nobody is trying to be must not top the studio's own list.
+      expect(summary.topChannel?.name).toBe("A");
+    });
+
+    it("reports no rate at all when everything in scope is watched", () => {
+      const summary = calculatePortfolioSummary([
+        channelWith("W", [2_000_000, 2_000_000], 5, false),
+      ]);
+
+      // Null, never 0 — nothing was measured, which is a different claim from
+      // "measured and none of it hit".
+      expect(summary.averageHitRate).toBeNull();
+      expect(summary.pooled.rate).toBeNull();
+      expect(summary.scorecardChannelCount).toBe(0);
+      // The Shorts are still there. They are simply not the studio's scorecard.
+      expect(summary.totalShorts).toBe(2);
+    });
   });
 });

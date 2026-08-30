@@ -609,7 +609,7 @@ export async function updateMember(
     // than applying half of itself.
     if (input.status === "active" && member.user.status === "pending_approval") {
       throw errors.invalidInput(
-        "That account is waiting for approval, not deactivated. Approve or reject it from the Employees screen — that is the path that records who let them in.",
+        "That account is waiting for approval, not deactivated. Approve or reject it from the People screen — that is the path that records who let them in.",
       );
     }
 

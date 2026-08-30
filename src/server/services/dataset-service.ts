@@ -29,6 +29,7 @@ import { getCurrentOrgId, getCurrentOrgSettings } from "./user-service";
 import { listNiches } from "./niche-service";
 import { listContentTypes } from "./content-type-service";
 import { getNoteCounts, listCollections, listSavedShorts } from "./research-service";
+import { channelDataSources } from "./youtube-oauth-service";
 
 const MS_PER_DAY = 86_400_000;
 
@@ -160,16 +161,37 @@ export async function buildDataset(
       where: { organizationId, isActive: true, ...trackedChannelNicheFilter(visibleNiches) },
       include: {
         niches: { include: { niche: true } },
-        // The channel's own tags — as ids into the catalogue shipped once
-        // below. THE LIVE SOURCE for every Short beneath it: the client
-        // resolves each video's deviations against this array, so a tag added
-        // here appears on all of them with nothing written per Short. See
-        // `src/lib/content-types/resolve.ts`.
-        //
-        // No tenant filter here and none needed: `ChannelContentType` hangs off
-        // the `TrackedChannel` this query has already narrowed to one
-        // organization. The video side below is the opposite case.
-        contentTypes: { select: { contentTypeId: true } },
+        /*
+         * The channel's content-type RULES — what it made, and between when
+         * and when.
+         *
+         * THE LIVE SOURCE for every Short beneath it: the client resolves each
+         * video's deviations against the rules that cover ITS publish date, so
+         * applying a tag here appears on the whole back catalogue with nothing
+         * written per Short, and a rule retiring un-labels exactly the uploads
+         * after the switch. See `src/lib/content-types/resolve.ts`.
+         *
+         * EVERY rule, closed and retired ones included. Shipping only the open
+         * ones would un-label a year of Shorts in the browser while the database
+         * still knew better — and would leave the UI unable to offer the
+         * one-click re-open, which is the thing that makes an automatic
+         * retirement safe to have at all.
+         *
+         * No tenant filter here and none needed: `ChannelContentTypeRule` hangs
+         * off the `TrackedChannel` this query has already narrowed to one
+         * organization. The video side below is the opposite case.
+         */
+        contentTypeRules: {
+          select: {
+            id: true,
+            contentTypeId: true,
+            effectiveFrom: true,
+            effectiveUntil: true,
+            consecutiveOverrides: true,
+            overrideStreakFrom: true,
+            autoClosedAt: true,
+          },
+        },
         channel: {
           include: {
             videos: {
@@ -189,12 +211,13 @@ export async function buildDataset(
     // THE catalogue — one flat, org-wide list, and the same read the
     // management screen makes. There is nothing to group and nothing to
     // narrow: any of these tags may go on any channel or Short, so the client
-    // resolves a `contentTypeIds` array and builds a picker's options from this
-    // one array.
+    // resolves the ids the rules and deviations above carry, and builds a
+    // picker's options, from this one array.
     //
-    // Archived types included. A Short filed under one keeps its label, so the
-    // catalogue has to be able to resolve every id the videos above carry —
-    // omitting them would render historical classifications as dangling ids.
+    // Archived types included, and a RETIRED RULE is a second reason for it: a
+    // closed rule still labels a back catalogue, so the catalogue has to be able
+    // to resolve every id those rules carry as well as every id the videos do.
+    // Omitting them would render historical classifications as dangling ids.
     // The client narrows to `isActive` when it offers a choice, not when it
     // renders one already made.
     listContentTypes({ includeInactive: true }),
@@ -212,10 +235,29 @@ export async function buildDataset(
     getViewsDefinition(),
   ]);
 
+  /**
+   * Where each channel's numbers came from, for the whole payload in one query.
+   *
+   * After the tracker read rather than inside it: the answer depends on this
+   * organization's YouTube connections, which are a different table with no
+   * relation to `TrackedChannel` (they are keyed on the YOUTUBE channel id, not
+   * on our row id, because a connection exists before any channel row does).
+   * Resolving it per channel would be one query each; this is one for the lot,
+   * and it mints no tokens — see `channelDataSources`.
+   */
+  const dataSources = await channelDataSources(
+    organizationId,
+    tracked.map((row) => row.channel.youtubeChannelId),
+  );
+
   const channels: DatasetChannelDTO[] = tracked.map((row) => {
     const videos = row.channel.videos.map(toVideoDTO);
     return {
-      channel: toChannelDTO(row.channel, row),
+      channel: toChannelDTO(
+        row.channel,
+        row,
+        dataSources.get(row.channel.youtubeChannelId) ?? "public",
+      ),
       videos,
       excludedCount: videos.filter((v) => !v.isShort).length,
       unclassifiedCount: videos.filter((v) => v.classification === "uncertain").length,

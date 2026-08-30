@@ -2,6 +2,7 @@ import "server-only";
 
 import { prisma } from "@/server/db";
 import { HOUR_MS, type HitOutcome } from "@/lib/analytics/hit-rate";
+import { toNicheKind } from "@/lib/niches/niche-kind";
 import type {
   PayrollEmployee,
   PayrollHitEvidence,
@@ -191,7 +192,14 @@ async function loadEmployeeMembers(
           employeeProfile: {
             select: {
               salaryMinor: true,
-              hitPaymentMinor: true,
+              // `hitPaymentMinor` IS DELIBERATELY NOT SELECTED. The per-hit
+              // rate moved to the niche, and the engine has no field to receive
+              // this one on any more — see `PayrollEmployee`. The column stays
+              // in the database because every finalized `PayrollRecord`
+              // computed from it has to remain explicable; it is simply not an
+              // input to a new calculation, and not fetching it is the cheapest
+              // way to guarantee nothing downstream quietly starts reading it
+              // again.
               currency: true,
               joinedOn: true,
               employmentEndedOn: true,
@@ -219,7 +227,6 @@ async function loadEmployeeMembers(
       email: member.user.email ?? "",
       role: member.role,
       salaryMinor: profile.salaryMinor,
-      hitPaymentMinor: profile.hitPaymentMinor,
       currency: profile.currency,
       nicheIds: member.niches.map((assignment) => assignment.nicheId),
       joinedOnMs: profile.joinedOn?.getTime() ?? null,
@@ -235,25 +242,47 @@ async function loadEmployeeMembers(
 // ---------------------------------------------------------------------------
 
 /**
- * Every niche in the organization, with both halves of its hit rule.
+ * Every niche in the organization, with all three numbers and its kind.
  *
  * All of them, not only those attached to owned channels: the engine looks
  * niches up by id from two directions — the employee's assignments and the
  * channel's — and a missing entry would silently drop a hit that should have
  * paid.
  *
- * `hitThreshold` and `hitWindowHours` both stay nullable all the way through,
- * and the engine reads either null as "nothing here can be scored" rather than
- * resolving it to anything. The columns are carried, never coerced — there is
- * no organization default for the window any more than there is for the bar,
- * and adding one would recreate the bug that paid bonuses against numbers
- * nobody had chosen.
+ * WATCHLIST NICHES ARE LOADED TOO, AND THAT IS DELIBERATE. Filtering them out
+ * here would leave the engine unable to tell "this niche does not pay" from
+ * "this niche does not exist", and the two behave differently: a missing entry
+ * is skipped silently, while a watchlist one is skipped for a reason the engine
+ * states. The exclusion belongs where the rule is written down, not in the
+ * query — see `judgeShort`.
+ *
+ * ALL THREE NUMBERS STAY NULLABLE ALL THE WAY THROUGH, and the engine reads any
+ * null as "nothing here can be scored or paid" rather than resolving it to
+ * anything. The columns are carried, never coerced — there is no organization
+ * default for the window any more than there is for the bar, no fall back to
+ * the employee's rate for the price, and adding one would recreate the bug that
+ * paid bonuses against numbers nobody had chosen.
  */
 async function loadNiches(organizationId: string): Promise<PayrollNiche[]> {
-  return prisma.niche.findMany({
+  const rows = await prisma.niche.findMany({
     where: { organizationId },
-    select: { id: true, name: true, hitThreshold: true, hitWindowHours: true },
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      hitPaymentMinor: true,
+      hitThreshold: true,
+      hitWindowHours: true,
+    },
   });
+
+  return rows.map((row) => ({
+    ...row,
+    // The column is a portable `String`; the engine takes the two-value union.
+    // Anything unrecognised reads as "production", which over-counts visibly
+    // rather than silently removing a niche from the run.
+    kind: toNicheKind(row.kind),
+  }));
 }
 
 /**

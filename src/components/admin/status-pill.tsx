@@ -8,11 +8,11 @@ import { cn } from "@/lib/utils";
 /**
  * An account's status, as a dot and a word.
  *
- * Shared by Admin › Users and Admin › Employees because the two screens describe
- * the same accounts from different angles, and the one thing they must not do is
- * disagree about what state somebody is in. A second copy of this mapping is how
- * "Pending approval" ends up rendered as the raw enum on one screen a month
- * after it was added to the other.
+ * Shared by Admin › People, the person's own profile and the approvals queue,
+ * because they describe the same accounts from different angles and the one
+ * thing they must not do is disagree about what state somebody is in. A second
+ * copy of this mapping is how "Pending approval" ends up rendered as the raw
+ * enum on one screen a month after it was added to the other.
  *
  * `status` is typed as a plain string rather than a union on purpose: it comes
  * off the wire, and a value this component has never heard of is shown verbatim

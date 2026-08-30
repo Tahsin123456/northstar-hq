@@ -142,26 +142,27 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  settings             OrganizationSettings?
-  members              OrganizationMember[]
-  niches               Niche[]
-  trackedChannels      TrackedChannel[]
-  notes                Note[]
-  collections          Collection[]
-  savedShorts          SavedShort[]
-  invitations          Invitation[]
-  auditEvents          AuditEvent[]
-  youtubeConnections   YouTubeConnection[]
-  financeCategories    FinanceCategory[]
-  financeEntries       FinanceEntry[]
-  exchangeRates        ExchangeRate[]
-  employeeProfiles     EmployeeProfile[]
-  payrollPeriods       PayrollPeriod[]
-  notificationSettings NotificationSettings?
-  contentTypes         ContentType[]
-  videoContentTypes    VideoContentType[]
-  channelRevenueDays   ChannelRevenueDay[]
-  videoHitEvaluations  VideoHitEvaluation[]
+  settings                OrganizationSettings?
+  members                 OrganizationMember[]
+  niches                  Niche[]
+  trackedChannels         TrackedChannel[]
+  notes                   Note[]
+  collections             Collection[]
+  savedShorts             SavedShort[]
+  invitations             Invitation[]
+  auditEvents             AuditEvent[]
+  youtubeConnections      YouTubeConnection[]
+  financeCategories       FinanceCategory[]
+  financeEntries          FinanceEntry[]
+  exchangeRates           ExchangeRate[]
+  employeeProfiles        EmployeeProfile[]
+  payrollPeriods          PayrollPeriod[]
+  notificationSettings    NotificationSettings?
+  contentTypes            ContentType[]
+  videoContentTypes       VideoContentType[]
+  channelRevenueDays      ChannelRevenueDay[]
+  videoHitEvaluations     VideoHitEvaluation[]
+  channelContentTypeRules ChannelContentTypeRule[]
 
   @@map("organizations")
 }
@@ -291,12 +292,40 @@ model Niche {
   /// Optional accent token (a `--chart-N` index) used for the niche chip.
   colorIndex Int @default(0)
 
+  /// "production" | "watchlist".
+  ///
+  /// Two genuinely different jobs wearing one word. A PRODUCTION niche is one
+  /// the studio publishes into: it has a hit rule, it pays, its numbers are a
+  /// scorecard, and the team is accountable for them. A WATCHLIST niche is one
+  /// they watch — for formats worth stealing, for an opening nobody is filling,
+  /// for a competitor's system worth reading. Nobody is judged on it.
+  ///
+  /// Keeping them in one list made the average meaningless: a watchlist niche
+  /// full of channels nobody is trying to beat drags the portfolio hit rate
+  /// toward a number describing work the studio does not do. Splitting them is
+  /// what lets "our hit rate" mean ours.
+  kind String @default("production")
+
   /// What counts as a hit in this niche, in views.
   ///
   /// Nullable on purpose: null means "inherit the account default" rather than
   /// silently baking the current default into every niche at creation time. A niche
   /// that has never been configured should follow the global setting if the
   /// user later changes it.
+  /// What ONE hit in this niche pays, in minor units.
+  ///
+  /// The rate moved here from `EmployeeProfile.hitPaymentMinor` because it is a
+  /// property of the work, not of the person: a hit in a niche that takes a day
+  /// to produce is not worth the same as one that takes an hour, and paying two
+  /// editors different amounts for the identical Short was never what anybody
+  /// meant. The employee column stays for the finalized records that reference
+  /// it — a paid bonus must remain explicable — and no longer decides new pay.
+  ///
+  /// Null is unconfigured, like the two rule columns below it. A niche that
+  /// cannot say what a hit is worth pays nothing rather than guessing zero, and
+  /// the payroll run says which niche and why before anybody finalizes it.
+  hitPaymentMinor Int?
+
   hitThreshold Int?
 
   /// How long a Short has to reach `hitThreshold`, in hours.
@@ -457,8 +486,8 @@ model TrackedChannel {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  niches       TrackedChannelNiche[]
-  contentTypes ChannelContentType[]
+  niches           TrackedChannelNiche[]
+  contentTypeRules ChannelContentTypeRule[]
 
   @@unique([organizationId, channelId])
   @@index([organizationId, isActive])
@@ -1494,22 +1523,43 @@ model ContentType {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  channels ChannelContentType[]
-  videos   VideoContentType[]
+  channelRules ChannelContentTypeRule[]
+  videos       VideoContentType[]
 
   @@unique([organizationId, slug])
   @@index([organizationId, sortOrder])
   @@map("content_types")
 }
 
-/// The content types a channel primarily produces.
+/// "Everything this channel makes is a Funny Meme" — with an expiry date it
+/// writes for itself.
 ///
-/// Hangs off `TrackedChannel` rather than `Channel` because it is the
-/// organization's editorial read on a channel it watches, not a fact about the
-/// channel itself — two teams tracking the same channel would describe it
-/// differently, and `Channel` rows are shared between them.
-model ChannelContentType {
+/// This replaces the flat channel-to-tag join, which had no notion of WHEN. A
+/// channel that produced rankings all last year and switched to cutscenes in
+/// March would go on tagging every new upload "Ranking" forever, and the tag
+/// nobody trusts is worse than the tag nobody set.
+///
+/// So a rule is a claim about a STRETCH OF TIME: Shorts published on or after
+/// `effectiveFrom`, and before `effectiveUntil` if it is set, carry the tag.
+/// Applying one from a Short covers that channel's whole back catalogue and
+/// everything it publishes next, which is what somebody means when they say
+/// "this is what this channel does".
+///
+/// HOW IT NOTICES THE CHANNEL CHANGED
+/// Not by reading titles, which would be guessing. By listening to the only
+/// reliable signal there is — somebody taking the tag off. Each time a person
+/// removes this tag from a Short newer than the rule's last confirmation, the
+/// streak grows; three in a row and the rule closes itself, dated to the first
+/// Short in the streak rather than to today, because that is when the channel
+/// actually changed. Putting the tag back on a newer Short clears the streak.
+///
+/// The effect is a rule that keeps working while it is right and retires
+/// quietly when it stops being, without anybody having to remember it exists.
+model ChannelContentTypeRule {
   id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   trackedChannelId String
   trackedChannel   TrackedChannel @relation(fields: [trackedChannelId], references: [id], onDelete: Cascade)
@@ -1517,12 +1567,36 @@ model ChannelContentType {
   contentTypeId String
   contentType   ContentType @relation(fields: [contentTypeId], references: [id], onDelete: Cascade)
 
-  assignedById String?
-  createdAt    DateTime @default(now())
+  /// Shorts published at or after this instant are covered.
+  effectiveFrom DateTime
 
-  @@unique([trackedChannelId, contentTypeId])
+  /// Shorts published before this are covered; null means the rule is still
+  /// claiming new uploads. Set by hand, or by the streak below.
+  effectiveUntil DateTime?
+
+  /// Consecutive removals on Shorts newer than the last confirmation.
+  consecutiveOverrides Int @default(0)
+
+  /// The publish date of the earliest Short in the current streak — where the
+  /// rule gets closed if the streak completes. Dating the close to the removal
+  /// rather than to the day somebody noticed is the difference between a
+  /// correct history and a tidy one.
+  overrideStreakFrom DateTime?
+
+  /// Set when the streak closed it, so the UI can say the rule retired itself
+  /// rather than letting it look like somebody did it.
+  autoClosedAt DateTime?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  /// One rule per tag per start date, so a channel can legitimately carry
+  /// "Ranking until March" and "Ranking again from September".
+  @@unique([trackedChannelId, contentTypeId, effectiveFrom])
+  @@index([organizationId])
   @@index([contentTypeId])
-  @@map("channel_content_types")
+  @@map("channel_content_type_rules")
 }
 
 /// The content type(s) of one Short.

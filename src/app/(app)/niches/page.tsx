@@ -8,7 +8,6 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
-  Shapes,
   StickyNote,
   Target,
   Trash2,
@@ -59,6 +58,13 @@ import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-nich
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
 import type { NicheDTO } from "@/lib/dto";
+import {
+  NICHE_KIND_DESCRIPTION,
+  NICHE_KIND_LABEL,
+  NICHE_KIND_PLURAL,
+  NICHE_KINDS,
+  type NicheKind,
+} from "@/lib/niches/niche-kind";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
 import {
   EMPLOYEE_HIT_RULE_NOTICE,
@@ -98,7 +104,41 @@ export default function NichesPage() {
     [data?.niches],
   );
 
-  const unconfiguredCount = niches.filter(needsRuleConfiguration).length;
+  /*
+   * GROUPED BY KIND, WITH THE TWO GROUPS NAMED AND SEPARATED.
+   *
+   * They are two different jobs. Production niches are the ones Northstar
+   * publishes into: they are the scorecard, they pay, and they are what the
+   * portfolio hit rate is measured over. Watchlist niches are the ones the
+   * studio follows for formats worth stealing and openings worth taking —
+   * fully browsable, fully analysed, and deliberately outside "how are WE
+   * doing". One grid mixing them is what made the portfolio average describe
+   * work the studio does not do, so the page stops presenting them as one list.
+   *
+   * The unconfigured-first ordering survives inside each group: it is about
+   * what still needs a decision, which is a question within a group rather than
+   * across the two.
+   */
+  const production = React.useMemo(
+    () => niches.filter((niche) => niche.kind === "production"),
+    [niches],
+  );
+  const watchlist = React.useMemo(
+    () => niches.filter((niche) => niche.kind === "watchlist"),
+    [niches],
+  );
+
+  /*
+   * Counted over PRODUCTION niches only.
+   *
+   * A watchlist niche with no threshold is not a task anybody has to do —
+   * nothing is paid for it and nobody is judged on it — so putting it in a
+   * banner that says "no hit rate is reported until an Admin sets one" would
+   * manufacture work. The badge on its own card still marks it, because a
+   * watchlist niche with no rule genuinely does report nothing, and somebody
+   * watching a niche presumably wants to see how it is doing.
+   */
+  const unconfiguredCount = production.filter(needsRuleConfiguration).length;
 
   const unassigned = React.useMemo(
     () => rows.filter((row) => row.channel.niches.length === 0),
@@ -119,11 +159,12 @@ export default function NichesPage() {
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="Niches"
-        // No single number belongs in this sentence. Each card is scored at its
-        // own threshold, and the ones with none are not scored at all — the old
-        // copy named the account default as the value used "where none is set",
-        // which is precisely the fallback this round removed.
-        description="How each niche is performing, each scored at its own hit threshold. A niche with no threshold reports no hit rate until one is set. Click one to open the dashboard filtered to it."
+        // Says what the two groups are, because the split changes how the page
+        // is read: the production group is the studio's scorecard and the
+        // watchlist group is research. No single number belongs in this
+        // sentence — each card is scored at its own threshold and the ones with
+        // none are not scored at all.
+        description="How each niche is performing, each scored at its own hit threshold. Production niches are the ones Northstar publishes into and the ones the portfolio hit rate is measured over; watchlist niches are followed rather than competed in. A niche with no complete rule reports no hit rate until one is set. Click one to open the dashboard filtered to it."
         actions={
           <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}>
             <Plus />
@@ -169,11 +210,8 @@ export default function NichesPage() {
                 <UnconfiguredSummary count={unconfiguredCount} />
               ) : null}
 
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {niches.map((niche) => (
-                  <NicheCard key={niche.id} niche={niche} rows={rows} />
-                ))}
-              </div>
+              <NicheKindGroup kind="production" niches={production} rows={rows} />
+              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} />
             </>
           )}
 
@@ -185,6 +223,52 @@ export default function NichesPage() {
 
       <CreateNicheDialog open={createOpen} onOpenChange={setCreateOpen} />
     </PageContainer>
+  );
+}
+
+/**
+ * One kind of niche, under its own heading.
+ *
+ * A heading and a sentence rather than a tab or a filter, because both groups
+ * are worth looking at and they answer different questions — the point of a
+ * watchlist niche is that somebody DOES read its numbers. Hiding one behind a
+ * control would make the split feel like a preference rather than what it is: a
+ * statement about which of these the studio is accountable for.
+ *
+ * Renders nothing when the group is empty. An account with no watchlist niches
+ * should not carry a heading explaining a concept it is not using.
+ */
+function NicheKindGroup({
+  kind,
+  niches,
+  rows,
+}: {
+  kind: NicheKind;
+  niches: readonly NicheDTO[];
+  rows: readonly ChannelRow[];
+}) {
+  if (niches.length === 0) return null;
+
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 border-b border-border pb-2">
+        <h2 className="text-[13px] font-medium text-foreground">
+          {NICHE_KIND_PLURAL[kind]}
+        </h2>
+        <span className="tnum text-[12px] text-subtle-foreground">
+          {formatNumber(niches.length)}
+        </span>
+        <p className="w-full max-w-prose text-[12px] leading-relaxed text-muted-foreground">
+          {NICHE_KIND_DESCRIPTION[kind]}
+        </p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {niches.map((niche) => (
+          <NicheCard key={niche.id} niche={niche} rows={rows} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -239,6 +323,14 @@ function NicheCard({
           range,
           threshold: nicheThreshold,
         }),
+        // TRUE FOR EVERY CARD, INCLUDING A WATCHLIST ONE. This card is one
+        // niche's own analytics, which is exactly what a watchlist niche is
+        // for — the whole reason to watch a niche is to see how it performs.
+        // The exclusion belongs to the POOLED portfolio figure, where mixing
+        // the two produces one number describing two different jobs; here
+        // there is only ever one niche in the pool and it is the one named at
+        // the top of the card.
+        countsTowardHitRate: true,
       })),
     [members, range, nicheThreshold],
   );
@@ -299,24 +391,17 @@ function NicheCard({
                 {canConfigure ? (
                   <DropdownMenuItem onSelect={() => setThresholdOpen(true)}>
                     <Target />
-                    Hit threshold
+                    Hit rule
                   </DropdownMenuItem>
                 ) : null}
-                {/* The niche's own page: threshold, author, the settings that
-                    genuinely belong to this niche.
-
-                    It said "Content types" until content types stopped being a
-                    per-niche vocabulary. They are now one flat set of tags the
-                    whole organization shares, so a menu item here would promise
-                    a list scoped to this niche that does not exist — and the
-                    page it opened would have to explain that it had lied. The
-                    catalogue lives at /content-types, in the sidebar. */}
-                <DropdownMenuItem asChild>
-                  <Link href={`/niches/${niche.id}`}>
-                    <Shapes />
-                    Niche settings
-                  </Link>
-                </DropdownMenuItem>
+                {/* There was a "Niche settings" item here, and a second link to
+                    the same page lower down the card. Both are gone with the
+                    page they opened: once content types stopped being per-niche
+                    it held a threshold, a price and an author line, and the
+                    first two are edited in the Hit rule dialog directly above
+                    while the third is on the card itself. Two doors into a page
+                    that restated what this card already says is what made them
+                    useless. */}
                 <DropdownMenuItem onSelect={() => setNotesOpen(true)}>
                   <StickyNote />
                   Niche notes
@@ -348,7 +433,7 @@ function NicheCard({
                 onClick={() => setThresholdOpen(true)}
                 className="text-[11px] font-medium text-accent transition-colors hover:text-accent-hover"
               >
-                Set threshold
+                Set hit rule
               </button>
             ) : null}
           </div>
@@ -374,21 +459,6 @@ function NicheCard({
             muted={nicheThreshold === null}
           />
         </div>
-
-        {/*
-          The way into the niche's own settings — its threshold and its author.
-          It used to lead to the niche's content types; those are one shared
-          list now, reached from `/content-types`, and pointing a per-niche link
-          at an org-wide catalogue would suggest the two were related. `z-10`
-          because the card's title is a stretched link over the whole surface.
-        */}
-        <Link
-          href={`/niches/${niche.id}`}
-          className="relative z-10 mt-3 inline-flex items-center gap-1.5 self-start text-[11px] text-muted-foreground transition-colors hover:text-accent"
-        >
-          <Shapes className="size-3" />
-          Niche settings
-        </Link>
 
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">
           {nicheThreshold === null ? (
@@ -581,6 +651,10 @@ function CreateNicheDialog({
 function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
   const [name, setName] = React.useState("");
   const [thresholdInput, setThresholdInput] = React.useState("");
+  // Production by default, deliberately: it is the inclusive answer, and a
+  // niche that defaulted to watchlist would drop its channels out of the
+  // portfolio hit rate the moment somebody created one.
+  const [kind, setKind] = React.useState<NicheKind>("production");
   const [error, setError] = React.useState<string | null>(null);
   const canConfigure = useCanConfigureThreshold();
   const create = useCreateNiche();
@@ -610,9 +684,12 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
 
     // The key is absent, not null, when there is no threshold to send. The
     // server treats a present `hitThreshold` — null included — as a threshold
-    // write and refuses it without `settings.manage`.
+    // write and refuses it without `settings.manage`. `kind` rides on
+    // `niches.manage`, which anybody reaching this form already holds.
     create.mutate(
-      hitThreshold === undefined ? { name: trimmed } : { name: trimmed, hitThreshold },
+      hitThreshold === undefined
+        ? { name: trimmed, kind }
+        : { name: trimmed, kind, hitThreshold },
       {
         onSuccess: ({ niche }) => {
           toast.success(`Niche “${niche.name}” created`, {
@@ -657,7 +734,37 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
           </FieldHint>
         </div>
 
-        {canConfigure ? (
+        {/*
+          Asked at creation because it is the cheapest moment to answer it, and
+          because getting it wrong is not free: a watchlist niche filed as
+          production drags channels nobody is trying to be into the portfolio
+          hit rate. `niches.manage` is the floor for this whole form, so
+          everybody who can see it can answer this.
+        */}
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="niche-kind-new">Kind</Label>
+          <div id="niche-kind-new" className="flex flex-wrap gap-1.5">
+            {NICHE_KINDS.map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={kind === option}
+                onClick={() => setKind(option)}
+                className={cn(
+                  "rounded-md border px-2.5 py-1 text-[12px] font-medium transition-colors",
+                  kind === option
+                    ? "border-accent bg-accent-subtle text-foreground"
+                    : "border-border text-muted-foreground hover:border-border-strong hover:text-foreground",
+                )}
+              >
+                {NICHE_KIND_LABEL[option]}
+              </button>
+            ))}
+          </div>
+          <FieldHint>{NICHE_KIND_DESCRIPTION[kind]}</FieldHint>
+        </div>
+
+        {canConfigure && kind === "production" ? (
           <div className="flex flex-col gap-2">
             <Label htmlFor="niche-hit-rate">Hit Rate View Count</Label>
             <Input
@@ -700,6 +807,17 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
               ))}
             </div>
           </div>
+        ) : kind === "watchlist" ? (
+          /* No threshold field for a watchlist niche at creation, for the same
+             reason there is no payment field for one in the rule dialog: it is
+             a niche to follow, and its rule is a decision to make once somebody
+             has decided what they are watching for. It can be set any time from
+             the niche's own dialog. */
+          <p className="rounded-md border border-border bg-surface-sunken px-3 py-2 text-[12px] leading-relaxed text-muted-foreground">
+            A watchlist niche is followed rather than published into. It gets its own
+            hit rate once a rule is set for it, it is left out of the portfolio hit
+            rate, and no hit in it is paid.
+          </p>
         ) : (
           /* Friendly and specific, not a permission error. They are allowed to
              be here; the number is simply somebody else's to choose. */

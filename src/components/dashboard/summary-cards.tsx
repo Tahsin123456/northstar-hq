@@ -52,6 +52,15 @@ export function SummaryCards({
    * the windows have not shut.
    */
   const pooled = summary.pooled;
+  /**
+   * Tracked channels the rate is NOT measured over.
+   *
+   * Channels sitting only in watchlist niches. They are counted in every volume
+   * figure in this strip — those describe the tracker, and the table underneath
+   * shows the same rows — and left out of the rate, which describes the studio.
+   * The gap is stated rather than left to be noticed.
+   */
+  const watchlistExcluded = summary.channelCount - summary.scorecardChannelCount;
   const nothingScoreable =
     summary.totalShorts > 0 &&
     pooled.judged === 0 &&
@@ -94,9 +103,19 @@ export function SummaryCards({
           label="Tracked channels"
           value={formatNumber(summary.channelCount)}
           caption={
-            summary.channelsWithData < summary.channelCount
-              ? `${summary.channelsWithData} with Shorts this period`
-              : "All active this period"
+            /*
+              The count is over EVERY channel in scope, watchlist included, and
+              so is the table underneath it — a header that quietly counted 30
+              rows while the list showed 48 would be lying about its own page.
+              What the caption names instead is how many of them the rate is
+              measured over, which is the fact a reader would otherwise have to
+              infer from a percentage that moved for no visible reason.
+            */
+            watchlistExcluded > 0
+              ? `${formatNumber(summary.scorecardChannelCount)} in the hit rate · ${formatNumber(watchlistExcluded)} watchlist`
+              : summary.channelsWithData < summary.channelCount
+                ? `${summary.channelsWithData} with decided Shorts this period`
+                : "All active this period"
           }
         />
       </div>
@@ -152,6 +171,23 @@ export function SummaryCards({
                   The mean of each channel&rsquo;s own hit rate, counting only
                   channels with at least one DECIDED Short this period.{" "}
                   {HIT_RATE_DEFINITION}
+                  {/*
+                    Said in the tooltip rather than left implicit. A rate over 30
+                    of 48 tracked channels is a different claim from a rate over
+                    all of them, and this is the one place a reader can find out
+                    which they are looking at — the volume tiles beside it
+                    deliberately count everything.
+                  */}
+                  {watchlistExcluded > 0 ? (
+                    <>
+                      {" "}
+                      {formatNumber(watchlistExcluded)} tracked{" "}
+                      {watchlistExcluded === 1 ? "channel is" : "channels are"} left out:
+                      they sit only in watchlist niches, which Northstar follows rather
+                      than publishes into. Averaging them in would describe work the
+                      studio does not do.
+                    </>
+                  ) : null}
                 </>
               ) : (
                 UNCONFIGURED_RULE_EXPLANATION

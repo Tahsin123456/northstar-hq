@@ -9,15 +9,18 @@ import { recordAudit } from "@/server/audit/audit-service";
 import type { AuditAction } from "@/lib/audit/actions";
 import { roleDefinition } from "@/lib/auth/permissions";
 import { MAX_MONEY_MINOR } from "@/lib/finance/money";
-import { formatHitWindow, missingHitRuleHalf, type MissingHitRuleHalf } from "@/lib/analytics/hit-rate";
+import { formatHitWindow, missingHitRuleHalf } from "@/lib/analytics/hit-rate";
+import { toNicheKind, type NicheKind } from "@/lib/niches/niche-kind";
 import {
   calculateEmployeePayroll,
   calculatePayrollRun,
+  describeNicheGap,
   payDateFor,
   periodContaining,
   periodForMonth,
   periodLabel,
   previousPeriod,
+  type NichePayrollGap,
   type PayrollCalculation,
   type PayrollPeriodWindow,
   type QualifyingHit,
@@ -136,9 +139,33 @@ export interface PayrollNicheLineDTO {
    */
   readonly windowHoursApplied: number | null;
   readonly hitCount: number;
-  /** The employee's per-hit rate, in minor units. */
-  readonly hitPaymentMinor: number;
-  readonly bonusMinor: number;
+  /**
+   * The NICHE's per-hit rate, in minor units — what one hit here was worth.
+   *
+   * It used to be the employee's, one rate for the whole record. The rate is a
+   * property of the work now, so it belongs on the line: two lines on one
+   * record can honestly carry two different prices, and `bonusMinor` below is
+   * `hitCount × this`, exactly.
+   *
+   * `null` means NOT RECOVERABLE, only ever on a frozen record — see
+   * `recoverNicheRates`. `PayrollRecord` has one rate column and the schema is
+   * not ours to change, so a record that spanned several rates cannot restate
+   * them from its own row; the rates are recovered from the niches and shown
+   * only when they still add up to the bonus that was actually paid. Null is
+   * never "free": the line drops the "× $5" and keeps its count, which is
+   * stored on the hits themselves and cannot drift.
+   */
+  readonly hitPaymentMinor: number | null;
+  /**
+   * `hitCount × hitPaymentMinor`, or `null` when the rate is not known.
+   *
+   * MOVES IN LOCKSTEP WITH THE RATE ABOVE, and it is null in the same one case,
+   * because a line with no rate has no product to state. A `0` here would read
+   * as "this niche earned nothing", which is a false and much worse claim than
+   * "we cannot break this record down by niche" — the record's own
+   * `hitBonusMinor` is stored and remains the truth about what was paid.
+   */
+  readonly bonusMinor: number | null;
 }
 
 /**
@@ -155,17 +182,23 @@ export interface PayrollNicheLineDTO {
  * an admin sees which niches and how many Shorts before they finalize, and the
  * same figures go into the audit entry so the reason survives the run.
  *
- * `missing` is new and is the reason this mechanism was extended rather than
- * duplicated. A niche can now be unscoreable in three ways — no threshold, no
- * window, or neither — and they are three different fields to go and fill in.
- * A notice that said only "unconfigured" would make an admin hunt for which.
+ * `missing` is the reason this mechanism was extended rather than duplicated. A
+ * niche can be half-configured in several ways — no threshold, no window,
+ * neither, or a complete rule with no price on it — and each is a different
+ * field to go and fill in. A notice that said only "unconfigured" would make an
+ * admin hunt for which.
+ *
+ * THE PRICE JOINED THIS NOTICE RATHER THAN GETTING ONE OF ITS OWN, which is
+ * what the brief asked for and is also the right shape: all of these are the
+ * same question — why is this bonus smaller than it looks? — and a second
+ * banner would be a second place to look for one answer.
  */
 export interface PayrollSkippedNicheDTO {
   readonly nicheId: string;
   readonly nicheName: string;
-  /** Which half of the rule is absent: the bar, the clock, or both. */
-  readonly missing: MissingHitRuleHalf;
-  /** Distinct Shorts in this niche that no rule could judge. */
+  /** Which of the niche's three settings are absent. See `NichePayrollGap`. */
+  readonly missing: NichePayrollGap;
+  /** Distinct Shorts this gap cost. See the engine's `SkippedNiche`. */
   readonly shortCount: number;
 }
 
@@ -626,22 +659,34 @@ const MAX_CUSTOM_RANGE_MS = 731 * 24 * 60 * 60 * 1000;
  *
  *   "niche"        — the niche sets its own `hitThreshold`. There is a bar, and
  *                    this is it.
- *   "unconfigured" — the niche's rule is incomplete: no threshold, no window,
- *                    or neither. Nothing in it can be a hit. `thresholdApplied`
- *                    is null when the bar is what is missing, because there is
- *                    genuinely no number to print, and `ruleMissing` says which
- *                    half it is. This used to read "organization", meaning the
- *                    org default had been substituted — which paid bonuses
- *                    against a bar nobody had chosen. Worth saying out loud on
- *                    a payslip: "0 hits" and "nobody has told us what a hit
- *                    means here" look identical and are completely different
- *                    problems.
+ *   "unconfigured" — the niche is missing at least one of its three settings:
+ *                    the bar, the clock, or the price. Nothing in it can be a
+ *                    hit, or nothing in it can be paid for.
+ *                    `thresholdApplied` is null when the bar is what is
+ *                    missing, because there is genuinely no number to print,
+ *                    and `ruleMissing` says which it is. This used to read
+ *                    "organization", meaning the org default had been
+ *                    substituted — which paid bonuses against a bar nobody had
+ *                    chosen. Worth saying out loud on a payslip: "0 hits" and
+ *                    "nobody has told us what a hit means here" look identical
+ *                    and are completely different problems.
+ *   "watchlist"    — the niche is one Northstar watches rather than publishes
+ *                    into, so nothing in it is paid and nothing is missing.
+ *                    Kept apart from "unconfigured" because they read the same
+ *                    on a payslip and call for opposite reactions: one is an
+ *                    admin's job to fix, the other is the arrangement working
+ *                    as intended, and telling somebody to chase a setting that
+ *                    should not exist wastes both their time.
  *   "as_finalized" — a frozen record. The threshold is the number recorded at
  *                    the run; where it came from is not stored, and guessing
  *                    from today's configuration would be a lie about a document
  *                    whose whole value is that it cannot move.
  */
-export type EarningsThresholdSource = "niche" | "unconfigured" | "as_finalized";
+export type EarningsThresholdSource =
+  | "niche"
+  | "unconfigured"
+  | "watchlist"
+  | "as_finalized";
 
 export interface MyEarningsNicheLineDTO {
   readonly nicheId: string | null;
@@ -661,16 +706,25 @@ export interface MyEarningsNicheLineDTO {
   readonly windowHoursApplied: number | null;
   readonly thresholdSource: EarningsThresholdSource;
   /**
-   * Which half of the rule this niche is missing, or null when it has both.
+   * Which of the niche's three settings are missing, or null when it has all of
+   * them — and null on a watchlist niche, which is missing nothing.
    *
    * Always null for "as_finalized": what today's configuration lacks says
    * nothing about a figure that was settled months ago.
    */
-  readonly ruleMissing: MissingHitRuleHalf | null;
+  readonly ruleMissing: NichePayrollGap | null;
   readonly hitCount: number;
-  /** The employee's own per-hit rate, in minor units. */
-  readonly hitPaymentMinor: number;
-  readonly bonusMinor: number;
+  /**
+   * The NICHE's per-hit rate, in minor units — what a hit here is worth.
+   *
+   * The line the brief keeps: "120 hits × $5 = $600", where the $5 now comes
+   * from the niche rather than from the person. `null` when there is no rate to
+   * state: an unconfigured niche, a watchlist niche, or a frozen record whose
+   * rates could not be recovered — see `PayrollNicheLineDTO`.
+   */
+  readonly hitPaymentMinor: number | null;
+  /** `hitCount × hitPaymentMinor`, or null in lockstep with it. */
+  readonly bonusMinor: number | null;
 }
 
 export interface MyEarningsPeriodDTO {
@@ -704,6 +758,14 @@ export interface MyEarningsDTO {
   readonly onPayroll: boolean;
 
   readonly baseSalaryMinor: number;
+  /**
+   * The one rate this figure was paid at, or 0 when it was not paid at one.
+   *
+   * A summary of `byNiche`, which is where the per-hit money actually lives now
+   * — see `PayrollCalculation.hitPaymentMinor` in the engine. Somebody working
+   * a single niche sees their rate here exactly as before; somebody working two
+   * at different prices sees 0 here and two honest lines below.
+   */
   readonly hitPaymentMinor: number;
   readonly hitCount: number;
   readonly hitBonusMinor: number;
@@ -885,8 +947,21 @@ export async function getMyEarnings(options: {
       // The rule each of these hits was judged under, recovered for display.
       // The figures themselves are read verbatim and are not touched by it —
       // see `loadHitWindowsForRecords`.
-      const windows = await loadHitWindowsForRecords(organizationId, [stored]);
-      return fromStoredRecord(window, options.period.kind, row.status, stored, windows);
+      const [windows, rates] = await Promise.all([
+        loadHitWindowsForRecords(organizationId, [stored]),
+        // And the rate each line was paid at, recovered under the same rule and
+        // the same guard — see `recoverNicheRates`. The figures themselves are
+        // untouched by either.
+        recoverNicheRates(organizationId, [stored]),
+      ]);
+      return fromStoredRecord(
+        window,
+        options.period.kind,
+        row.status,
+        stored,
+        windows,
+        rates.get(stored) ?? uniformRates(stored.hitPaymentMinor),
+      );
     }
 
     // Finalized, but this person has no line in it: they were not employed
@@ -971,12 +1046,21 @@ async function calculateMyEarnings(
 
   const byNiche = buildAssignedNicheLines(employee, inputs.niches, calculation.byNiche);
 
-  // "On niches, and not one of them has a usable rule." Deliberately not the
-  // same test as `skippedNiches.length > 0`: somebody can have one configured
-  // niche and one half-configured one, which is a partial loss to mention
-  // rather than the total blank this flag turns the page into.
+  // "On niches, and not one of them can pay." Deliberately not the same test as
+  // `skippedNiches.length > 0`: somebody can have one working niche and one
+  // half-configured one, which is a partial loss to mention rather than the
+  // total blank this flag turns the page into.
+  //
+  // A WATCHLIST NICHE COUNTS TOWARDS THE BLANK, and that is deliberate too.
+  // Somebody assigned only to niches Northstar watches genuinely cannot earn a
+  // hit bonus, and the headline has to say so — what changes is the REASON, and
+  // the per-niche notices above give each of them their own.
   const noMeasurableNiche =
-    byNiche.length > 0 && byNiche.every((line) => line.thresholdSource === "unconfigured");
+    byNiche.length > 0 &&
+    byNiche.every(
+      (line) =>
+        line.thresholdSource === "unconfigured" || line.thresholdSource === "watchlist",
+    );
 
   return {
     period: toPeriodDTO(window, kind),
@@ -1054,10 +1138,12 @@ const NO_UNRESOLVED: PayrollUnresolvedDTO = {
  * no threshold to report and no name to show.
  */
 function buildAssignedNicheLines(
-  employee: { readonly nicheIds: readonly string[]; readonly hitPaymentMinor: number },
+  employee: { readonly nicheIds: readonly string[] },
   niches: readonly {
     id: string;
     name: string;
+    kind: NicheKind;
+    hitPaymentMinor: number | null;
     hitThreshold: number | null;
     hitWindowHours: number | null;
   }[],
@@ -1076,24 +1162,64 @@ function buildAssignedNicheLines(
     // The same resolution the engine performs, through the same function, so
     // the rule shown is the rule the bonus was judged against — and the nulls
     // are carried rather than filled in, because the engine judged nothing.
-    const missing = missingHitRuleHalf(niche);
+    const missingRule = missingHitRuleHalf(niche);
+    // A watchlist niche is not missing anything. It has no reason to carry a
+    // price and nobody is paid for it, so it is labelled for what it is instead
+    // of being reported as a configuration gap somebody has to chase.
+    const watchlist = niche.kind === "watchlist";
+    const missingPayment =
+      !watchlist && (niche.hitPaymentMinor === null || niche.hitPaymentMinor <= 0);
+
+    const gap: NichePayrollGap | null =
+      watchlist || (missingRule === null && !missingPayment)
+        ? null
+        : { rule: missingRule, payment: missingPayment };
+
+    // The niche's rate, or null when there is none to state. Never the
+    // employee's — that column no longer decides anything, and printing it
+    // beside a niche's hits would explain a bonus with a number that did not
+    // produce it.
+    const rate = watchlist ? null : niche.hitPaymentMinor;
 
     lines.push({
       nicheId: niche.id,
       nicheName: niche.name,
       thresholdApplied: niche.hitThreshold,
       windowHoursApplied: niche.hitWindowHours,
-      thresholdSource: missing === null ? "niche" : "unconfigured",
-      ruleMissing: missing,
+      thresholdSource: watchlist ? "watchlist" : gap === null ? "niche" : "unconfigured",
+      ruleMissing: gap,
       hitCount: line?.hitCount ?? 0,
-      hitPaymentMinor: employee.hitPaymentMinor,
-      bonusMinor: line?.bonusMinor ?? 0,
+      hitPaymentMinor: rate,
+      /*
+       * NULL IN LOCKSTEP WITH THE RATE, which is what the DTO already promises
+       * and what this line used to break.
+       *
+       * `?? 0` on its own shipped `hitPaymentMinor: null` beside
+       * `bonusMinor: 0` for every watchlist and every unpriced niche — a
+       * product with no multiplicand, and the DTO says a zero here is the
+       * claim "this niche earned nothing". For a watchlist niche that is a
+       * verdict on work nobody was ever going to be paid for; for an unpriced
+       * one it hides that the hits were won and had no price to fetch. The
+       * engine never puts a bonus on a niche it could not pay — see
+       * `payableRateFor` — so the `?? 0` only ever fired where there was no
+       * rate to state, which is exactly where the null belongs.
+       */
+      bonusMinor: rate === null ? null : (line?.bonusMinor ?? 0),
     });
   }
 
   // Most-earning first, then by name — the ordering the admin breakdown uses,
-  // so the same figures read the same way on both screens.
-  return lines.sort((a, b) => b.bonusMinor - a.bonusMinor || a.nicheName.localeCompare(b.nicheName));
+  // so the same figures read the same way on both screens. A line with no
+  // stated bonus sorts last rather than as a zero: an unknown amount is not a
+  // small one, and a watchlist niche is not a niche that underperformed.
+  //
+  // The `-1` still holds now that those nulls are real rather than zeroes: a
+  // bonus is never negative, so every line that HAS one outranks every line
+  // that has none, and the name tiebreak keeps the tail stable instead of
+  // letting equal sentinels reshuffle between requests.
+  return lines.sort(
+    (a, b) => (b.bonusMinor ?? -1) - (a.bonusMinor ?? -1) || a.nicheName.localeCompare(b.nicheName),
+  );
 }
 
 /** Why an estimate came out the way it did. */
@@ -1101,7 +1227,6 @@ function estimateNotices(
   window: EarningsWindow,
   employee: {
     readonly nicheIds: readonly string[];
-    readonly hitPaymentMinor: number;
     readonly joinedOnMs: number | null;
     readonly employmentEndedOnMs: number | null;
   },
@@ -1128,26 +1253,51 @@ function estimateNotices(
     notices.push(
       "You are not assigned to any niches, so no hit can be credited to you. Hit bonuses are paid per niche.",
     );
-  } else if (employee.hitPaymentMinor <= 0) {
-    notices.push(
-      "Your per-hit rate is not set, so hits earn no bonus. An administrator sets it on your employee profile.",
-    );
   }
 
-  // A niche with half a rule is not producing an honest zero, it is producing
-  // an unanswered question — and until somebody answers it, no Short in that
-  // niche can be counted at all. Named per niche, with the half that is missing
-  // and the number of the person's own Shorts it cost them, because "12 of your
-  // Shorts" is what makes this a thing worth chasing rather than a note to skim.
+  // A niche that cannot say what a hit is, or what one is worth, is not
+  // producing an honest zero — it is producing an unanswered question, and
+  // until somebody answers it no Short in that niche can be counted or paid.
+  // Named per niche, with the setting that is missing and the number of the
+  // person's own Shorts it cost them, because "12 of your Shorts" is what makes
+  // this a thing worth chasing rather than a note to skim.
   const skippedByNicheId = new Map(
     calculation.skippedNiches.map((skipped) => [skipped.nicheId, skipped.shortCount]),
   );
 
   for (const line of byNiche) {
+    // A WATCHLIST NICHE GETS ITS OWN SENTENCE, NOT THIS ONE. It is not missing
+    // a setting and there is nothing for an administrator to complete, so
+    // telling somebody to chase one would send them after a number that should
+    // not exist. Said plainly instead, once, so a zero beside the niche has a
+    // reason attached to it like every other zero on this page.
+    if (line.thresholdSource === "watchlist") {
+      notices.push(
+        `${line.nicheName} is a watchlist niche — one Northstar follows rather than publishes into — so Shorts in it are not paid a hit bonus. That is how it is meant to work, not a setting anybody is missing.`,
+      );
+      continue;
+    }
+
     if (line.ruleMissing === null) continue;
 
     const shortCount = line.nicheId === null ? 0 : (skippedByNicheId.get(line.nicheId) ?? 0);
-    const lacks = `has no ${missingHalfLabel(line.ruleMissing)} set`;
+    const lacks = `has no ${describeNicheGap(line.ruleMissing)} set`;
+
+    // TWO DIFFERENT LOSSES, TWO DIFFERENT SENTENCES. A missing rule means the
+    // Shorts were never judged; a missing price means they WERE judged, they
+    // won, and there was no number to multiply by. Telling somebody their hits
+    // "could not be counted" when they were counted and simply not priced would
+    // understate what happened to them.
+    const priceOnly = line.ruleMissing.rule === null;
+    if (priceOnly) {
+      notices.push(
+        shortCount > 0
+          ? `${line.nicheName} ${lacks}, so hits in it earn nothing — ${formatCount(shortCount, "of your Shorts in it reached its threshold and", "of your Shorts in it reached its threshold and")} could not be paid for. An administrator sets what a hit in this niche is worth; once the period is finalized, setting it changes nothing about this month.`
+          : `${line.nicheName} ${lacks}, so a hit in it earns nothing. An administrator sets what a hit in this niche is worth; until then this niche cannot earn you a bonus.`,
+      );
+      continue;
+    }
+
     notices.push(
       shortCount > 0
         ? `${line.nicheName} ${lacks}, so nothing in it can count as a hit — ${formatCount(shortCount, "of your Shorts in it was", "of your Shorts in it were")} not counted this period. An administrator completes the rule; once it is set, Shorts in this niche count from the next period onwards.`
@@ -1198,13 +1348,19 @@ function estimateNotices(
   // bar to cross and no clock to cross it in. Somebody whose every niche is
   // unconfigured gets the sentence that names the actual problem instead.
   if (noMeasurableNiche) {
+    // Two different blanks, and the sentence says which. "Nobody has finished
+    // configuring your niches" and "your niches are ones we watch rather than
+    // publish into" both produce a zero bonus, and only the first is something
+    // an administrator is supposed to go and fix.
+    const allWatchlist = byNiche.every((line) => line.thresholdSource === "watchlist");
     notices.push(
-      "None of the niches you are on has a complete hit rule set — a hit needs both a view threshold and a window to reach it in — so no hit can be counted for you at all. This is a setting an administrator has to fill in; it is not a reflection of your work, and your normal pay is unaffected.",
+      allWatchlist
+        ? "Every niche you are on is a watchlist niche — one Northstar follows rather than publishes into — so no hit bonus can be earned from them. That is how watchlist niches work; it is not a missing setting and not a reflection of your work, and your normal pay is unaffected."
+        : "None of the niches you are on is fully set up for hit bonuses — a hit needs a view threshold, a window to reach it in, and a payment for reaching it — so no bonus can be counted for you at all. These are settings an administrator has to fill in; it is not a reflection of your work, and your normal pay is unaffected.",
     );
   } else if (
     calculation.hitCount === 0 &&
     employee.nicheIds.length > 0 &&
-    employee.hitPaymentMinor > 0 &&
     // Already explained, more precisely, by the three lines above. Following
     // them with "nothing reached its threshold" would contradict the one that
     // just said a Short passed it — or, worse, the one that just said a Short
@@ -1233,11 +1389,12 @@ function fromStoredRecord(
   status: string,
   record: StoredRecord,
   windows: ReadonlyMap<string, StoredHitWindow>,
+  rates: RecoveredRates,
 ): MyEarningsDTO {
   // `toRecordDTO` is the same mapper the admin screens use — including the
   // per-niche regrouping — so a payslip and this screen cannot disagree about
   // a figure that is, by then, a fact.
-  const dto = toRecordDTO(record, windows);
+  const dto = toRecordDTO(record, windows, rates);
 
   const notices: string[] = [
     `${window.label} is finalized. These are the figures recorded at the time and they do not change, even as views keep climbing.`,
@@ -1690,6 +1847,11 @@ export async function getMyEarningsHistoryBreakdown(
     throw errors.notFound("month of pay");
   }
 
+  // The rates behind the lines, through the identical routine the admin screens
+  // use. `BREAKDOWN_SELECT` is narrower than `RECORD_SELECT` but carries the
+  // three columns the recovery reads, which is why one function serves both.
+  const rates = await recoverNicheRates(organizationId, [record]);
+
   return {
     year: month.year,
     month: month.month,
@@ -1698,7 +1860,9 @@ export async function getMyEarningsHistoryBreakdown(
     hitBonusMinor: record.hitBonusMinor,
     hitPaymentMinor: record.hitPaymentMinor,
     currency: record.currency,
-    byNiche: toFinalizedNicheLines(groupHitsByNiche(record.hits, record.hitPaymentMinor)),
+    byNiche: toFinalizedNicheLines(
+      groupHitsByNiche(record.hits, rates.get(record) ?? uniformRates(record.hitPaymentMinor)),
+    ),
   };
 }
 
@@ -1927,7 +2091,7 @@ export async function finalizePeriodForOrganization(options: {
         ),
         skippedNiches: run.skippedNiches.map(
           (skipped) =>
-            `${skipped.nicheName} (${skipped.shortCount}, no ${missingHalfLabel(skipped.missing)})`,
+            `${skipped.nicheName} (${skipped.shortCount}, no ${describeNicheGap(skipped.missing)})`,
         ),
         // THE RULE THIS RUN WAS COMPUTED UNDER, WRITTEN DOWN WHILE IT WAS TRUE.
         //
@@ -1965,29 +2129,28 @@ export async function finalizePeriodForOrganization(options: {
  * Empty string in the ordinary case, so a run with every niche configured reads
  * exactly as it always has.
  *
- * Each niche is named with the half it is missing. "no hit threshold" was the
+ * Each niche is named with the setting it is missing. "no hit threshold" was the
  * whole story when a threshold was the whole rule; now a niche can be
- * unscoreable for having no window, and an entry that did not say which would
- * send whoever reads this log in November to the wrong field.
+ * unscoreable for having no window, or perfectly scoreable and unable to pay for
+ * having no price, and an entry that did not say which would send whoever reads
+ * this log in November to the wrong field.
+ *
+ * `describeNicheGap` is the engine's, shared with the payroll screen and the
+ * finalize dialog. Four copies of that composition would be four chances for
+ * this log and the screen an admin was looking at to disagree about the same
+ * niche.
  */
 function skippedSummarySuffix(skipped: readonly SkippedNiche[]): string {
   if (skipped.length === 0) return "";
 
   const shortCount = skipped.reduce((sum, niche) => sum + niche.shortCount, 0);
   const names = skipped
-    .map((niche) => `${niche.nicheName} (no ${missingHalfLabel(niche.missing)})`)
+    .map((niche) => `${niche.nicheName} (no ${describeNicheGap(niche.missing)})`)
     .join(", ");
 
-  return ` — ${shortCount} ${shortCount === 1 ? "Short was" : "Shorts were"} not counted because ${
-    skipped.length === 1 ? "this niche has" : "these niches have"
-  } an incomplete hit rule: ${names}`;
-}
-
-/** "hit threshold" / "hit window" / "hit threshold or window". */
-function missingHalfLabel(missing: MissingHitRuleHalf): string {
-  if (missing === "threshold") return "hit threshold";
-  if (missing === "window") return "hit window";
-  return "hit threshold or window";
+  return ` — ${shortCount} ${shortCount === 1 ? "Short was" : "Shorts were"} not paid because ${
+    skipped.length === 1 ? "this niche is" : "these niches are"
+  } missing part of what a hit bonus needs: ${names}`;
 }
 
 /**
@@ -2004,6 +2167,24 @@ function describeNicheRules(calculations: readonly PayrollCalculation[]): string
   const rules = new Set<string>();
   for (const calculation of calculations) {
     for (const line of calculation.byNiche) {
+      // THE PRICE IS PART OF THE RULE NOW AND IS STILL NOT WRITTEN HERE.
+      //
+      // It was tempting: `PayrollHit` has no per-hit rate column, so a run whose
+      // niches paid different amounts has no durable per-niche price anywhere.
+      // But an audit entry is readable by anybody holding `audit.view`, which is
+      // a wider group than the admins who may see pay, and the redaction that
+      // protects the other money-carrying actions works on METADATA KEYS and on
+      // summary text — a rate embedded in a string inside a `nicheRules` array
+      // would sail straight past both. Recording money here to make a bonus
+      // explicable would make every bonus readable, which is a worse failure
+      // than the one it fixes.
+      //
+      // What survives instead: the stored `hitCount` per niche on `PayrollHit`,
+      // the stored `hitBonusMinor` on the record, and — where the record was
+      // paid at one rate, which is the ordinary case — `hitPaymentMinor`. The
+      // per-niche decomposition is recovered for display by `recoverNicheRates`,
+      // which shows a rate only when the recovered rates still add up to the
+      // bonus that was actually paid, and shows none when they do not.
       rules.add(
         `${line.nicheName}: ${line.thresholdApplied.toLocaleString("en-US")} views within ${formatHitWindow(line.windowHoursApplied)}`,
       );
@@ -2734,12 +2915,18 @@ async function loadStoredRecords(
     select: RECORD_SELECT,
   });
 
-  const windows = await loadHitWindowsForRecords(organizationId, rows);
+  const [windows, rates] = await Promise.all([
+    loadHitWindowsForRecords(organizationId, rows),
+    // One pass for the whole period rather than one per record: the niches
+    // behind a month's hits are a handful, and asking for them per row would
+    // turn a payroll screen into a query per employee.
+    recoverNicheRates(organizationId, rows),
+  ]);
 
   // The same ordering the engine produces for a draft — highest paid first,
   // then by name — so a period does not reshuffle the moment it is finalized.
   return rows
-    .map((row) => toRecordDTO(row, windows))
+    .map((row) => toRecordDTO(row, windows, rates.get(row) ?? uniformRates(row.hitPaymentMinor)))
     .sort((a, b) => b.totalMinor - a.totalMinor || a.employeeName.localeCompare(b.employeeName));
 }
 
@@ -2820,7 +3007,11 @@ async function scopedRecordDTO(
   organizationId: string,
   record: StoredRecord,
 ): Promise<PayrollRecordDTO> {
-  return toRecordDTO(record, await loadHitWindowsForRecords(organizationId, [record]));
+  const [windows, rates] = await Promise.all([
+    loadHitWindowsForRecords(organizationId, [record]),
+    recoverNicheRates(organizationId, [record]),
+  ]);
+  return toRecordDTO(record, windows, rates.get(record) ?? uniformRates(record.hitPaymentMinor));
 }
 
 /**
@@ -2855,9 +3046,11 @@ function toDraftRecordDTO(calculation: PayrollCalculation): PayrollRecordDTO {
       thresholdApplied: line.thresholdApplied,
       windowHoursApplied: line.windowHoursApplied,
       hitCount: line.hitCount,
-      // The rate lives on the employee, not the niche line. Attached here so
-      // the client never has to reach back up the object to explain a bonus.
-      hitPaymentMinor: calculation.hitPaymentMinor,
+      // The rate lives on the NICHE now, so it comes straight off the line the
+      // engine produced rather than off the record. A draft never has to
+      // recover anything: it just computed these, from the niches as they stand
+      // this second.
+      hitPaymentMinor: line.hitPaymentMinor,
       bonusMinor: line.bonusMinor,
     })),
     hits: calculation.hits.map((hit) => ({
@@ -2881,6 +3074,7 @@ function toDraftRecordDTO(calculation: PayrollCalculation): PayrollRecordDTO {
 function toRecordDTO(
   record: StoredRecord,
   windows: ReadonlyMap<string, StoredHitWindow>,
+  rates: RecoveredRates,
 ): PayrollRecordDTO {
   const hits: PayrollHitDTO[] = record.hits.map((hit) => {
     const stored = windows.get(hit.videoId);
@@ -2931,7 +3125,7 @@ function toRecordDTO(
     // Rebuilt from the stored hits rather than stored separately. The hits are
     // the evidence; a per-niche summary that could drift from them would be a
     // second, weaker source of truth for the same number.
-    byNiche: groupHitsByNiche(hits, record.hitPaymentMinor),
+    byNiche: groupHitsByNiche(hits, rates),
     hits,
   };
 }
@@ -2958,7 +3152,7 @@ function groupHitsByNiche(
     /** Absent on the narrow projections that only ever needed a count. */
     readonly windowHoursApplied?: number | null;
   }[],
-  hitPaymentMinor: number,
+  rates: RecoveredRates,
 ): PayrollNicheLineDTO[] {
   const buckets = new Map<
     string,
@@ -2994,16 +3188,167 @@ function groupHitsByNiche(
   }
 
   return [...buckets.values()]
-    .map((bucket) => ({
-      nicheId: bucket.nicheId,
-      nicheName: bucket.nicheName,
-      thresholdApplied: bucket.thresholdApplied,
-      windowHoursApplied: bucket.windowHoursApplied,
-      hitCount: bucket.hitCount,
-      hitPaymentMinor,
-      bonusMinor: bucket.hitCount * hitPaymentMinor,
-    }))
-    .sort((a, b) => b.bonusMinor - a.bonusMinor || a.nicheName.localeCompare(b.nicheName));
+    .map((bucket) => {
+      const rate = rateFor(rates, bucket.nicheId);
+      return {
+        nicheId: bucket.nicheId,
+        nicheName: bucket.nicheName,
+        thresholdApplied: bucket.thresholdApplied,
+        windowHoursApplied: bucket.windowHoursApplied,
+        hitCount: bucket.hitCount,
+        hitPaymentMinor: rate,
+        bonusMinor: rate === null ? null : bucket.hitCount * rate,
+      };
+    })
+    // Unpriced lines sort last rather than as zeroes: an unknown amount is not
+    // a small one, and putting it at the bottom keeps the money that IS known
+    // in the order every other breakdown on the product uses.
+    .sort(
+      (a, b) => (b.bonusMinor ?? -1) - (a.bonusMinor ?? -1) || a.nicheName.localeCompare(b.nicheName),
+    );
+}
+
+/**
+ * What a frozen record's per-niche lines were paid at.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A RECOVERY AND NOT A LOOKUP
+ * ---------------------------------------------------------------------------
+ * `PayrollRecord` has ONE `hitPaymentMinor` column and `PayrollHit` has none,
+ * and the schema is not ours to change. That was enough when the rate belonged
+ * to the person; it is not enough now that it belongs to the niche, because one
+ * record can hold GTA hits at one price and Minecraft hits at another.
+ *
+ * So there are two cases and they are handled differently on purpose:
+ *
+ *   ONE RATE — `record.hitPaymentMinor > 0`. The record was paid at a single
+ *     price, that price is stored, and every line uses it. No recovery, no
+ *     guard, nothing to go stale. This is the ordinary case and it is why the
+ *     payslip still reads "120 hits × $5 = $600" without any of the machinery
+ *     below ever running.
+ *
+ *   SEVERAL RATES — `record.hitPaymentMinor === 0` with hits on the record. The
+ *     stored column cannot say what each niche paid, so the rates are recovered
+ *     from the niches themselves and then CHECKED: the recovered rates must
+ *     reproduce `record.hitBonusMinor` exactly. If they do, they are the rates
+ *     that produced it and the lines can state them. If they do not — a niche
+ *     repriced since, a niche deleted, a niche moved to watchlist — the lines
+ *     state no rate at all rather than a plausible wrong one.
+ *
+ * THE CHECK IS THE WHOLE POINT. Reading today's `Niche.hitPaymentMinor` and
+ * printing it beside a bonus paid in March would describe a rule that was never
+ * applied — the same failure `loadHitWindowsForRecords` guards against on the
+ * window, answered the same way: when the recovered evidence disagrees with
+ * what was recorded, the field goes null and the screen says so.
+ *
+ * NOTHING HERE CHANGES A FIGURE. The record's `hitCount`, `hitBonusMinor` and
+ * `totalMinor` are read verbatim, as they always were; this only decides
+ * whether the breakdown underneath them can name a price.
+ */
+interface RecoveredRates {
+  /** The record's single stored rate, or 0 when it had more than one. */
+  readonly uniform: number;
+  /** Per-niche rates, present only when they were recovered AND verified. */
+  readonly byNicheId: ReadonlyMap<string, number> | null;
+}
+
+/** A record paid at one stored rate needs no recovery at all. */
+function uniformRates(hitPaymentMinor: number): RecoveredRates {
+  return { uniform: hitPaymentMinor, byNicheId: null };
+}
+
+function rateFor(rates: RecoveredRates, nicheId: string | null): number | null {
+  if (rates.uniform > 0) return rates.uniform;
+  if (nicheId === null || rates.byNicheId === null) return null;
+  return rates.byNicheId.get(nicheId) ?? null;
+}
+
+/**
+ * The record shape this recovery needs: the money it was paid, and its hits.
+ *
+ * Structural rather than `StoredRecord`, so the employee's own narrow
+ * history-breakdown projection can go through the identical routine. Two
+ * recoveries for one number is how a payslip and the admin's copy of it start
+ * naming different prices for the same month.
+ */
+interface RecoverableRecord {
+  readonly hitPaymentMinor: number;
+  readonly hitBonusMinor: number;
+  readonly hits: readonly { readonly nicheId: string | null }[];
+}
+
+async function recoverNicheRates(
+  organizationId: string,
+  records: readonly RecoverableRecord[],
+): Promise<ReadonlyMap<RecoverableRecord, RecoveredRates>> {
+  const recovered = new Map<RecoverableRecord, RecoveredRates>();
+
+  // Only records that genuinely span several rates need anything looked up.
+  const ambiguous = new Set(
+    records.filter((record) => record.hitPaymentMinor <= 0 && record.hits.length > 0),
+  );
+  for (const record of records) {
+    if (!ambiguous.has(record)) recovered.set(record, uniformRates(record.hitPaymentMinor));
+  }
+  if (ambiguous.size === 0) return recovered;
+
+  const nicheIds = [
+    ...new Set(
+      [...ambiguous].flatMap((record) =>
+        record.hits.flatMap((hit) => (hit.nicheId === null ? [] : [hit.nicheId])),
+      ),
+    ),
+  ];
+
+  const niches = nicheIds.length
+    ? await prisma.niche.findMany({
+        // `organizationId` first, always. A niche id from another workspace must
+        // read as absent rather than as a price.
+        where: { organizationId, id: { in: nicheIds } },
+        select: { id: true, kind: true, hitPaymentMinor: true },
+      })
+    : [];
+
+  const rateByNicheId = new Map<string, number>();
+  for (const niche of niches) {
+    // A watchlist niche pays nothing today, so it cannot be evidence for what
+    // something was paid. It is left out, the sum below will not reconcile, and
+    // the lines say nothing rather than something wrong.
+    if (toNicheKind(niche.kind) === "watchlist") continue;
+    if (niche.hitPaymentMinor === null || niche.hitPaymentMinor <= 0) continue;
+    rateByNicheId.set(niche.id, niche.hitPaymentMinor);
+  }
+
+  for (const record of ambiguous) {
+    const counts = new Map<string, number>();
+    let recoverable = true;
+
+    for (const hit of record.hits) {
+      if (hit.nicheId === null || !rateByNicheId.has(hit.nicheId)) {
+        recoverable = false;
+        break;
+      }
+      counts.set(hit.nicheId, (counts.get(hit.nicheId) ?? 0) + 1);
+    }
+
+    if (recoverable) {
+      let total = 0;
+      for (const [nicheId, count] of counts) total += count * (rateByNicheId.get(nicheId) ?? 0);
+      // THE GUARD. Rates that do not reproduce the bonus that was actually paid
+      // are rates that have moved since, and quoting them would explain a
+      // February payslip with a March decision.
+      recoverable = total === record.hitBonusMinor;
+    }
+
+    recovered.set(record, {
+      uniform: 0,
+      byNicheId: recoverable
+        ? new Map([...counts.keys()].map((id) => [id, rateByNicheId.get(id) ?? 0]))
+        : null,
+    });
+  }
+
+  return recovered;
 }
 
 function totalsFrom(

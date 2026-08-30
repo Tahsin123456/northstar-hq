@@ -13,7 +13,7 @@ export const dynamic = "force-dynamic";
  * each account rather than removing it: the account, the invitation behind it
  * and the audit entry recorded for it are the evidence that somebody applied
  * and was refused, and a hard delete would erase the decision along with its
- * subject. An admin who changes their mind reactivates from the Users screen.
+ * subject. An admin who changes their mind reactivates from the People screen.
  *
  * `reason` is optional, applies to the whole batch, and is written into each
  * denial's own audit entry — never into a single batch record, so a person's

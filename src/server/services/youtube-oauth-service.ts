@@ -3,12 +3,12 @@ import "server-only";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { prisma } from "@/server/db";
-import { AppError, errors } from "@/server/errors";
+import { AppError, errors, toAppError } from "@/server/errors";
 import { authEnv, resolveAppUrl } from "@/server/auth/auth-env";
 import { decryptSecret, encryptSecret } from "@/server/auth/crypto";
 import { requireGoogleOAuthConfig } from "@/server/auth/google-oauth-env";
-import type { YouTubeConnectionDTO } from "@/lib/dto";
-import { upsertChannel } from "./channel-sync";
+import type { ChannelDataSource, OwnChannelDTO, YouTubeConnectionDTO } from "@/lib/dto";
+import { upsertChannel, type ChannelCredential } from "./channel-sync";
 import { getCurrentOrgId } from "./user-service";
 import type { RawChannelItem, RawListResponse, RawThumbnails, YouTubeChannel } from "./youtube/types";
 
@@ -635,17 +635,34 @@ function normalizeChannel(item: RawChannelItem): YouTubeChannel | null {
 }
 
 /**
- * The channel the authorising account owns, via `channels?mine=true`.
+ * EVERY channel the authorising account owns, via `channels?mine=true`.
  *
- * Authorised with the bearer token, so it needs no API key and spends the
- * account's own quota rather than the shared one. Returns null when the account
- * has no channel — a real state for a Workspace account that was only ever a
- * viewer, and not an error worth failing a connection over.
+ * Authorised with the bearer token, so it needs no API key and is charged to the
+ * OAuth client's own project rather than to the shared key every competitor
+ * refresh is also spending.
+ *
+ * WHY THE LIST AND NOT `items[0]`
+ * This used to take the first item and discard the rest, which is right for the
+ * overwhelmingly common case — Google's consent screen makes the person choose
+ * ONE channel, and the token is scoped to it — and silently wrong for the case
+ * that matters most to a studio: an account that comes back with more than one.
+ * Reading the whole list costs nothing extra (it is the same single response)
+ * and it is what lets the owner add their channels without pasting an id, which
+ * they asked for by name. Callers that genuinely want one channel — the callback
+ * keying a connection row — take the first from this list and say so.
+ *
+ * An empty array is a real state, not an error: a Workspace account that was
+ * only ever a viewer owns no channel, and that is not worth failing a connection
+ * over.
  */
-async function fetchOwnChannel(accessToken: string): Promise<YouTubeChannel | null> {
+async function fetchOwnChannels(accessToken: string): Promise<YouTubeChannel[]> {
   const url = new URL(`${YOUTUBE_API_BASE}/channels`);
   url.searchParams.set("part", "snippet,statistics,contentDetails,brandingSettings");
   url.searchParams.set("mine", "true");
+  // The API's own ceiling. `mine=true` realistically returns one channel, but
+  // asking for one would make "the account owns several" indistinguishable from
+  // "the account owns one" in the response we get back.
+  url.searchParams.set("maxResults", "50");
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -660,14 +677,18 @@ async function fetchOwnChannel(accessToken: string): Promise<YouTubeChannel | nu
     if (!response.ok) {
       throw new AppError(
         "UPSTREAM_ERROR",
-        "YouTube would not say which channel this Google account owns. Try connecting again.",
+        "YouTube would not say which channels this Google account owns. Try connecting again.",
         { internalMessage: `channels?mine=true returned HTTP ${response.status}` },
       );
     }
 
     const data = (await response.json()) as RawListResponse<RawChannelItem>;
-    const item = data.items?.[0];
-    return item ? normalizeChannel(item) : null;
+    const channels: YouTubeChannel[] = [];
+    for (const item of data.items ?? []) {
+      const channel = normalizeChannel(item);
+      if (channel) channels.push(channel);
+    }
+    return channels;
   } catch (error) {
     if (error instanceof AppError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
@@ -679,6 +700,19 @@ async function fetchOwnChannel(accessToken: string): Promise<YouTubeChannel | nu
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * The one channel a connection ROW is keyed on.
+ *
+ * `channels?mine=true` returns the channels the token can act as, and the
+ * connection row holds exactly one `youtubeChannelId` because that is what the
+ * `(organization, channel)` unique is for. Taking the first is therefore not an
+ * arbitrary choice — it is the same channel Google scoped the consent to, and
+ * the one every subsequent Analytics call names explicitly.
+ */
+async function fetchOwnChannel(accessToken: string): Promise<YouTubeChannel | null> {
+  return (await fetchOwnChannels(accessToken))[0] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1117,4 +1151,369 @@ async function revokeAtGoogle(token: string): Promise<boolean> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// ---------------------------------------------------------------------------
+// WHICH CHANNELS ARE OURS, AND WHAT READS THEM
+// ---------------------------------------------------------------------------
+
+/**
+ * =========================================================================
+ * THE OWNER'S RULE, AND THE ONE DECISION IT FORCES
+ * =========================================================================
+ *
+ * "My own channels data should only come from that, not from external API or
+ * sources." A channel reached through a connection is therefore read with that
+ * connection's grant — authoritative, not limited to what YouTube shows the
+ * public, and charged to the OAuth client's project rather than to the shared
+ * key every competitor refresh is also spending. Competitors are unchanged:
+ * there is no other way to see them.
+ *
+ * THE HARD CASE IS A CONNECTION THAT HAS STOPPED WORKING, and it has exactly two
+ * possible answers, both of which the brief names as unacceptable if done
+ * silently: fall back to the public key, or stop updating.
+ *
+ * This picks STOP, and makes it loud.
+ *
+ * Falling back is the worse of the two and it is not close. It would answer a
+ * revoked grant by going and reading the same channel through precisely the
+ * source the owner said not to use for their own channels — and it would do it
+ * invisibly, because a public read SUCCEEDS. The dashboard would fill with
+ * plausible numbers, subtly different from the private ones, with nothing
+ * anywhere to say the source had changed underneath them. A studio would find
+ * out when a figure failed to match YouTube Studio and nobody could say why.
+ *
+ * Stopping is visible by construction: the sync records the failure on the
+ * channel, `lastFetchStatus` goes to "error", the channel's `dataSource` becomes
+ * "connection_unavailable", and the channels screen, the channel page and the
+ * connect panel all say the figures are frozen and name reconnection as the fix.
+ * Nothing is lost that reconnecting does not restore, and nothing on screen is a
+ * number from a source the reader did not agree to.
+ *
+ * A channel with NO connection is a different question and gets a different
+ * answer: nothing has been withdrawn, the public API is the only source that
+ * ever applied, and it keeps reading exactly as before. The screen still says
+ * so, because "these are the public figures" is worth knowing about a channel
+ * you own.
+ */
+
+/** Connections in one workspace that name a channel, keyed by YouTube id. */
+async function connectionsByChannel(
+  organizationId: string,
+): Promise<Map<string, { id: string; status: string; label: string }>> {
+  const rows = await prisma.youTubeConnection.findMany({
+    where: { organizationId, youtubeChannelId: { not: null } },
+    select: {
+      id: true,
+      status: true,
+      youtubeChannelId: true,
+      channelTitle: true,
+      googleAccountEmail: true,
+    },
+    // Oldest first, so a duplicate — which the (organization, channel) unique
+    // makes impossible today — would resolve to the same connection on every
+    // run rather than alternating between them.
+    orderBy: { createdAt: "asc" },
+  });
+
+  const byChannel = new Map<string, { id: string; status: string; label: string }>();
+  for (const row of rows) {
+    if (!row.youtubeChannelId || byChannel.has(row.youtubeChannelId)) continue;
+    byChannel.set(row.youtubeChannelId, {
+      id: row.id,
+      status: row.status,
+      label: row.channelTitle ?? row.googleAccountEmail ?? "Google account",
+    });
+  }
+  return byChannel;
+}
+
+/**
+ * Where each channel's figures come from, for a whole tracker at once.
+ *
+ * DELIBERATELY MINTS NO TOKENS. This runs on every dataset read to fill in
+ * `ChannelDTO.dataSource`, and a version that proved each grant still worked
+ * would put one or more Google round trips on the path of every dashboard load.
+ * It reports the STORED condition of the connection, which is what a screen
+ * needs: "connected" means the last thing that used it succeeded, and the moment
+ * one does not, `refreshAccessToken` writes `needs_reauth` and this starts
+ * saying so. The sync path is the one that has to be certain, and it is the one
+ * that actually asks — see `resolveChannelCredential`.
+ */
+export async function channelDataSources(
+  organizationId: string,
+  youtubeChannelIds: readonly string[],
+): Promise<Map<string, ChannelDataSource>> {
+  const sources = new Map<string, ChannelDataSource>(
+    youtubeChannelIds.map((id) => [id, "public" as ChannelDataSource]),
+  );
+  if (youtubeChannelIds.length === 0) return sources;
+
+  const byChannel = await connectionsByChannel(organizationId);
+  for (const youtubeChannelId of youtubeChannelIds) {
+    const connection = byChannel.get(youtubeChannelId);
+    if (!connection) continue;
+    sources.set(
+      youtubeChannelId,
+      connection.status === "connected" ? "connection" : "connection_unavailable",
+    );
+  }
+  return sources;
+}
+
+/**
+ * The credential one channel's sync should actually use, resolved for real.
+ *
+ * Unlike `channelDataSources` this DOES mint a token, because the sync is about
+ * to spend a request on it and "the row says connected" is not the same claim as
+ * "Google will still honour it". `getValidAccessToken` refreshes when the stored
+ * access token is near expiry and records `needs_reauth` when the grant is gone,
+ * so a connection that died since the last run is discovered here — once — and
+ * the channel is reported as frozen rather than quietly re-read with the shared
+ * key.
+ *
+ * Never throws for a broken connection. A dead grant is a state to report, not
+ * an exception to unwind a scheduled sweep with: the other channels in the run
+ * are unaffected and must still be refreshed.
+ */
+export async function resolveChannelCredential(
+  organizationId: string,
+  youtubeChannelId: string,
+): Promise<ChannelCredential> {
+  const byChannel = await connectionsByChannel(organizationId);
+  const connection = byChannel.get(youtubeChannelId);
+
+  // No connection has ever been made for this channel, so nothing has been
+  // withdrawn and the public API is not a fallback — it is the only source that
+  // was ever in play. Competitors take this path, and so does an own channel
+  // somebody added by pasting a link before the account was connected.
+  if (!connection) return { source: "public" };
+
+  if (connection.status !== "connected") {
+    return {
+      source: "connection_unavailable",
+      connectionId: connection.id,
+      label: connection.label,
+      reason:
+        `The Google account behind ${connection.label} needs to be reconnected. This channel is ` +
+        "read with that account's own authorisation and is not read from the public API instead, " +
+        "so its figures stay frozen at the last successful sync until the account is reconnected " +
+        "from Admin → YouTube.",
+    };
+  }
+
+  try {
+    const accessToken = await getValidAccessToken(connection.id);
+    return {
+      source: "connection",
+      label: connection.label,
+      credential: { accessToken, connectionId: connection.id },
+    };
+  } catch (caught) {
+    // `getValidAccessToken` has already written `needs_reauth` and a readable
+    // reason on the connection when the grant is gone. Its message is reused
+    // rather than replaced, so the channel and the admin screen say the same
+    // thing about the same failure.
+    return {
+      source: "connection_unavailable",
+      connectionId: connection.id,
+      label: connection.label,
+      reason: toAppError(caught).userMessage,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DISCOVERING THE CONNECTED ACCOUNT'S OWN CHANNELS
+// ---------------------------------------------------------------------------
+
+/**
+ * Every channel this workspace's connections own, with what the tracker already
+ * knows about each.
+ *
+ * THE POINT OF CONNECTING. The owner asked, in this round and the last, that
+ * after connecting their channels be discoverable and addable without anybody
+ * pasting a channel id — and they are right that pasting one is the weak link:
+ * it asks a person to re-type something Google has already told us, and a
+ * mistyped id tracks a stranger's channel as your own with no signal that
+ * anything went wrong.
+ *
+ * One Data API call per connection, and only when somebody opens a screen that
+ * offers the list. A connection that cannot currently mint a token contributes
+ * nothing rather than failing the whole list: one expired grant must not hide
+ * the channels of three working ones.
+ */
+export async function listOwnChannels(
+  organizationId: string,
+): Promise<readonly OwnChannelDTO[]> {
+  const connections = await prisma.youTubeConnection.findMany({
+    where: { organizationId, status: "connected" },
+    select: { id: true, googleAccountEmail: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (connections.length === 0) return [];
+
+  const discovered: {
+    connectionId: string;
+    email: string | null;
+    channel: YouTubeChannel;
+  }[] = [];
+
+  for (const connection of connections) {
+    try {
+      const accessToken = await getValidAccessToken(connection.id);
+      for (const channel of await fetchOwnChannels(accessToken)) {
+        discovered.push({
+          connectionId: connection.id,
+          email: connection.googleAccountEmail,
+          channel,
+        });
+      }
+    } catch (error) {
+      // Logged without the token or the response body, and skipped. The
+      // connection's own row already carries the reason — `getValidAccessToken`
+      // records it — and Admin → YouTube is where that gets read.
+      console.warn(
+        "[youtube-oauth] could not list channels for a connection",
+        error instanceof Error ? error.name : "unknown error",
+      );
+    }
+  }
+
+  if (discovered.length === 0) return [];
+
+  // What the tracker already holds, in one query rather than one per channel.
+  const tracked = await prisma.trackedChannel.findMany({
+    where: {
+      organizationId,
+      channel: { youtubeChannelId: { in: discovered.map((row) => row.channel.channelId) } },
+    },
+    select: {
+      isActive: true,
+      ownershipType: true,
+      channel: { select: { youtubeChannelId: true } },
+    },
+  });
+  const trackedByChannel = new Map(tracked.map((row) => [row.channel.youtubeChannelId, row]));
+
+  return discovered.map(({ connectionId, email, channel }) => {
+    const existing = trackedByChannel.get(channel.channelId) ?? null;
+    return {
+      connectionId,
+      googleAccountEmail: email,
+      youtubeChannelId: channel.channelId,
+      title: channel.title,
+      handle: channel.handle,
+      avatarUrl: channel.avatarUrl,
+      // Null rather than 0 when hidden, exactly as `toChannelDTO` does: a
+      // hidden count is not a count of zero.
+      subscriberCount: channel.hiddenSubscriberCount ? null : channel.subscriberCount,
+      hiddenSubscriberCount: channel.hiddenSubscriberCount,
+      videoCount: channel.videoCount,
+      alreadyTracked: existing?.isActive === true && existing.ownershipType === "own",
+      previouslyRemoved: existing !== null && existing.isActive === false,
+      trackedAsCompetitor: existing?.isActive === true && existing.ownershipType !== "own",
+    };
+  });
+}
+
+export interface TrackOwnChannelResult {
+  /** The internal `Channel.id`, so the caller can sync it and link to it. */
+  readonly channelId: string;
+  readonly title: string;
+  /** False when the row already existed and was re-scoped or reactivated. */
+  readonly created: boolean;
+  readonly restored: boolean;
+  /** It was in the tracker as a competitor and has been corrected. */
+  readonly reclassified: boolean;
+}
+
+/**
+ * Add one of the connected account's own channels to the tracker.
+ *
+ * The channel is identified by its YouTube id, and that id is NOT taken from the
+ * request and trusted: it is matched against the channels the connection itself
+ * reports owning, and anything else is refused. That check is the whole security
+ * property of this endpoint — without it, "add my channel" would be an arbitrary
+ * "mark any channel on YouTube as ours", and `ownershipType: "own"` is the flag
+ * that decides which figures the studio reports as its own work.
+ *
+ * The channel row is written from the OAuth payload rather than re-fetched with
+ * the shared key, which is the same rule the rest of this change follows: an own
+ * channel's data comes from the connection, including on the very first write.
+ */
+export async function trackOwnChannel(options: {
+  organizationId: string;
+  userId: string;
+  connectionId: string;
+  youtubeChannelId: string;
+}): Promise<TrackOwnChannelResult> {
+  const connection = await prisma.youTubeConnection.findFirst({
+    // Org-scoped, so a connection id from another workspace resolves to nothing
+    // rather than lending its grant to this one.
+    where: { id: options.connectionId, organizationId: options.organizationId },
+    select: { id: true },
+  });
+  if (!connection) throw errors.notFound("YouTube connection");
+
+  const owned = await fetchOwnChannels(await getValidAccessToken(connection.id));
+  const resolved = owned.find((channel) => channel.channelId === options.youtubeChannelId);
+  if (!resolved) {
+    throw errors.invalidInput(
+      "That channel is not one this connected Google account owns, so it cannot be added as one " +
+        "of yours from here. Reconnect using the account that owns it, or add it as a competitor " +
+        "from the Add Channel dialog.",
+    );
+  }
+
+  const channelRow = await upsertChannel(resolved);
+
+  const existing = await prisma.trackedChannel.findUnique({
+    where: {
+      organizationId_channelId: {
+        organizationId: options.organizationId,
+        channelId: channelRow.id,
+      },
+    },
+    select: { id: true, isActive: true, ownershipType: true },
+  });
+
+  if (!existing) {
+    await prisma.trackedChannel.create({
+      data: {
+        organizationId: options.organizationId,
+        // Attribution only, as everywhere else: the row belongs to the
+        // organization, not to whoever pressed the button.
+        createdById: options.userId,
+        channelId: channelRow.id,
+        ownershipType: "own",
+      },
+    });
+    return {
+      channelId: channelRow.id,
+      title: resolved.title,
+      created: true,
+      restored: false,
+      reclassified: false,
+    };
+  }
+
+  await prisma.trackedChannel.update({
+    where: { id: existing.id },
+    // Reactivated as well as re-scoped, for the same reason
+    // `linkConnectionToTrackedChannel` does it: adding a channel the connected
+    // account provably owns is an unambiguous statement that it belongs here.
+    data: { ownershipType: "own", isActive: true, removedAt: null },
+  });
+
+  return {
+    channelId: channelRow.id,
+    title: resolved.title,
+    created: false,
+    restored: existing.isActive === false,
+    // Worth reporting separately: nothing was added, a mislabelled channel was
+    // corrected — and that correction is what makes it start reading through
+    // the connection instead of the public API.
+    reclassified: existing.isActive === true && existing.ownershipType !== "own",
+  };
 }

@@ -32,15 +32,79 @@ import {
 const SEVEN_DAYS = 168;
 const TWO_DAYS = 48;
 
+/**
+ * THE RATE IS ON THE NICHE, which is what these fixtures now say. It used to be
+ * one number on the employee, applied to every hit they earned; a hit in a
+ * niche that takes a day to produce is not worth the same as one that takes an
+ * hour, so the price is a property of the work.
+ */
 const NICHES: PayrollNiche[] = [
-  { id: "gta", name: "GTA", hitThreshold: 1_000_000, hitWindowHours: SEVEN_DAYS },
-  { id: "rdr", name: "Red Dead Redemption", hitThreshold: 750_000, hitWindowHours: SEVEN_DAYS },
-  { id: "tlou", name: "The Last of Us", hitThreshold: 500_000, hitWindowHours: SEVEN_DAYS },
+  {
+    id: "gta",
+    name: "GTA",
+    kind: "production",
+    hitPaymentMinor: 1_000, // $10.00
+    hitThreshold: 1_000_000,
+    hitWindowHours: SEVEN_DAYS,
+  },
+  {
+    id: "rdr",
+    name: "Red Dead Redemption",
+    kind: "production",
+    hitPaymentMinor: 1_000,
+    hitThreshold: 750_000,
+    hitWindowHours: SEVEN_DAYS,
+  },
+  {
+    id: "tlou",
+    name: "The Last of Us",
+    kind: "production",
+    hitPaymentMinor: 500, // $5.00 — a cheaper niche, deliberately
+    hitThreshold: 500_000,
+    hitWindowHours: SEVEN_DAYS,
+  },
   // Nobody has said what a hit is here. Nothing in it can be one.
-  { id: "science", name: "Science", hitThreshold: null, hitWindowHours: null },
+  {
+    id: "science",
+    name: "Science",
+    kind: "production",
+    hitPaymentMinor: 1_000,
+    hitThreshold: null,
+    hitWindowHours: null,
+  },
   // Half a rule: a bar with no clock. Exactly as unscoreable as no bar at all,
   // and the case the skipped-niche notice could not express before.
-  { id: "history", name: "History", hitThreshold: 250_000, hitWindowHours: null },
+  {
+    id: "history",
+    name: "History",
+    kind: "production",
+    hitPaymentMinor: 1_000,
+    hitThreshold: 250_000,
+    hitWindowHours: null,
+  },
+  // THE THIRD WAY TO BE HALF-CONFIGURED: a complete rule and no price. It
+  // scores perfectly on every chart and pays nobody, which is invisible until a
+  // payroll run — hence the notice this fixture exists to pin down.
+  {
+    id: "unpriced",
+    name: "Unpriced",
+    kind: "production",
+    hitPaymentMinor: null,
+    hitThreshold: 500_000,
+    hitWindowHours: SEVEN_DAYS,
+  },
+  // A niche Northstar watches rather than publishes into. A complete rule and a
+  // LOW bar, so that if it were ever allowed to judge a Short it would win
+  // `pickGoverningRule` outright — which is exactly the failure the engine has
+  // to refuse. Its stored rate is deliberately non-null: nothing may read it.
+  {
+    id: "faceless",
+    name: "Faceless Finance",
+    kind: "watchlist",
+    hitPaymentMinor: 9_999,
+    hitThreshold: 100_000,
+    hitWindowHours: SEVEN_DAYS,
+  },
 ];
 
 const AUGUST = periodForMonth(2026, 8);
@@ -53,7 +117,8 @@ const employee = (overrides: Partial<PayrollEmployee> = {}): PayrollEmployee => 
   email: "john@northstarstudios.cc",
   role: "head_of_shorts",
   salaryMinor: 400_000, // $4,000.00
-  hitPaymentMinor: 1_000, // $10.00
+  // No `hitPaymentMinor` here, and the absence is the change: the rate lives on
+  // the niche, and `PayrollEmployee` has no field for one any more.
   currency: "USD",
   nicheIds: ["gta", "rdr", "tlou"],
   joinedOnMs: null,
@@ -145,8 +210,11 @@ describe("the brief's worked example", () => {
     expect(rdr?.bonusMinor).toBe(80_000); // $800
   });
 
-  it("pays the editor a different rate for the same channel's hits", () => {
-    // Alex: $2,000 salary, $5/hit, GTA only, 140 hits -> $2,700.
+  it("pays the niche's rate, not the person's, for the same Short", () => {
+    // Alex: $2,000 salary, 140 GTA hits. GTA pays $10, so $1,400 of bonus —
+    // the same $1,400 anybody else assigned to GTA would earn for the same
+    // work. Paying two editors differently for the identical Short was never
+    // what anybody meant, and this is the test that used to assert it.
     const shorts = Array.from({ length: 140 }, () => hit({ views: 1_200_000 }));
     const result = run(
       employee({
@@ -154,14 +222,42 @@ describe("the brief's worked example", () => {
         name: "Alex",
         role: "short_form_editor",
         salaryMinor: 200_000,
-        hitPaymentMinor: 500,
         nicheIds: ["gta"],
       }),
       shorts,
     );
 
     expect(result.hitCount).toBe(140);
-    expect(result.totalMinor).toBe(270_000); // $2,700
+    expect(result.hitBonusMinor).toBe(140_000); // $1,400
+    expect(result.totalMinor).toBe(340_000); // $3,400
+  });
+
+  it("prices each niche's hits at that niche's own rate", () => {
+    // GTA pays $10, The Last of Us pays $5. One record, two rates, and the
+    // total is the sum of the lines rather than a count times one number.
+    const shorts = [
+      ...Array.from({ length: 10 }, () => hit({ nicheIds: ["gta"], views: 1_500_000 })),
+      ...Array.from({ length: 10 }, () => hit({ nicheIds: ["tlou"], views: 600_000 })),
+    ];
+
+    const result = run(employee({ salaryMinor: 0 }), shorts);
+
+    expect(result.byNiche.find((n) => n.nicheId === "gta")?.hitPaymentMinor).toBe(1_000);
+    expect(result.byNiche.find((n) => n.nicheId === "tlou")?.hitPaymentMinor).toBe(500);
+    expect(result.hitBonusMinor).toBe(15_000); // 10 x $10 + 10 x $5
+    // No single rate describes this record, and 0 says so rather than averaging
+    // $10 and $5 into a $7.50 nobody was ever paid.
+    expect(result.hitPaymentMinor).toBe(0);
+  });
+
+  it("reports one rate on a record that only earned at one", () => {
+    const result = run(
+      employee({ nicheIds: ["tlou"], salaryMinor: 0 }),
+      Array.from({ length: 4 }, () => hit({ nicheIds: ["tlou"], views: 600_000 })),
+    );
+
+    expect(result.hitPaymentMinor).toBe(500);
+    expect(result.hitBonusMinor).toBe(2_000);
   });
 });
 
@@ -438,7 +534,7 @@ describe("an incomplete rule cannot produce a hit", () => {
 
     expect(result.hitCount).toBe(0);
     expect(result.skippedNiches).toEqual([
-      { nicheId: "history", nicheName: "History", missing: "window", shortCount: 1 },
+      { nicheId: "history", nicheName: "History", missing: { rule: "window", payment: false }, shortCount: 1 },
     ]);
   });
 
@@ -448,10 +544,11 @@ describe("an incomplete rule cannot produce a hit", () => {
       hit({ nicheIds: ["history"], views: 5_000_000 }),
     ]);
 
-    // "Set a threshold" and "set a window" are two different fields. A notice
-    // that said only "unconfigured" would make an admin go and find out which.
+    // "Set a threshold", "set a window" and "set a payment" are three different
+    // fields. A notice that said only "unconfigured" would make an admin go and
+    // find out which.
     expect(
-      result.skippedNiches.map((niche) => [niche.nicheName, niche.missing]).sort(),
+      result.skippedNiches.map((niche) => [niche.nicheName, niche.missing.rule]).sort(),
     ).toEqual([
       ["History", "window"],
       ["Science", "both"],
@@ -470,7 +567,7 @@ describe("an incomplete rule cannot produce a hit", () => {
     // shrinks is indistinguishable from a bug, so the calculation has to be
     // able to say what it could not judge and why.
     expect(result.skippedNiches).toEqual([
-      { nicheId: "science", nicheName: "Science", missing: "both", shortCount: 2 },
+      { nicheId: "science", nicheName: "Science", missing: { rule: "both", payment: false }, shortCount: 2 },
     ]);
   });
 
@@ -492,7 +589,7 @@ describe("an incomplete rule cannot produce a hit", () => {
     // judged, and it lost. Only Science, which could not be judged at all, is
     // reported, and only the Short that is actually in it.
     expect(result.skippedNiches).toEqual([
-      { nicheId: "science", nicheName: "Science", missing: "both", shortCount: 1 },
+      { nicheId: "science", nicheName: "Science", missing: { rule: "both", payment: false }, shortCount: 1 },
     ]);
   });
 
@@ -523,10 +620,10 @@ describe("an incomplete rule cannot produce a hit", () => {
   });
 
   it("reports nothing for somebody who could not have earned a bonus anyway", () => {
-    // No per-hit rate: this person's bonus is zero for a reason that has
-    // nothing to do with a rule, and an alarm here would point at the wrong
-    // problem.
-    const result = run(employee({ nicheIds: ["science"], hitPaymentMinor: 0 }), [
+    // No niche assignments at all: this person's bonus is zero for a reason
+    // that has nothing to do with a niche's configuration, and an alarm here
+    // would point at the wrong problem.
+    const result = run(employee({ nicheIds: [] }), [
       hit({ nicheIds: ["science"], views: 5_000_000 }),
     ]);
 
@@ -579,7 +676,7 @@ describe("an incomplete rule cannot produce a hit", () => {
     });
 
     expect(team.skippedNiches).toEqual([
-      { nicheId: "science", nicheName: "Science", missing: "both", shortCount: 2 },
+      { nicheId: "science", nicheName: "Science", missing: { rule: "both", payment: false }, shortCount: 2 },
     ]);
     // Salary only, for both.
     expect(team.totalMinor).toBe(800_000);
@@ -878,7 +975,12 @@ describe("no double counting", () => {
     const result = run(employee(), [hit({ nicheIds: ["gta", "tlou"], views: 1_500_000 })]);
 
     expect(result.hitCount).toBe(1);
-    expect(result.hitBonusMinor).toBe(1_000); // one $10 bonus, not two
+    // ONE bonus, not two — and it is TLOU's $5 rather than GTA's $10, because
+    // the lowest bar governs and the rate follows the same attribution the hit
+    // does. There is deliberately no second ranking that could pick a different
+    // niche to price it from.
+    expect(result.hits[0]?.nicheId).toBe("tlou");
+    expect(result.hitBonusMinor).toBe(500);
   });
 
   it("credits an ambiguous Short to the lowest threshold", () => {
@@ -974,10 +1076,25 @@ describe("what does not earn a bonus", () => {
     expect(result.totalMinor).toBe(400_000);
   });
 
-  it("pays no bonus when the hit rate is zero", () => {
-    const result = run(employee({ hitPaymentMinor: 0 }), [hit({ views: 5_000_000 })]);
+  it("pays no bonus when the niche has no rate, and says so", () => {
+    const result = run(employee({ nicheIds: ["unpriced"] }), [
+      hit({ nicheIds: ["unpriced"], views: 5_000_000 }),
+    ]);
+
+    // The hit was found — the rule is complete — and it earned nothing.
+    expect(result.hitCount).toBe(0);
     expect(result.hitBonusMinor).toBe(0);
     expect(result.totalMinor).toBe(400_000);
+
+    // And it is reported rather than disappearing into a smaller total.
+    expect(result.skippedNiches).toEqual([
+      {
+        nicheId: "unpriced",
+        nicheName: "Unpriced",
+        missing: { rule: null, payment: true },
+        shortCount: 1,
+      },
+    ]);
   });
 });
 
@@ -1025,7 +1142,7 @@ describe("the team run", () => {
     const shorts = Array.from({ length: 10 }, () => hit({ views: 2_000_000 }));
     const team = calculatePayrollRun({
       employees: [
-        employee({ userId: "u2", name: "Alex", salaryMinor: 200_000, hitPaymentMinor: 500, nicheIds: ["gta"] }),
+        employee({ userId: "u2", name: "Alex", salaryMinor: 200_000, nicheIds: ["gta"] }),
         employee(),
       ],
       shorts,
@@ -1034,18 +1151,21 @@ describe("the team run", () => {
       nowMs: NOW,
     });
 
-    // John: 400,000 + 10 x 1,000 = 410,000. Alex: 200,000 + 10 x 500 = 205,000.
+    // John: 400,000 + 10 x 1,000 = 410,000. Alex: 200,000 + 10 x 1,000 =
+    // 210,000. The bonus is identical because the work is: GTA pays GTA's rate.
     expect(team.calculations.map((c) => c.name)).toEqual(["John", "Alex"]);
-    expect(team.totalMinor).toBe(615_000);
+    expect(team.totalMinor).toBe(620_000);
   });
 
-  it("pays two people for the same Short at their own rates", () => {
+  it("pays two people for the same Short, each at the niche's rate", () => {
     // Not double counting — two separate obligations arising from one result.
+    // Both are $10 because both are GTA hits; the rate follows the work, not
+    // the person, so one Short costs the studio its niche rate twice over.
     const one = hit({ views: 2_000_000 });
     const team = calculatePayrollRun({
       employees: [
-        employee({ userId: "u1", hitPaymentMinor: 1_000, salaryMinor: 0 }),
-        employee({ userId: "u2", name: "Alex", hitPaymentMinor: 500, salaryMinor: 0, nicheIds: ["gta"] }),
+        employee({ userId: "u1", salaryMinor: 0 }),
+        employee({ userId: "u2", name: "Alex", salaryMinor: 0, nicheIds: ["gta"] }),
       ],
       shorts: [one],
       niches: NICHES,
@@ -1053,7 +1173,112 @@ describe("the team run", () => {
       nowMs: NOW,
     });
 
-    expect(team.totalMinor).toBe(1_500);
+    expect(team.totalMinor).toBe(2_000);
+  });
+});
+
+/**
+ * =========================================================================
+ * WATCHLIST NICHES, AND THE THIRD MISSING NUMBER
+ * =========================================================================
+ *
+ * The two pins the owner asked for, plus the one that makes the first of them
+ * load-bearing: a watchlist niche must not merely fail to pay, it must not be
+ * allowed to JUDGE — otherwise its low bar wins `pickGoverningRule` and
+ * silently swallows a hit a production niche would have paid for.
+ */
+describe("watchlist niches", () => {
+  it("pays nothing for a Short whose only niche is a watchlist one", () => {
+    const result = run(employee({ nicheIds: ["faceless"] }), [
+      hit({ nicheIds: ["faceless"], views: 5_000_000 }),
+    ]);
+
+    expect(result.hitCount).toBe(0);
+    expect(result.hitBonusMinor).toBe(0);
+    expect(result.totalMinor).toBe(400_000); // salary only
+  });
+
+  it("reports no configuration gap for one — there is nothing to configure", () => {
+    // The difference between this and `unpriced` above. Both pay nothing; only
+    // one of them is somebody's job to fix, and an alarm about the other would
+    // send an admin looking for a setting that should not exist.
+    const result = run(employee({ nicheIds: ["faceless"] }), [
+      hit({ nicheIds: ["faceless"], views: 5_000_000 }),
+    ]);
+
+    expect(result.skippedNiches).toEqual([]);
+  });
+
+  it("does not let a watchlist niche's lower bar swallow a production hit", () => {
+    // The Short is filed under both. Faceless Finance has the lower threshold,
+    // so it would win the governing-rule ranking if it were a candidate at all
+    // — and then pay nothing, cancelling a bonus GTA owes. It is not a
+    // candidate, so GTA judges it and GTA's rate applies.
+    const result = run(employee({ nicheIds: ["gta", "faceless"] }), [
+      hit({ nicheIds: ["gta", "faceless"], views: 2_000_000 }),
+    ]);
+
+    expect(result.hitCount).toBe(1);
+    expect(result.hits[0]?.nicheId).toBe("gta");
+    expect(result.hits[0]?.hitPaymentMinor).toBe(1_000);
+    expect(result.hitBonusMinor).toBe(1_000);
+  });
+});
+
+describe("a niche with a rule and no price", () => {
+  it("never records the hit, so setting the rate later cannot be blocked by it", () => {
+    // The reason an unpaid hit is reported rather than written as a zero-value
+    // credit: a `PayrollHit` row under a frozen record enters the paid ledger,
+    // and a Short in that ledger can never be credited again. Recording this
+    // one at zero would make it unpayable forever.
+    const result = run(employee({ nicheIds: ["unpriced"] }), [
+      hit({ nicheIds: ["unpriced"], views: 5_000_000 }),
+    ]);
+
+    expect(result.hits).toEqual([]);
+  });
+
+  it("is reported before finalize, at the run level, alongside a rule gap", () => {
+    const team = calculatePayrollRun({
+      employees: [employee({ nicheIds: ["unpriced", "science"] })],
+      shorts: [
+        hit({ nicheIds: ["unpriced"], views: 5_000_000 }),
+        hit({ nicheIds: ["science"], views: 5_000_000 }),
+      ],
+      niches: NICHES,
+      period: AUGUST,
+      nowMs: NOW,
+    });
+
+    // Both gaps, through one channel, each naming its own missing setting.
+    expect(
+      team.skippedNiches.map((n) => [n.nicheId, n.missing, n.shortCount]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["unpriced", { rule: null, payment: true }, 1],
+        ["science", { rule: "both", payment: false }, 1],
+      ]),
+    );
+  });
+
+  it("still counts an unpriced niche's hits for anyone else's paying niche", () => {
+    // A Short filed under both a paying niche and an unpriced one is paid by
+    // the niche that can pay, and is not reported as a gap: the lowest bar
+    // wins, and here that is the unpriced niche — so it IS the gap, and GTA
+    // does not get to quietly pay for a Short it did not govern.
+    const result = run(employee({ nicheIds: ["gta", "unpriced"] }), [
+      hit({ nicheIds: ["gta", "unpriced"], views: 2_000_000 }),
+    ]);
+
+    expect(result.hitCount).toBe(0);
+    expect(result.skippedNiches).toEqual([
+      {
+        nicheId: "unpriced",
+        nicheName: "Unpriced",
+        missing: { rule: null, payment: true },
+        shortCount: 1,
+      },
+    ]);
   });
 });
 

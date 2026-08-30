@@ -21,9 +21,9 @@ import { formatNumber } from "@/lib/format";
  * to a niche and every verb on this page had to name one before it could do
  * anything. That is reversed: a content type is a flat org-wide tag again, so
  * the page named after the thing is the page that manages it. There is no
- * second editing surface inside `/niches/[id]` any more, for the reason there
- * was never meant to be two — a taxonomy written from two screens is a taxonomy
- * whose rules drift.
+ * second editing surface on a niche any more — that page has since been removed
+ * altogether — for the reason there was never meant to be two: a taxonomy
+ * written from two screens is a taxonomy whose rules drift.
  *
  * SEARCH IS SERVER-SIDE, and that is why this page keeps its own query rather
  * than reading the catalogue out of the dataset like every chip in the app

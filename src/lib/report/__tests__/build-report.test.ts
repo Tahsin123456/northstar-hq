@@ -88,10 +88,13 @@ function channel(
       addedAt: NOW,
       isActive: true,
       ownershipType,
-      niches: [{ id: "n1", name: "GTA", colorIndex: 0 }],
-      // No editorial tags on the channel — the report does not read them, and
+      // The report does not read the source, so the fixture states the one a
+      // channel with no connection has rather than implying a connection.
+      dataSource: "public",
+      niches: [{ id: "n1", name: "GTA", colorIndex: 0, kind: "production" }],
+      // No editorial rules on the channel — the report does not read them, and
       // an empty list keeps that visible rather than implied.
-      contentTypeIds: [],
+      contentTypeRules: [],
     },
     videos: [
       ...views.map((v, i) => asVideoDTO(judged(v, i + 1))),
@@ -110,7 +113,9 @@ function dataset(channels: DatasetDTO["channels"]): DatasetDTO {
         id: "n1",
         name: "GTA",
         colorIndex: 0,
+        kind: "production",
         slug: "gta",
+        hitPaymentMinor: null,
         hitThreshold: null,
         hitWindowHours: null,
         sortOrder: 0,
@@ -219,7 +224,7 @@ describe("buildReport — data accuracy", () => {
         ...channel("other", "competitor", [5_000_000]),
         channel: {
           ...channel("other", "competitor", []).channel,
-          niches: [{ id: "n2", name: "RDR", colorIndex: 1 }],
+          niches: [{ id: "n2", name: "RDR", colorIndex: 1, kind: "production" }],
         },
       },
     ]);

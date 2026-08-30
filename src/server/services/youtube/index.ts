@@ -8,7 +8,7 @@
  */
 
 export { youtubeClient, QuotaLedger, QUOTA_COST, MAX_BATCH } from "./client";
-export type { YouTubeClient } from "./client";
+export type { YouTubeClient, YouTubeCredential } from "./client";
 
 export { resolveChannel, parseChannelInput } from "./channel-resolver";
 export type { ResolveResult } from "./channel-resolver";

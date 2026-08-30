@@ -118,14 +118,52 @@ export const AUDIT_ACTIONS = {
   /**
    * A channel's content-type tags changed — "what this channel makes".
    *
-   * UN-RETIRED, not reinvented. `ChannelContentType` is back now that content
-   * types are flat org-wide tags rather than a niche's private vocabulary, and
-   * reusing the original key is what keeps entries written before the round
-   * trip in one filter with the ones written after it. A new key would split
-   * the same event into two histories and make "who changed this channel's
-   * tags?" a question with two answers.
+   * HISTORICAL. Nothing writes this key any more: channel-wide tagging is a
+   * `ChannelContentTypeRule` now, and the three keys below record what happens
+   * to one. The key stays because the log does — entries written when a channel
+   * carried a flat tag set are still in the table, still answer "who changed
+   * this channel's tags?", and would render as a raw string if their label were
+   * deleted out from under them.
    */
   "contenttype.channel_assigned": "Channel content types changed",
+  /**
+   * A rule was applied to a channel — "everything this channel makes is a Funny
+   * Meme", with the back catalogue and every future upload included.
+   *
+   * ITS OWN KEY RATHER THAN THE HISTORICAL ONE ABOVE, because it is a bigger
+   * act than the thing that key described and the log should not flatten the
+   * two. A flat tag was a fact that could be un-set; a rule is a claim over a
+   * span of time that reaches Shorts published before anyone on the team joined,
+   * and it carries `effectiveFrom` in `metadata` so a reader can see how far
+   * back it reached.
+   */
+  "contenttype.channel_rule_applied": "Channel content type rule applied",
+  /**
+   * A rule stopped claiming new uploads.
+   *
+   * ONE KEY FOR BOTH DOORS, with `automatic` in `metadata` saying which. They
+   * are the same event — this rule now ends here — and an admin asking "when did
+   * we stop calling this channel's uploads Rankings?" wants both answers in one
+   * filter. What the metadata must never lose is WHICH, because "the app
+   * retired this after three corrections" and "Ada closed it" send a reader to
+   * completely different questions.
+   *
+   * The entry is attributed to whoever made the removal that completed the
+   * streak, which is the honest answer: they took the third tag off, and the
+   * rule is the consequence. Recording it as nobody's doing would put an
+   * unattributable change to shared data in an accountability log.
+   */
+  "contenttype.channel_rule_closed": "Channel content type rule closed",
+  /**
+   * A closed rule was put back to work.
+   *
+   * Separate from `applied` for the reason `reactivated` is separate from
+   * `created`: re-opening is a judgement that a retirement was WRONG, and it is
+   * the entry somebody looks for when a channel's back catalogue changes shape
+   * twice in a week. Folding it into "applied" would make "did anyone disagree
+   * with the automatic close?" unanswerable from the log.
+   */
+  "contenttype.channel_rule_reopened": "Channel content type rule reopened",
   /**
    * A Short's classification changed — including the bulk path.
    *

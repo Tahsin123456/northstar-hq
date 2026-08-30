@@ -58,7 +58,22 @@ const MAX_COMPANY_CHARS = 80;
 export interface PayrollMessageNiche {
   readonly nicheName: string;
   readonly hitCount: number;
-  readonly bonusMinor: number;
+  /**
+   * The rate THIS niche paid, so the line reads "120 × $5 = $600".
+   *
+   * On the niche rather than on the person, because the rate is a property of
+   * the work now: one payslip can hold GTA hits at one price and Minecraft hits
+   * at another, and quoting a single figure across both lines would make two
+   * thirds of the arithmetic in this message fail to check out.
+   *
+   * `null` when it could not be stated — a settled record paid at several rates
+   * whose per-niche prices could not be recovered. The line then reports the
+   * count and the money without the multiplication, which is the honest form of
+   * the same sentence.
+   */
+  readonly hitPaymentMinor: number | null;
+  /** `hitCount × hitPaymentMinor`, or null in lockstep with it. */
+  readonly bonusMinor: number | null;
 }
 
 export interface PayrollMessageEmployee {
@@ -66,7 +81,13 @@ export interface PayrollMessageEmployee {
   /** Already resolved to a label ("Head of Shorts"), never a raw role id. */
   readonly roleLabel: string;
   readonly baseSalaryMinor: number;
-  /** The per-hit rate, so a line can read "120 × $10". */
+  /**
+   * The one rate this record was paid at, or 0 when it spanned several.
+   *
+   * NOT what the niche lines are priced at any more — each of those carries its
+   * own. Kept because it is what `PayrollRecord` stores, and dropping it would
+   * make the message's shape disagree with the row it is built from.
+   */
   readonly hitPaymentMinor: number;
   readonly adjustmentMinor: number;
   readonly adjustmentReason: string | null;
@@ -169,7 +190,16 @@ export function formatEmployeeBlock(employee: PayrollMessageEmployee): string {
   ];
 
   for (const niche of employee.byNiche) {
-    const rate = formatPayAmount(employee.hitPaymentMinor, employee.currency);
+    // The NICHE's rate, off the line. Two niches on one payslip can pay
+    // differently, so a single figure from the record would make most of these
+    // lines fail to multiply out.
+    if (niche.hitPaymentMinor === null || niche.bonusMinor === null) {
+      // No price to state, so no multiplication to write. The count is stored
+      // on the hits and is never in doubt; the total below is the record's own.
+      lines.push(`${niche.nicheName} hits: ${niche.hitCount}`);
+      continue;
+    }
+    const rate = formatPayAmount(niche.hitPaymentMinor, employee.currency);
     const bonus = formatPayAmount(niche.bonusMinor, employee.currency);
     lines.push(`${niche.nicheName} hits: ${niche.hitCount} × ${rate} = ${bonus}`);
   }

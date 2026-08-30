@@ -10,6 +10,7 @@ import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
 import { toChannelDTO } from "@/server/mappers";
 import type {
+  ChannelDataSource,
   ChannelDTO,
   ChannelPreviewDTO,
   OwnershipType,
@@ -25,7 +26,23 @@ import {
   resolveChannelHitWindows,
 } from "./sync-service";
 import { resolveChannel } from "./youtube";
+import { channelDataSources, resolveChannelCredential } from "./youtube-oauth-service";
 import { getCurrentOrgId, getCurrentOrgSettings, getScope } from "./user-service";
+
+/**
+ * Where one channel's figures come from, for the single-channel mappers below.
+ *
+ * A thin wrapper over the batch form so every one of them asks the same
+ * question the same way. It mints no tokens and touches one small table, which
+ * is what makes it cheap enough to sit on a rename.
+ */
+async function dataSourceFor(
+  organizationId: string,
+  youtubeChannelId: string,
+): Promise<ChannelDataSource> {
+  const sources = await channelDataSources(organizationId, [youtubeChannelId]);
+  return sources.get(youtubeChannelId) ?? "public";
+}
 
 /**
  * Translates the organization's saved preferences into sync options.
@@ -112,15 +129,35 @@ export interface AddChannelOptions {
  * same rule. (The VIDEO side is the opposite case and does need its own filter;
  * see `dataset-service.videoSelect`.)
  *
- * Content types are back, and they are a SECOND, INDEPENDENT taxonomy on the
- * same row rather than a re-statement of the niches beside them: the niche says
- * which slice of the operation a channel belongs to, the content types say what
- * the team reckons it makes. Ids only — the catalogue travels once in the
- * dataset, so renaming a tag stays a one-row change.
+ * Content types are a SECOND, INDEPENDENT taxonomy on the same row rather than a
+ * re-statement of the niches beside them: the niche says which slice of the
+ * operation a channel belongs to, the rules say what the team reckons it made
+ * and BETWEEN WHEN AND WHEN.
+ *
+ * THE WHOLE RULE ROW, not just the tag id, and every rule rather than the open
+ * ones. The client resolves each Short against the rules covering its publish
+ * date, so the dates are not metadata about the answer — they ARE the answer;
+ * and a closed rule is what keeps a back catalogue correctly labelled after the
+ * channel moved on. Shipping only the ids would un-label every Short in the
+ * browser that the database still knows about, and shipping only the open rules
+ * would do the same to everything published before the last switch.
+ *
+ * The catalogue itself still travels once in the dataset, so renaming a tag
+ * stays a one-row change.
  */
 const TRACKED_WITH_NICHES = {
   niches: { include: { niche: true } },
-  contentTypes: { select: { contentTypeId: true } },
+  contentTypeRules: {
+    select: {
+      id: true,
+      contentTypeId: true,
+      effectiveFrom: true,
+      effectiveUntil: true,
+      consecutiveOverrides: true,
+      overrideStreakFrom: true,
+      autoClosedAt: true,
+    },
+  },
 } as const;
 
 /**
@@ -193,7 +230,11 @@ export async function addChannel(
   });
 
   return {
-    channel: toChannelDTO(refreshed, trackingWithNiches),
+    // The source the sync REPORTS, not one looked up again afterwards. This run
+    // is the only thing that has actually read the channel, so its answer is
+    // the observation rather than a second guess at it — and the two can differ
+    // by a grant that expired between them.
+    channel: toChannelDTO(refreshed, trackingWithNiches, sync.dataSource),
     restored,
     sync: toRefreshResultDTO(sync),
   };
@@ -223,7 +264,15 @@ export async function listTrackedChannels(
     orderBy: { addedAt: "asc" },
   });
 
-  return rows.map((row) => toChannelDTO(row.channel, row));
+  // One query for the whole list rather than one per row.
+  const sources = await channelDataSources(
+    organizationId,
+    rows.map((row) => row.channel.youtubeChannelId),
+  );
+
+  return rows.map((row) =>
+    toChannelDTO(row.channel, row, sources.get(row.channel.youtubeChannelId) ?? "public"),
+  );
 }
 
 export async function getTrackedChannel(channelId: string): Promise<ChannelDTO> {
@@ -244,7 +293,11 @@ export async function getTrackedChannel(channelId: string): Promise<ChannelDTO> 
   });
 
   if (!row) throw errors.notFound("channel");
-  return toChannelDTO(row.channel, row);
+  return toChannelDTO(
+    row.channel,
+    row,
+    await dataSourceFor(organizationId, row.channel.youtubeChannelId),
+  );
 }
 
 /** Flip a tracked channel between "own" and "competitor". */
@@ -268,7 +321,11 @@ export async function setChannelOwnership(
     include: { channel: true, ...TRACKED_WITH_NICHES },
   });
 
-  return toChannelDTO(updated.channel, updated);
+  return toChannelDTO(
+    updated.channel,
+    updated,
+    await dataSourceFor(organizationId, updated.channel.youtubeChannelId),
+  );
 }
 
 /** Rename (label) a tracked channel. An empty string clears the override. */
@@ -293,7 +350,11 @@ export async function renameChannel(
     include: { channel: true, ...TRACKED_WITH_NICHES },
   });
 
-  return toChannelDTO(updated.channel, updated);
+  return toChannelDTO(
+    updated.channel,
+    updated,
+    await dataSourceFor(organizationId, updated.channel.youtubeChannelId),
+  );
 }
 
 /**
@@ -320,7 +381,11 @@ export async function removeChannel(channelId: string): Promise<ChannelDTO> {
     include: { channel: true, ...TRACKED_WITH_NICHES },
   });
 
-  return toChannelDTO(updated.channel, updated);
+  return toChannelDTO(
+    updated.channel,
+    updated,
+    await dataSourceFor(organizationId, updated.channel.youtubeChannelId),
+  );
 }
 
 export async function restoreChannel(channelId: string): Promise<ChannelDTO> {
@@ -337,7 +402,11 @@ export async function restoreChannel(channelId: string): Promise<ChannelDTO> {
     include: { channel: true, ...TRACKED_WITH_NICHES },
   });
 
-  return toChannelDTO(updated.channel, updated);
+  return toChannelDTO(
+    updated.channel,
+    updated,
+    await dataSourceFor(organizationId, updated.channel.youtubeChannelId),
+  );
 }
 
 export function toRefreshResultDTO(
@@ -354,6 +423,7 @@ export function toRefreshResultDTO(
     markedUnavailable: result.markedUnavailable,
     error: result.error,
     durationMs: result.durationMs,
+    dataSource: result.dataSource,
   };
 }
 
@@ -412,7 +482,7 @@ export async function refreshStaleChannels(
             },
           }),
     },
-    include: { channel: { select: { id: true } } },
+    include: { channel: { select: { id: true, youtubeChannelId: true } } },
     orderBy: { addedAt: "asc" },
     take: options.maxChannels ?? 50,
   });
@@ -430,6 +500,10 @@ export async function refreshStaleChannels(
     const result = await syncChannel(row.channelId, {
       ...syncOptions,
       hitWindowHours: windows.get(row.channelId) ?? null,
+      // Per channel and immediately before the request, for the same reasons as
+      // the scheduled sweep: the source is a per-channel fact, and a token
+      // resolved at the top of a long loop can expire before the end of it.
+      credential: await resolveChannelCredential(organizationId, row.channel.youtubeChannelId),
     });
     results.push(toRefreshResultDTO(result));
   }

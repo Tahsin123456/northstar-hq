@@ -156,6 +156,7 @@ export function ContentTypeFilterControl({
   contentTypes,
   unassignedCount,
   shortCounts,
+  channelCounts,
   unit = "channel",
   className,
 }: {
@@ -184,6 +185,21 @@ export function ContentTypeFilterControl({
    * same pass, and the badge and the filter cannot disagree.
    */
   shortCounts?: ReadonlyMap<string, number>;
+  /**
+   * typeId -> channels carrying it. Required in the `"channel"` unit.
+   *
+   * PASSED IN FOR THE SAME REASON `shortCounts` IS, and the reason is new. This
+   * used to read `ContentTypeDTO.channelCount` off the catalogue, which was
+   * exactly right while a channel carried a flat set of tags. The catalogue now
+   * counts RULES — a channel that made rankings until March and again from
+   * September has two — which is the honest answer to "what would deleting this
+   * type destroy?" and the wrong answer to "how many rows will this filter
+   * show?". It also counts channels outside a niche-scoped viewer's reach.
+   *
+   * Counted off the same rows the filter runs over, so the badge and the list
+   * cannot disagree.
+   */
+  channelCounts?: ReadonlyMap<string, number>;
   /**
    * What this menu is about to narrow.
    *
@@ -268,14 +284,16 @@ export function ContentTypeFilterControl({
                   ) : null}
                 </span>
                 {/* The count has to be in the unit this menu narrows, or it
-                    promises a number of rows it will not deliver — and in the
-                    Shorts unit it now has to be RESOLVED, not counted off the
-                    catalogue. The channel unit is unaffected: a channel's tags
-                    are its own, so `channelCount` is still exactly the rows this
-                    option will show. */}
+                    promises a number of rows it will not deliver — and NEITHER
+                    unit can be counted off the catalogue any more. The Shorts
+                    number has to be resolved per Short; the channel number has
+                    to be distinct channels rather than the catalogue's count of
+                    rules. Both come from the caller's own pass over the rows in
+                    view, which is the only way the badge and the list stay two
+                    readings of one derivation. */}
                 <span className="tnum shrink-0 text-[11px] text-subtle-foreground">
                   {unit === "channel"
-                    ? item.channelCount
+                    ? (channelCounts?.get(item.id) ?? 0)
                     : (shortCounts?.get(item.id) ?? 0)}
                 </span>
               </span>

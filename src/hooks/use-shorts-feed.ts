@@ -7,7 +7,10 @@ import {
   type OutlierShort,
   type OutlierSortKey,
 } from "@/lib/analytics/outliers";
-import { effectiveContentTypeIds } from "@/lib/content-types/resolve";
+import {
+  buildInheritanceTimeline,
+  effectiveContentTypeIds,
+} from "@/lib/content-types/resolve";
 import type { DateRange } from "@/lib/analytics/types";
 import type { ChannelDTO, DatasetDTO, NicheRefDTO, OwnershipType } from "@/lib/dto";
 import type {
@@ -141,15 +144,18 @@ export function useShortsFeed(
      *
      * MATCHED ON EFFECTIVE TAGS, WHICH IS THE ONLY WAY IT FINDS ANYTHING.
      *
-     * A Short inheriting "Memes" from its channel stores no row for it, so the
-     * old `video.contentTypeIds.includes(...)` would have matched only the
-     * handful of Shorts somebody had singled out — and would have returned an
-     * almost empty feed for a tag applied to thousands of Shorts. Resolving each
-     * candidate against its channel is what makes "Memes" mean the Memes.
+     * A Short inheriting "Memes" from a rule stores no row for it, so the old
+     * `video.contentTypeIds.includes(...)` would have matched only the handful
+     * of Shorts somebody had singled out — and would have returned an almost
+     * empty feed for a tag applied to thousands. Resolving each candidate
+     * against the rules covering ITS publish date is what makes "Memes" mean the
+     * memes: the ones published while the channel was making them, and not the
+     * uploads since it stopped.
      *
      * "Unassigned" comes along for free and gets stricter: a Short with nothing
-     * effective is one whose channel is untagged AND which nobody classified,
-     * rather than merely one with no row of its own.
+     * effective is one no rule reaches AND which nobody classified, rather than
+     * merely one with no row of its own — which now legitimately includes the
+     * recent uploads of a channel whose rule has retired.
      *
      * `null` means no filter at all, which is the overwhelmingly common case and
      * skips the resolve pass entirely.
@@ -159,11 +165,15 @@ export function useShortsFeed(
         ? null
         : new Set(
             scoped.flatMap((entry) => {
-              const channelTypeIds = entry.channel.contentTypeIds;
+              const timeline = buildInheritanceTimeline(entry.channel.contentTypeRules);
               return entry.videos
                 .filter((video) => {
                   const effective = effectiveContentTypeIds({
-                    channelTypeIds,
+                    // Against THIS Short's place in its channel's history, not
+                    // against the channel as a whole: an upload from after the
+                    // rule retired must not appear in the feed for a tag the
+                    // channel has stopped making.
+                    inheritedIds: timeline.at(video.publishedAt),
                     manualIds: video.manualContentTypeIds,
                     excludedIds: video.excludedContentTypeIds,
                   });

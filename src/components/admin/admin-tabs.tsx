@@ -45,13 +45,13 @@ interface AdminTab {
 const ADMIN_TABS: readonly AdminTab[] = [
   { href: "/admin", label: "Overview", exact: true },
   /*
-   * Approvals sits second, ahead of the screens it draws its rows from.
+   * Approvals sits second, ahead of the screen it draws its rows from.
    *
    * The other tabs are places to look something up; this one is a queue with
    * work in it, and the work is somebody who cannot sign in until an admin
-   * clicks. Ordering it after Users and Employees would put the one tab that
-   * expires — a person waiting — behind two that never do. It carries the count
-   * as a badge for the same reason: the queue is normally empty, and a tab that
+   * clicks. Ordering it after People would put the one tab that expires — a
+   * person waiting — behind one that never does. It carries the count as a
+   * badge for the same reason: the queue is normally empty, and a tab that
    * never changes is a tab nobody looks at.
    */
   {
@@ -60,34 +60,22 @@ const ADMIN_TABS: readonly AdminTab[] = [
     requires: "users.manage",
     showsPendingCount: true,
   },
-  { href: "/admin/users", label: "Users", requires: "users.manage" },
   /*
-   * Employees is `users.manage`, not `payroll.view`.
+   * People was two tabs — Users and Employees — describing the same colleagues
+   * from two angles, and an admin's every real question spanned both.
    *
-   * The screen is a roster first — who works here, on what, since when — and
-   * only widens into salaries for a viewer who also holds `payroll.view`. Gating
-   * the tab on the payroll permission would hide the approval queue from the
-   * admins who are meant to work it; gating the *columns* is the API's job, and
-   * it does it by omitting the fields rather than by blanking them.
+   * It is `users.manage`, which is what BOTH of them were. The screen is a
+   * roster and a directory at once, and it only widens into salaries for a
+   * viewer who also holds `payroll.view`. Gating the tab on the payroll
+   * permission would hide the approval decisions from the admins meant to make
+   * them; gating the COLUMNS is the API's job, and it does it by omitting the
+   * fields rather than by blanking them.
+   *
+   * The prefix match keeps it lit on /admin/people/[id], the one person's
+   * profile — leaving the tab dark there would suggest the admin had navigated
+   * out of the section.
    */
-  { href: "/admin/employees", label: "Employees", requires: "users.manage" },
-  /*
-   * Payroll is the other half of that split, and it IS `payroll.view`.
-   *
-   * Where Employees is a roster that widens into pay, this tab is nothing but
-   * pay — the run, the totals, every colleague's figure — so the permission
-   * that guards the columns there guards the whole door here. It comes with the
-   * Admin role, and unlike `users.manage` it IS individually grantable: the
-   * brief's rule is "no access unless explicitly granted", so this tab
-   * legitimately appears for somebody an admin has deliberately given payroll
-   * access to. `payroll.manage` — changing pay rather than reading it — is the
-   * one that never appears on the grant checklist.
-   *
-   * The prefix match keeps it lit on /admin/payroll/history: history is the
-   * same area rather than a sixth destination, and a sub-navigation for two
-   * pages would be one more row of chrome than either page earns.
-   */
-  { href: "/admin/payroll", label: "Payroll", requires: "payroll.view" },
+  { href: "/admin/people", label: "People", requires: "users.manage" },
   /*
    * Niches is `settings.manage`, not `niches.manage`.
    *

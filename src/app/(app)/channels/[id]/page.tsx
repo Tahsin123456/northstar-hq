@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Tv2 } from "lucide-react";
 import { PageContainer } from "@/components/layout/app-shell";
 import { ChannelHeader, ChannelHeaderSkeleton } from "@/components/channel/channel-header";
-import { ChannelContentTypes } from "@/components/channel/channel-content-types";
+import { ChannelContentTypeRules } from "@/components/channel/channel-content-types";
 import { ExcludedPanel } from "@/components/channel/excluded-panel";
 import { NotesPanel } from "@/components/notes/notes-panel";
 import { KpiCards } from "@/components/channel/kpi-cards";
@@ -39,10 +39,17 @@ import {
   HIT_RATE_DEFINITION,
   UNCONFIGURED_RULE_LABEL,
 } from "@/lib/analytics/constants";
-import { effectiveContentTypeIds } from "@/lib/content-types/resolve";
+import {
+  buildInheritanceTimeline,
+  effectiveContentTypeIds,
+} from "@/lib/content-types/resolve";
 import { tallyEffectiveShorts } from "@/lib/content-types/tally";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
-import type { ContentTypeDTO, VideoDTO } from "@/lib/dto";
+import type {
+  ChannelContentTypeRuleDTO,
+  ContentTypeDTO,
+  VideoDTO,
+} from "@/lib/dto";
 
 /**
  * Channel detail.
@@ -58,8 +65,8 @@ const EMPTY_NICHES: readonly { id: string }[] = [];
 // Stable identities for the fallbacks below. A fresh array literal on every
 // render would be a new dependency on every render, defeating the memos.
 const EMPTY_VIDEOS: readonly VideoDTO[] = [];
-/** A channel that has not loaded yet gives its Shorts nothing to inherit. */
-const EMPTY_TYPE_IDS: readonly string[] = [];
+/** A channel that has not loaded yet has no rules, so its Shorts inherit nothing. */
+const EMPTY_RULES: readonly ChannelContentTypeRuleDTO[] = [];
 const EMPTY_CONTENT_TYPES: readonly ContentTypeDTO[] = [];
 
 export default function ChannelDetailPage({
@@ -107,14 +114,20 @@ export default function ChannelDetailPage({
     const videos = row?.videos ?? EMPTY_VIDEOS;
     if (contentType === "all") return videos;
 
-    // Resolved against THIS channel's tags, which is the whole reason the filter
-    // finds anything: the Shorts that carry a type here overwhelmingly inherit
-    // it and store nothing, so reading their own rows would narrow a four
-    // hundred Short library down to the two somebody had singled out.
-    const channelTypeIds = row?.channel.contentTypeIds ?? EMPTY_TYPE_IDS;
+    /*
+     * Resolved against THIS channel's rules, which is the whole reason the
+     * filter finds anything: the Shorts that carry a type here overwhelmingly
+     * inherit it and store nothing, so reading their own rows would narrow a
+     * four hundred Short library down to the two somebody had singled out.
+     *
+     * And resolved PER SHORT, against its publish date. On a channel that
+     * switched format the table is exactly where that has to be visible — the
+     * filter finds the uploads a rule actually covered, and stops at the switch.
+     */
+    const timeline = buildInheritanceTimeline(row?.channel.contentTypeRules ?? EMPTY_RULES);
     return videos.filter((video) => {
       const effective = effectiveContentTypeIds({
-        channelTypeIds,
+        inheritedIds: timeline.at(video.publishedAt),
         manualIds: video.manualContentTypeIds,
         excludedIds: video.excludedContentTypeIds,
       });
@@ -138,16 +151,19 @@ export default function ChannelDetailPage({
    * Counted over the channel's whole stored history rather than the current
    * window, so none of these numbers moves every time the period does.
    *
-   * ON A TAGGED CHANNEL `untagged` IS NOW ZERO, and that is the correct answer
-   * rather than a broken one: every Short inherits the channel's tags, so none of
-   * them is unclassified. The badge collapsing to nothing the moment somebody
-   * tags the channel is the feature working.
+   * `untagged` IS NOW A REAL NUMBER AGAIN ON A TAGGED CHANNEL, and that is the
+   * rules working rather than a regression. Under a flat channel tag it
+   * collapsed to zero the moment anybody characterised the channel — every Short
+   * inherited, so none could be unclassified. A rule covers a WINDOW, so the
+   * uploads before it began and the uploads after it retired are genuinely
+   * untagged, and the badge is once again pointing at a backlog somebody can do
+   * something about.
    */
   const shortsTally = React.useMemo(
     () =>
       tallyEffectiveShorts([
         {
-          channelTypeIds: row?.channel.contentTypeIds ?? EMPTY_TYPE_IDS,
+          rules: row?.channel.contentTypeRules ?? EMPTY_RULES,
           videos: row?.videos ?? EMPTY_VIDEOS,
         },
       ]),
@@ -350,7 +366,7 @@ export default function ChannelDetailPage({
         Note it deliberately ignores the content-type FILTER above: this states
         what the channel is, not what you are currently looking at.
       */}
-      <ChannelContentTypes channel={channel} shortsCount={shortsTally.total} />
+      <ChannelContentTypeRules channel={channel} shortsCount={shortsTally.total} />
 
       {/* --- Every Short in the window --- */}
       <div className="flex flex-col gap-3">

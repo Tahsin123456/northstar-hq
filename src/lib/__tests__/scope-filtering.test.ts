@@ -22,9 +22,14 @@ import {
 const NOW = Date.UTC(2026, 5, 1);
 const range = (days: number) => ({ startMs: NOW - days * DAY_MS, endMs: NOW });
 
-const GTA: NicheRefDTO = { id: "n-gta", name: "GTA", colorIndex: 0 };
-const RDR: NicheRefDTO = { id: "n-rdr", name: "Red Dead Redemption", colorIndex: 1 };
-const FINANCE: NicheRefDTO = { id: "n-fin", name: "Finance", colorIndex: 2 };
+const GTA: NicheRefDTO = { id: "n-gta", name: "GTA", colorIndex: 0, kind: "production" };
+const RDR: NicheRefDTO = {
+  id: "n-rdr",
+  name: "Red Dead Redemption",
+  colorIndex: 1,
+  kind: "production",
+};
+const FINANCE: NicheRefDTO = { id: "n-fin", name: "Finance", colorIndex: 2, kind: "production" };
 
 interface TestRow {
   channel: ChannelDTO;
@@ -38,7 +43,7 @@ function makeRow(options: {
   niches?: NicheRefDTO[];
   /** Views per Short, all published inside the window. */
   views?: number[];
-  /** The channel's own content-type tags — what the team says it makes. */
+  /** Tags the channel has ever been characterised by — one open-ended rule each. */
   contentTypeIds?: readonly string[];
 }): TestRow {
   const views = options.views ?? [];
@@ -64,10 +69,30 @@ function makeRow(options: {
     addedAt: NOW,
     isActive: true,
     ownershipType: options.ownershipType ?? "competitor",
+    // Every fixture here reads through the public API. This file is about which
+    // rows a niche or ownership filter keeps, and no filter reads the source —
+    // so the honest fixture value is the one a channel with no connection has.
+    dataSource: "public",
     niches: options.niches ?? [],
-    // Untagged unless a case says otherwise, so the niche and ownership
-    // assertions below cannot start passing for the wrong reason.
-    contentTypeIds: options.contentTypeIds ?? [],
+    /*
+     * Untagged unless a case says otherwise, so the niche and ownership
+     * assertions below cannot start passing for the wrong reason.
+     *
+     * Each tag becomes one epoch-dated, open-ended rule — what the migration
+     * wrote and what "Apply to this channel" writes. The channel-level filter
+     * reads a rule's TAG and deliberately ignores its dates, because a row here
+     * is a channel whose metrics describe everything it ever published; the
+     * per-Short filters are where a window decides anything.
+     */
+    contentTypeRules: (options.contentTypeIds ?? []).map((contentTypeId) => ({
+      id: `rule_${options.id}_${contentTypeId}`,
+      contentTypeId,
+      effectiveFrom: 0,
+      effectiveUntil: null,
+      consecutiveOverrides: 0,
+      overrideStreakFrom: null,
+      autoClosedAt: null,
+    })),
   } satisfies ChannelDTO;
 
   return {
@@ -164,14 +189,26 @@ describe("scoped analytics", () => {
   it("summarises only the scoped channels, not a filtered global average", () => {
     // Across everything, hit rates are: a 100%, b 50%, c 0%, d 100%, e 100%.
     const all = calculatePortfolioSummary(
-      ROWS.map((r) => ({ id: r.channel.id, name: r.channel.displayName, metrics: r.metrics })),
+      ROWS.map((r) => ({
+        id: r.channel.id,
+        name: r.channel.displayName,
+        metrics: r.metrics,
+        // Every fixture niche here is production, so the scorecard is the whole
+        // set — this test is about the SCOPE predicate, not the kind split.
+        countsTowardHitRate: true,
+      })),
     );
     expect(all.averageHitRate).toBe(70);
 
     // Scoped to GTA + our channels (a and d), both at 100%.
     const scoped = filterRowsByScope(ROWS, GTA.id, "own");
     const summary = calculatePortfolioSummary(
-      scoped.map((r) => ({ id: r.channel.id, name: r.channel.displayName, metrics: r.metrics })),
+      scoped.map((r) => ({
+        id: r.channel.id,
+        name: r.channel.displayName,
+        metrics: r.metrics,
+        countsTowardHitRate: true,
+      })),
     );
     expect(summary.channelCount).toBe(2);
     expect(summary.averageHitRate).toBe(100);

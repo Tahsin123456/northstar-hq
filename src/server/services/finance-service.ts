@@ -33,6 +33,10 @@ import {
   type FinanceSummary,
 } from "@/lib/finance/types";
 import { isUnmaintainedNote } from "@/lib/finance/unmaintained";
+import {
+  getYouTubeRevenueReport,
+  type YouTubeRevenueReport,
+} from "./youtube-revenue-report";
 import { getCurrentOrgId, getCurrentOrgSettings, getOrgSettings, getScope } from "./user-service";
 
 /**
@@ -1847,6 +1851,22 @@ export interface FinanceOverview {
     readonly revenueMinor: number;
     readonly entryCount: number;
   };
+  /**
+   * What YouTube reported, by channel and by month, and which own channels
+   * nothing is reading.
+   *
+   * In this payload rather than behind a second endpoint for the reason the rest
+   * of it is: one query set, one consistent snapshot, one range. A separate
+   * request would let the coverage warning describe a different moment — or a
+   * different period — from the totals it qualifies, and the whole value of the
+   * warning is that it applies to the figures actually on the screen.
+   *
+   * Deliberately unconverted and separate from `summary`: this is YouTube's own
+   * figure in YouTube's own currency, checkable against YouTube Studio, while
+   * the totals above are the ledger's converted view. See
+   * `youtube-revenue-report.ts`.
+   */
+  readonly youtubeRevenue: YouTubeRevenueReport;
 }
 
 /**
@@ -1878,6 +1898,18 @@ export async function getFinanceOverview(options: {
   const channels: FinanceChannelRef[] = tracked
     .map((row) => ({ id: row.channelId, name: row.label ?? row.channel.title }))
     .sort((a, b) => a.name.localeCompare(b.name));
+
+  /**
+   * The names handed to the YouTube section, so it calls every channel exactly
+   * what the profit table above it calls the same channel. Built from `channels`
+   * rather than re-read, which is what makes that guaranteed rather than likely.
+   */
+  const channelNames = new Map(channels.map((channel) => [channel.id, channel.name]));
+  const youtubeRevenue = await getYouTubeRevenueReport({
+    organizationId,
+    range: options.range,
+    channelNames,
+  });
 
   const granularity = pickGranularity(options.range);
   const entries = ledger.entries;
@@ -1960,5 +1992,6 @@ export async function getFinanceOverview(options: {
       revenueMinor: estimatedRevenueMinor,
       entryCount: estimatedEntryCount,
     },
+    youtubeRevenue,
   };
 }

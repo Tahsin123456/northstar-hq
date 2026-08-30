@@ -94,6 +94,39 @@
  * `unresolved` reports them separately because whoever runs payroll needs to
  * know which they are looking at.
  *
+ * THE RATE IS A PROPERTY OF THE WORK, NOT OF THE PERSON
+ * `Niche.hitPaymentMinor` is what one hit is worth, and it is the rate every new
+ * calculation uses. It replaced `EmployeeProfile.hitPaymentMinor`, which this
+ * engine no longer receives at all — there is no field on `PayrollEmployee` to
+ * read, which is the structural version of "stop reading it". A hit in a niche
+ * that takes a day to produce is not worth the same as one that takes an hour,
+ * and paying two editors different amounts for the identical Short was never
+ * what anybody meant.
+ *
+ * The rate follows the SAME ATTRIBUTION the hit does. A Short credited to GTA
+ * pays GTA's rate, because the niche that judged it is the niche that priced
+ * it; there is deliberately no second ranking deciding which rate applies. One
+ * consequence is that a record can span several rates, which is why the money
+ * is summed per hit and the per-niche breakdown carries a rate of its own.
+ *
+ * A NICHE THAT CANNOT SAY WHAT A HIT IS WORTH PAYS NOTHING. That is the third
+ * way to be half-configured, alongside a missing threshold and a missing
+ * window, and it is reported through the SAME `skippedNiches` channel rather
+ * than a mechanism of its own — see `NichePayrollGap`. A hit in such a niche is
+ * NOT counted and NOT recorded: writing a `PayrollHit` for it would put the
+ * Short in the frozen ledger at zero and make it unpayable forever, which is a
+ * worse outcome than the reported shortfall it was trying to describe.
+ *
+ * WATCHLIST NICHES ARE NOT CANDIDATES AT ALL
+ * A watchlist niche is one the studio watches rather than publishes into.
+ * Nobody is paid for it, so it never judges a Short for payroll — not "judges
+ * it and pays zero", which would let a watchlist niche with a low bar win
+ * `pickGoverningRule` and swallow a hit that GTA would have paid for. Excluding
+ * it from the candidate list keeps the attribution on the work that is actually
+ * being done, and it is why a Short whose only niche is a watchlist one simply
+ * earns nothing and is not reported as a configuration gap: there is nothing to
+ * configure.
+ *
  * WHAT COUNTS, AND WHY
  *   • Only Shorts from channels Northstar OWNS. Paying an editor a bonus
  *     because a competitor went viral would be absurd, and the ownership flag
@@ -126,6 +159,7 @@ import {
   type NicheHitRule,
   type WindowObservation,
 } from "@/lib/analytics/hit-rate";
+import { isProductionNiche, type NicheKind } from "@/lib/niches/niche-kind";
 
 // ---------------------------------------------------------------------------
 // INPUTS
@@ -134,6 +168,28 @@ import {
 export interface PayrollNiche {
   readonly id: string;
   readonly name: string;
+  /**
+   * "production" | "watchlist".
+   *
+   * A watchlist niche never judges a Short for payroll and never pays one. See
+   * the note at the top: excluding it from the candidate list, rather than
+   * letting it judge and pay zero, is what stops a low-bar watchlist niche
+   * winning `pickGoverningRule` and swallowing a hit GTA would have paid for.
+   */
+  readonly kind: NicheKind;
+  /**
+   * What ONE hit in this niche pays, in minor units.
+   *
+   * THE RATE FOR EVERY NEW CALCULATION. It replaced the per-employee rate,
+   * which is no longer on `PayrollEmployee` at all.
+   *
+   * Null means NOBODY HAS SET ONE, and therefore that a hit here cannot pay —
+   * not "fall back to the employee's rate", and not zero. Exactly like the two
+   * rule columns below it: the niche is half-configured, the shortfall is real
+   * money, and it is named in `skippedNiches` before anybody finalizes rather
+   * than disappearing into a smaller total.
+   */
+  readonly hitPaymentMinor: number | null;
   /**
    * Null means NOBODY HAS SET ONE, and therefore that nothing in this niche can
    * be a hit — not "inherit the organization default". See the note at the top:
@@ -158,7 +214,16 @@ export interface PayrollEmployee {
   readonly email: string;
   readonly role: string;
   readonly salaryMinor: number;
-  readonly hitPaymentMinor: number;
+  /**
+   * THERE IS NO `hitPaymentMinor` HERE ANY MORE, AND ITS ABSENCE IS THE POINT.
+   *
+   * `EmployeeProfile.hitPaymentMinor` still exists in the database and still
+   * explains every finalized `PayrollRecord` that was computed from it — a paid
+   * bonus has to stay explicable. It is simply not an input to this engine, so
+   * no branch here can reach for it, and adding one back would be a visible
+   * change to this interface rather than a `??` somebody slipped into a sum.
+   * The rate now lives on the niche: `PayrollNiche.hitPaymentMinor`.
+   */
   readonly currency: string;
   /** Niches this person is assigned to. No assignments means no bonuses. */
   readonly nicheIds: readonly string[];
@@ -274,9 +339,22 @@ export interface QualifyingHit {
   readonly title: string;
   readonly channelId: string;
   readonly channelName: string;
-  /** The niche the hit was credited to — see `attributeShort`. */
+  /** The niche the hit was credited to — see `judgeShort`. */
   readonly nicheId: string;
   readonly nicheName: string;
+  /**
+   * What this one hit paid, in minor units — the niche's rate, at this run.
+   *
+   * On the hit rather than only on the person, because a record can now span
+   * several rates: one person assigned to GTA and Minecraft earns each niche's
+   * own price for a hit in it. A single per-record rate could not describe that
+   * without averaging two real numbers into one that was never paid.
+   *
+   * Always positive. A hit in a niche with no rate is never credited at all —
+   * it is reported through `skippedNiches` instead, so there is no zero-value
+   * hit anywhere in this list to be mistaken for a paid one.
+   */
+  readonly hitPaymentMinor: number;
   readonly thresholdApplied: number;
   /**
    * The clock half of the rule this hit was judged under.
@@ -306,6 +384,15 @@ export interface NicheBreakdown {
   readonly nicheName: string;
   readonly thresholdApplied: number;
   readonly windowHoursApplied: number;
+  /**
+   * The rate these hits were paid at — this niche's, not the person's.
+   *
+   * The line the brief describes: "120 hits × $5 = $600", where the $5 now
+   * comes from the niche. It is on the line rather than beside the record
+   * because two lines on one record can legitimately carry two different rates,
+   * and `bonusMinor` below is `hitCount × this`, exactly.
+   */
+  readonly hitPaymentMinor: number;
   readonly hitCount: number;
   readonly bonusMinor: number;
 }
@@ -318,24 +405,31 @@ export interface NicheBreakdown {
  * because a niche missing from the breakdown looks exactly like a niche where
  * nothing happened, and one of those is an admin's job to fix.
  *
- * `missing` names WHICH HALF is absent, because "set a threshold" and "set a
- * window" are two different fields and an admin told only that something is
- * unconfigured has to go and find out which. A niche with a threshold and no
- * window is exactly as unscoreable as one with neither — this is the case the
- * earlier round of this notice could not express, since back then a threshold
- * was the whole rule.
+ * `missing` names WHICH SETTING is absent, because "set a threshold", "set a
+ * window" and "set a payment" are three different fields and an admin told only
+ * that something is unconfigured has to go and find out which. A niche with a
+ * threshold and no window is exactly as unscoreable as one with neither, and a
+ * niche with a complete rule and no rate scores perfectly and still pays
+ * nothing — the third case, joined to this notice rather than given one of its
+ * own, because they are one question: why is this bonus smaller than it looks?
  *
- * `shortCount` counts DISTINCT Shorts that were not considered — published in
- * the period, on an owned channel, filed under this niche, and not credited
- * through some other niche that did have a rule. A Short that earned a bonus
- * elsewhere was considered; counting it here would overstate what the missing
- * rule cost.
+ * ONLY PRODUCTION NICHES APPEAR HERE. A watchlist niche pays nothing by
+ * definition and there is nothing in it to configure, so reporting one would be
+ * raising an alarm about money that was never at stake.
  *
- * PUBLISHED IN THE PERIOD, not resolved in it, and that is not an oversight.
- * Without a window there is no `windowClosesAt` to compute, so there is no
- * honest answer to "which period would this have resolved into" — the Shorts
- * that can be named are the ones published in the month, which is also the
- * population an admin recognises when they look at it.
+ * `shortCount` counts DISTINCT Shorts, over the population the gap actually
+ * cost — see the field's own note, since the rule gap and the payment gap can
+ * name different things and only one of them has a verdict to point at. A Short
+ * that earned a bonus elsewhere was considered; counting it here would
+ * overstate what the gap cost.
+ *
+ * THE RULE GAP IS COUNTED OVER SHORTS PUBLISHED IN THE PERIOD, not resolved in
+ * it, and that is not an oversight. Without a window there is no
+ * `windowClosesAt` to compute, so there is no honest answer to "which period
+ * would this have resolved into" — the Shorts that can be named are the ones
+ * published in the month, which is also the population an admin recognises when
+ * they look at it. The payment gap has no such problem: those Shorts were
+ * judged, so their windows closed, in this period, on the ordinary rule.
  *
  * One Short filed under two unusable niches is counted once in each, so summing
  * `shortCount` across niches can exceed the number of Shorts involved. The
@@ -345,8 +439,77 @@ export interface NicheBreakdown {
 export interface SkippedNiche {
   readonly nicheId: string;
   readonly nicheName: string;
-  readonly missing: MissingHitRuleHalf;
+  readonly missing: NichePayrollGap;
+  /**
+   * Distinct Shorts this gap cost, and the number means one of two things
+   * depending on which gap it is — see `NichePayrollGap`.
+   *
+   *   RULE GAP — Shorts published in the period, on an owned channel, filed
+   *              under this niche, that no assigned niche could judge. Nothing
+   *              was asked about them, so a verdict is not available to narrow
+   *              this further.
+   *   PAYMENT GAP — Shorts this niche judged as HITS, resolving inside the
+   *              period, that earned nothing because the niche has no rate.
+   *              Narrower and stronger than the rule gap's count, because here
+   *              the question WAS asked and the answer was yes.
+   */
   readonly shortCount: number;
+}
+
+/**
+ * What a niche is missing before a hit in it can pay.
+ *
+ * THREE WAYS TO BE HALF-CONFIGURED, ONE CHANNEL FOR REPORTING THEM. A hit is a
+ * bar, a clock, and a price. Missing any of the three means a Short in this
+ * niche earns nothing, and every one of those is somebody's pay, so they travel
+ * to the pre-finalize notice together rather than through a second mechanism
+ * that would have to be found separately.
+ *
+ * TWO FIELDS RATHER THAN ONE WIDER UNION, because the gaps are independent: a
+ * niche can be missing a threshold AND a price, and a single label would have
+ * to name one of them and hide the other. `rule` is the analytics engine's own
+ * `MissingHitRuleHalf` — the same value every dashboard already uses — and
+ * `payment` is payroll's alone, which is why the money never leaked into the
+ * definition of a hit.
+ *
+ * `rule: null, payment: false` never occurs: a niche with nothing missing is
+ * not a skipped niche and is absent from the report.
+ */
+export interface NichePayrollGap {
+  /** Which half of the hit RULE is absent, or null when both are set. */
+  readonly rule: MissingHitRuleHalf | null;
+  /** True when the niche can judge a hit but cannot say what it is worth. */
+  readonly payment: boolean;
+}
+
+/**
+ * The gap, as the phrase that follows "no " in a sentence.
+ *
+ * ONE FUNCTION, SHARED BY EVERY SURFACE. The payroll screen, the finalize
+ * dialog, the employee's own notices and the audit entry all name the missing
+ * setting, and four copies of this composition is four chances for an admin to
+ * be sent to a different field by two screens describing the same niche.
+ *
+ * Composed with "and no " rather than listing, so the existing sentences keep
+ * reading as English: "GTA — no hit threshold and no hit payment".
+ */
+export function describeNicheGap(gap: NichePayrollGap): string {
+  const rule =
+    gap.rule === "threshold"
+      ? "hit threshold"
+      : gap.rule === "window"
+        ? "hit window"
+        : gap.rule === "both"
+          ? "hit threshold or window"
+          : null;
+
+  if (rule === null) return "hit payment";
+  if (!gap.payment) return rule;
+  // The comma only where the rule half already contains an "or", which would
+  // otherwise bind the payment into the same alternative.
+  return gap.rule === "both"
+    ? `${rule}, and no hit payment`
+    : `${rule} and no hit payment`;
 }
 
 /**
@@ -394,6 +557,20 @@ export interface PayrollCalculation {
   readonly employedDuringPeriod: boolean;
 
   readonly baseSalaryMinor: number;
+  /**
+   * The one rate this record was paid at, or 0 when it was not paid at one.
+   *
+   * A SUMMARY OF `byNiche`, NOT THE SOURCE OF THE MONEY. The rate is per niche
+   * now, so a record with hits in GTA at $5 and Minecraft at $3 has no single
+   * rate — and 0 says exactly that rather than averaging two real numbers into
+   * a third that was never paid. `hitBonusMinor` is always the sum of the
+   * per-niche lines, whichever case this is.
+   *
+   * It exists because `PayrollRecord.hitPaymentMinor` is one `Int` column and
+   * the schema is not ours to change. Where the record does have one rate — the
+   * ordinary case, somebody working a single niche — this carries it, and the
+   * payslip reads exactly as it always has.
+   */
   readonly hitPaymentMinor: number;
   readonly hitCount: number;
   readonly hitBonusMinor: number;
@@ -503,6 +680,27 @@ function employedDuring(employee: PayrollEmployee, period: PayrollPeriodWindow):
  * the rule being recorded. That fallback is the live case — a period still open
  * over Shorts nobody has evaluated yet — not an edge case.
  */
+/**
+ * What one hit in this niche pays, or null when it cannot pay at all.
+ *
+ * TWO REASONS TO RETURN NULL, AND THEY ARE DIFFERENT SITUATIONS. A watchlist
+ * niche is not a configuration gap — nobody is paid for watching, and there is
+ * nothing for an admin to fill in. A production niche with no rate IS one, and
+ * it is reported. This function does not distinguish them because callers do:
+ * watchlist niches never reach the candidate list in the first place, so by the
+ * time anything asks this, null means "somebody has to set a number".
+ *
+ * A non-positive stored value reads as unset, the same treatment
+ * `resolveHitRule` gives the two rule columns. "A hit is worth nothing" is not
+ * a rate anybody meant to write, and paying it would be indistinguishable on a
+ * payslip from the shortfall this whole notice exists to explain.
+ */
+function payableRateFor(niche: PayrollNiche): number | null {
+  if (!isProductionNiche(niche)) return null;
+  if (niche.hitPaymentMinor === null || niche.hitPaymentMinor <= 0) return null;
+  return niche.hitPaymentMinor;
+}
+
 function ruleFor(niche: PayrollNiche, evidence: PayrollHitEvidence | null): HitRule | null {
   if (evidence !== null && evidence.nicheId === niche.id) {
     const recorded = resolveHitRule({
@@ -517,19 +715,20 @@ function ruleFor(niche: PayrollNiche, evidence: PayrollHitEvidence | null): HitR
 /**
  * Could this person earn a hit bonus at all, before any Short is looked at?
  *
- * Employment, an assignment and a rate are the three preconditions, and they
- * are checked in one place because the skipped-niche report has to use exactly
- * the same test as the bonus itself. Reporting "14 Shorts were not counted for
- * Alex" about somebody who has no per-hit rate — and would therefore have been
- * paid nothing either way — would raise an alarm about money that was never at
- * stake.
+ * Employment and an assignment, checked in one place because the skipped-niche
+ * report has to use exactly the same test as the bonus itself.
+ *
+ * A RATE IS NO LONGER ONE OF THE PRECONDITIONS, and dropping it from here is
+ * the direct consequence of the rate moving to the niche. It used to belong:
+ * somebody with no per-hit rate would have been paid nothing whatever their
+ * niches said, so reporting "14 Shorts were not counted for Alex" about them
+ * would have raised an alarm about money that was never at stake. Now the rate
+ * is a property of the niche, so "no rate" is precisely the configuration gap
+ * this report exists to name — and testing for it here would silence the
+ * report in exactly the case it is for.
  */
 function canEarnBonus(employee: PayrollEmployee, period: PayrollPeriodWindow): boolean {
-  return (
-    employedDuring(employee, period) &&
-    employee.nicheIds.length > 0 &&
-    employee.hitPaymentMinor > 0
-  );
+  return employedDuring(employee, period) && employee.nicheIds.length > 0;
 }
 
 /** What one Short did under the niche that judges it for this person. */
@@ -699,6 +898,20 @@ function verdictFor(
  * A niche with half a rule is not a candidate at all: it has nothing to clear
  * and nothing to rank. What that costs is reported separately, by
  * `collectSkippedNiches`, rather than smuggled in here as a zero.
+ *
+ * NEITHER IS A WATCHLIST NICHE, AND FOR A SHARPER REASON. It has a perfectly
+ * good rule and could win the ranking outright — a watchlist niche with a
+ * 200,000 bar would beat GTA's million every time — and then pay nothing,
+ * silently cancelling a bonus the studio's own niche would have paid. The
+ * candidate list is "niches money can flow through", so a niche nobody is paid
+ * for is not on it, and a Short whose only niche is a watchlist one earns
+ * nothing with nothing to report: there is no setting to fill in.
+ *
+ * A NICHE WITH NO RATE IS STILL A CANDIDATE, though, which is the one asymmetry
+ * worth stating. It can judge — it has both halves of a rule — so it must, or
+ * the hit would be silently re-attributed to a niche with a higher bar and paid
+ * at the wrong price. It judges, the hit is found, and then the missing rate is
+ * reported against the niche that actually governed it.
  */
 function judgeShort(
   short: PayrollShort,
@@ -714,6 +927,9 @@ function judgeShort(
 
     const niche = nicheById.get(nicheId);
     if (!niche) continue;
+    // Not a candidate and not an unscoreable one either: a watchlist niche is
+    // not a gap to report, it is a niche nobody is paid for.
+    if (!isProductionNiche(niche)) continue;
 
     const rule = ruleFor(niche, short.evaluation);
     if (rule === null) unscoreableNicheIds.push(nicheId);
@@ -758,12 +974,24 @@ function collectSkippedNiches(
   nicheById: ReadonlyMap<string, PayrollNiche>,
   judgedVideoIds: ReadonlySet<string>,
   period: PayrollPeriodWindow,
+  /**
+   * Hits the run found and could not pay, by the niche that governed them.
+   *
+   * The payment gap arrives from the attribution loop rather than being
+   * recomputed here, because it is the one gap that needs a VERDICT: "this
+   * niche could not judge 14 Shorts" is a statement about what was never asked,
+   * and "this niche judged 14 hits and priced none of them" is a statement
+   * about an answer. Re-deriving the second here would mean running the
+   * evaluator a second time over the same Shorts to reach the number the caller
+   * already holds.
+   */
+  unpaidHitsByNicheId: ReadonlyMap<string, ReadonlySet<string>>,
 ): SkippedNiche[] {
   if (relevantNicheIds.size === 0) return [];
 
   const buckets = new Map<
     string,
-    { name: string; missing: MissingHitRuleHalf; videoIds: Set<string> }
+    { name: string; rule: MissingHitRuleHalf | null; payment: boolean; videoIds: Set<string> }
   >();
 
   for (const short of shorts) {
@@ -776,6 +1004,9 @@ function collectSkippedNiches(
 
       const niche = nicheById.get(nicheId);
       if (!niche) continue;
+      // A watchlist niche is never a gap: nobody is paid for it and there is
+      // nothing to fill in. See `judgeShort`.
+      if (!isProductionNiche(niche)) continue;
 
       const missing = missingHitRuleHalf(niche);
       if (missing === null) continue;
@@ -784,15 +1015,40 @@ function collectSkippedNiches(
       // A Set rather than a counter, for the same reason the bonus loop keeps
       // one: a duplicated row in the input must not inflate the report either.
       if (bucket) bucket.videoIds.add(short.videoId);
-      else buckets.set(nicheId, { name: niche.name, missing, videoIds: new Set([short.videoId]) });
+      else {
+        buckets.set(nicheId, {
+          name: niche.name,
+          rule: missing,
+          // A niche that cannot judge anything is not additionally reported for
+          // having no price. One gap at a time, in the order an admin has to
+          // close them: there is no point pricing a rule that does not exist.
+          payment: false,
+          videoIds: new Set([short.videoId]),
+        });
+      }
     }
+  }
+
+  // The second gap, folded into the same report rather than a second one. These
+  // niches have a complete rule by construction — they judged something — so
+  // they can never collide with a bucket written above.
+  for (const [nicheId, videoIds] of unpaidHitsByNicheId) {
+    if (videoIds.size === 0) continue;
+    const niche = nicheById.get(nicheId);
+    if (!niche) continue;
+    buckets.set(nicheId, {
+      name: niche.name,
+      rule: null,
+      payment: true,
+      videoIds: new Set(videoIds),
+    });
   }
 
   return [...buckets.entries()]
     .map(([nicheId, bucket]) => ({
       nicheId,
       nicheName: bucket.name,
-      missing: bucket.missing,
+      missing: { rule: bucket.rule, payment: bucket.payment },
       shortCount: bucket.videoIds.size,
     }))
     // Worst first, then by name so equal rows do not shuffle — the ordering
@@ -857,6 +1113,10 @@ export function calculateEmployeePayroll(options: {
   // skipped-niche report, which is about Shorts nothing could judge — not about
   // Shorts that were judged and lost, or judged into another month.
   const judgedVideoIds = new Set<string>();
+  // Hits this run found and could not pay, because the niche that governed them
+  // has no rate. The third way to be half-configured, gathered where the
+  // verdict is actually known. See `collectSkippedNiches`.
+  const unpaidHitsByNicheId = new Map<string, Set<string>>();
 
   const eligible = canEarnBonus(employee, period);
 
@@ -910,6 +1170,23 @@ export function calculateEmployeePayroll(options: {
         continue;
       }
 
+      // A HIT WITH NO PRICE IS REPORTED, NEVER RECORDED AT ZERO.
+      //
+      // Writing it as a credit worth nothing would be far worse than the
+      // shortfall it describes: `PayrollHit` rows under a finalized record are
+      // the ledger of what has been paid, so a zero-value row would enter
+      // `alreadyPaidVideoIds` and make this Short unpayable FOREVER — including
+      // after somebody sets the rate. So it is left uncredited and named
+      // against the niche that governed it, which is the one thing an admin can
+      // act on while the period is still a draft.
+      const rate = payableRateFor(niche);
+      if (rate === null) {
+        const bucket = unpaidHitsByNicheId.get(niche.id);
+        if (bucket) bucket.add(short.videoId);
+        else unpaidHitsByNicheId.set(niche.id, new Set([short.videoId]));
+        continue;
+      }
+
       countedVideoIds.add(short.videoId);
       hits.push({
         videoId: short.videoId,
@@ -918,6 +1195,10 @@ export function calculateEmployeePayroll(options: {
         channelName: short.channelName,
         nicheId: niche.id,
         nicheName: niche.name,
+        // The niche's rate, copied onto the hit rather than referenced — the
+        // same reasoning `thresholdApplied` follows. An admin who reprices GTA
+        // in March must not rewrite what February's hits were worth.
+        hitPaymentMinor: rate,
         thresholdApplied: verdict.thresholdApplied,
         windowHoursApplied: verdict.windowHoursApplied,
         windowClosesAtMs: verdict.windowClosesAtMs,
@@ -932,15 +1213,24 @@ export function calculateEmployeePayroll(options: {
   // Integer arithmetic throughout — minor units, never a float.
   const baseSalaryMinor = employed ? employee.salaryMinor : 0;
   const hitCount = hits.length;
-  const hitBonusMinor = hitCount * employee.hitPaymentMinor;
+  // Summed per hit rather than `count × rate`, because there is no longer one
+  // rate to multiply by: each hit carries the price of the niche that judged it.
+  const hitBonusMinor = hits.reduce((sum, hit) => sum + hit.hitPaymentMinor, 0);
 
-  const byNiche = summariseByNiche(hits, employee.hitPaymentMinor);
+  const byNiche = summariseByNiche(hits);
 
   // Only for somebody who could have been paid. For anybody else the bonus is
-  // zero for a reason that has nothing to do with a rule, and saying "Shorts
-  // were skipped" would point at the wrong problem.
+  // zero for a reason that has nothing to do with a niche's configuration, and
+  // saying "Shorts were skipped" would point at the wrong problem.
   const skippedNiches = eligible
-    ? collectSkippedNiches(shorts, assignedNicheIds, nicheById, judgedVideoIds, period)
+    ? collectSkippedNiches(
+        shorts,
+        assignedNicheIds,
+        nicheById,
+        judgedVideoIds,
+        period,
+        unpaidHitsByNicheId,
+      )
     : [];
 
   return {
@@ -951,7 +1241,7 @@ export function calculateEmployeePayroll(options: {
     currency: employee.currency,
     employedDuringPeriod: employed,
     baseSalaryMinor,
-    hitPaymentMinor: employee.hitPaymentMinor,
+    hitPaymentMinor: singleRateOf(byNiche),
     hitCount,
     hitBonusMinor,
     totalMinor: baseSalaryMinor + hitBonusMinor,
@@ -962,13 +1252,22 @@ export function calculateEmployeePayroll(options: {
   };
 }
 
-function summariseByNiche(
-  hits: readonly QualifyingHit[],
-  hitPaymentMinor: number,
-): NicheBreakdown[] {
+/**
+ * Per-niche lines, with each niche's own rate on them.
+ *
+ * THE RATE IS NO LONGER A PARAMETER, and that is the shape of the whole change:
+ * it used to be handed in once, from the employee, and applied to every line.
+ * Now it comes off the hits, which each carry the price of the niche that
+ * judged them — so a line is `hitCount × that niche's rate`, and two lines on
+ * one record can honestly disagree about what a hit is worth.
+ *
+ * Every hit in a bucket carries the same rate by construction: the bucket key
+ * IS the niche, and the rate was read from that niche once per run.
+ */
+function summariseByNiche(hits: readonly QualifyingHit[]): NicheBreakdown[] {
   const buckets = new Map<
     string,
-    { name: string; threshold: number; windowHours: number; count: number }
+    { name: string; threshold: number; windowHours: number; rate: number; count: number }
   >();
 
   for (const hit of hits) {
@@ -980,6 +1279,7 @@ function summariseByNiche(
         name: hit.nicheName,
         threshold: hit.thresholdApplied,
         windowHours: hit.windowHoursApplied,
+        rate: hit.hitPaymentMinor,
         count: 1,
       });
     }
@@ -991,11 +1291,32 @@ function summariseByNiche(
       nicheName: bucket.name,
       thresholdApplied: bucket.threshold,
       windowHoursApplied: bucket.windowHours,
+      hitPaymentMinor: bucket.rate,
       hitCount: bucket.count,
-      bonusMinor: bucket.count * hitPaymentMinor,
+      bonusMinor: bucket.count * bucket.rate,
     }))
     // Most-earning first, then by name so equal rows do not shuffle.
     .sort((a, b) => b.bonusMinor - a.bonusMinor || a.nicheName.localeCompare(b.nicheName));
+}
+
+/**
+ * The rate a whole record was paid at, when there is exactly one.
+ *
+ * `0` when the record spans several niches at different prices, or earned
+ * nothing at all. Not an average — averaging $5 and $3 into $4 would print a
+ * rate nobody was ever paid, on a document whose entire value is that it can be
+ * checked. Where a record does have one rate, which is every person working a
+ * single niche, this is it and the payslip reads exactly as it always has.
+ *
+ * Feeds `PayrollRecord.hitPaymentMinor`, a single `Int` column on a schema that
+ * is not ours to change. The per-niche truth survives in the lines themselves.
+ */
+function singleRateOf(byNiche: readonly NicheBreakdown[]): number {
+  const first = byNiche[0];
+  if (first === undefined) return 0;
+  return byNiche.every((line) => line.hitPaymentMinor === first.hitPaymentMinor)
+    ? first.hitPaymentMinor
+    : 0;
 }
 
 /** The whole team's payroll for a period. */
@@ -1087,6 +1408,9 @@ function runScope(
 
   const judgedVideoIds = new Set<string>();
   const unresolvedByVideoId = new Map<string, UncreditedReason>();
+  // The run-level counterpart of the per-employee bucket: hits nobody could be
+  // paid for, because the niche that judged them has no rate.
+  const unpaidHitsByNicheId = new Map<string, Set<string>>();
 
   for (const short of options.shorts) {
     if (!short.isOwnChannel) continue;
@@ -1116,6 +1440,17 @@ function runScope(
     const outcome = judged.verdict.outcome;
     if (outcome === "pending" || outcome === "unknown") {
       unresolvedByVideoId.set(short.videoId, outcome);
+      continue;
+    }
+
+    // A hit that nobody was paid for, in a niche that has no price. Counted
+    // here rather than in `unresolved` because it is neither a wait nor a lost
+    // window — the verdict is settled and favourable, and the only thing
+    // missing is a number an admin can still set before the month is frozen.
+    if (outcome === "hit" && payableRateFor(judged.niche) === null) {
+      const bucket = unpaidHitsByNicheId.get(judged.niche.id);
+      if (bucket) bucket.add(short.videoId);
+      else unpaidHitsByNicheId.set(judged.niche.id, new Set([short.videoId]));
     }
   }
 
@@ -1126,6 +1461,7 @@ function runScope(
       nicheById,
       judgedVideoIds,
       options.period,
+      unpaidHitsByNicheId,
     ),
     unresolved: tallyUnresolved(unresolvedByVideoId.values()),
   };

@@ -19,8 +19,24 @@ import {
   toUtcDayInputValue,
 } from "@/components/admin/payroll/payroll-format";
 import { formatHitWindow } from "@/lib/analytics/hit-rate";
+/*
+ * THE SENTENCES ON THIS PAGE ARE NOT WRITTEN IN THIS FILE, and that is the one
+ * structural thing worth knowing about it. They explain why somebody's bonus is
+ * zero, they have been wrong before, and a sentence composed inline in JSX
+ * cannot be asserted on by a suite that has no DOM. They live in
+ * `lib/payroll/earnings-copy.ts`, which reads the server's own `ruleMissing` —
+ * the same value `describeNicheGap` gives the payroll screen and the finalize
+ * dialog, so an admin and an employee looking at one niche are never told two
+ * different things about it.
+ */
+import {
+  blankBonusNote,
+  explainBlankBonus,
+  missingRuleSentence,
+  unrecordedRuleSentence,
+} from "@/lib/payroll/earnings-copy";
 import { formatMoneyTrimmed } from "@/lib/finance/money";
-import { formatDate, formatNumber } from "@/lib/format";
+import { EM_DASH, formatDate, formatNumber } from "@/lib/format";
 import { useNow } from "@/hooks/use-now";
 import {
   useMyEarnings,
@@ -113,7 +129,7 @@ export default function EarningsPage() {
             action={
               session.can("payroll.view") ? (
                 <Button asChild variant="primary" size="sm">
-                  <Link href="/admin/payroll">Open Payroll</Link>
+                  <Link href="/finance/payroll">Open Payroll</Link>
                 </Button>
               ) : undefined
             }
@@ -455,12 +471,14 @@ function EarningsView({ earnings }: { earnings: MyEarningsDTO }) {
                       earnings.hitCount === 1 ? "hit" : "hits"
                     }${earnings.basis === "estimate" ? " so far" : ""}`
                   : // A zero that is nobody's performance. "No hits yet" reads
-                    // as a verdict on the work; this one is a missing setting,
-                    // and the row directly under the total is where somebody
-                    // stops reading, so it has to say so here and not only in
-                    // the card below.
+                    // as a verdict on the work; this one is a missing setting
+                    // or an arrangement, and the row directly under the total is
+                    // where somebody stops reading, so it has to say so here and
+                    // not only in the card below. It says WHICH, for the same
+                    // reason the card does — the two are read one after the
+                    // other and must not describe the same zero differently.
                     earnings.noMeasurableNiche
-                    ? "nothing can be counted yet — see below"
+                    ? blankBonusNote(earnings.byNiche)
                     : "no hits yet"
               }
             />
@@ -879,35 +897,16 @@ function HitsCard({ earnings }: { earnings: MyEarningsDTO }) {
         ) : (
           <div className="flex flex-col gap-px">
             {/*
-              THE STATE THIS BLOCK EXISTS FOR. Somebody whose every niche is
-              unconfigured earns no hit bonus at all, and without this the page
-              renders that as a column of zeroes — which reads as "you did not
-              land a single hit". It is not that. Nothing was measured, because
-              nobody has said what a hit is in any niche this person works in,
-              and the only person who can fix it is an administrator.
+              THE STATE THIS BLOCK EXISTS FOR. Somebody who cannot earn a hit
+              bonus in any niche they are on earns none at all, and without this
+              the page renders that as a column of zeroes — which reads as "you
+              did not land a single hit". It is not that.
 
               Above the rows rather than below them, because it changes what
               every row underneath means.
             */}
             {earnings.noMeasurableNiche ? (
-              <div className="mb-2 flex gap-2.5 rounded-lg border border-warning/40 bg-warning-subtle/40 px-3.5 py-3">
-                <Target className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
-                <div className="min-w-0">
-                  <p className="text-[13px] font-medium text-foreground">
-                    Your hits cannot be counted yet
-                  </p>
-                  <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-                    A hit needs two settings: how many views, and how long a
-                    Short has to reach them. Neither is fully set for the{" "}
-                    {earnings.byNiche.length === 1 ? "niche" : "niches"} you are
-                    on, so none of your Shorts can be counted as one. These are
-                    settings an administrator fills in — it is not about your
-                    work, and it does not affect your normal pay. Ask an
-                    administrator to finish the hit rule for{" "}
-                    {earnings.byNiche.map((line) => line.nicheName).join(", ")}.
-                  </p>
-                </div>
-              </div>
+              <NoBonusPossibleNotice lines={earnings.byNiche} />
             ) : null}
 
             {earnings.byNiche.map((line) => (
@@ -933,24 +932,37 @@ function HitsCard({ earnings }: { earnings: MyEarningsDTO }) {
 }
 
 /**
- * What is missing from this niche's rule, said the way somebody would ask for it.
+ * The headline for a bonus that could not have been anything but zero.
  *
- * A finalized line never reaches here, so there is no case for "the rule was not
- * recorded" — that one belongs on the admin screen, where a stored hit whose
- * evaluation has gone still has to render. Here the only reason a half is
- * absent is that nobody has set it yet.
+ * The words are `explainBlankBonus`'s, not this file's — see
+ * `lib/payroll/earnings-copy.ts` for why the sentences on this screen live
+ * somewhere a test can reach them. What stays here is the only part that is
+ * genuinely a rendering decision: a state nobody has to fix is not drawn as a
+ * warning.
  */
-function missingRuleSentence(line: MyEarningsNicheLineDTO): string {
-  const noThreshold = line.thresholdApplied === null;
-  const noWindow = line.windowHoursApplied === null;
+function NoBonusPossibleNotice({ lines }: { lines: readonly MyEarningsNicheLineDTO[] }) {
+  const { title, body, nothingToFix } = explainBlankBonus(lines);
 
-  if (noThreshold && noWindow) {
-    return "Nobody has set what counts as a hit here yet — it needs both a number of views and a window to reach it in — so nothing in this niche can be counted. An administrator sets both.";
-  }
-  if (noThreshold) {
-    return "Nobody has set the number of views that counts as a hit here yet, so nothing in this niche can be counted. An administrator sets it.";
-  }
-  return `A hit here needs ${formatNumber(line.thresholdApplied ?? 0)} views, but nobody has set how long a Short has to reach them — so nothing in this niche can be counted yet. An administrator sets the window.`;
+  return (
+    <div
+      className={cn(
+        "mb-2 flex gap-2.5 rounded-lg border px-3.5 py-3",
+        nothingToFix ? "border-border bg-surface-sunken" : "border-warning/40 bg-warning-subtle/40",
+      )}
+    >
+      <Target
+        className={cn(
+          "mt-0.5 size-4 shrink-0",
+          nothingToFix ? "text-subtle-foreground" : "text-warning",
+        )}
+        aria-hidden
+      />
+      <div className="min-w-0">
+        <p className="text-[13px] font-medium text-foreground">{title}</p>
+        <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">{body}</p>
+      </div>
+    </div>
+  );
 }
 
 function NicheHitLine({
@@ -962,19 +974,43 @@ function NicheHitLine({
   currency: string;
   basis: MyEarningsDTO["basis"];
 }) {
-  const rate = formatMoneyTrimmed(line.hitPaymentMinor, currency);
+  /*
+   * THE RATE IS THE NICHE'S, and "120 hits × $5 = $600" is still the line — the
+   * $5 simply comes from the niche now rather than from this person's profile.
+   * Null when there is none to state: an unconfigured niche, a watchlist niche,
+   * or a settled record whose per-niche prices could not be recovered.
+   */
+  const rate =
+    line.hitPaymentMinor === null
+      ? null
+      : formatMoneyTrimmed(line.hitPaymentMinor, currency);
 
   /**
-   * Nobody has set a number for this niche, so there is nothing to be measured
-   * against and no such thing as a hit in it yet.
+   * One of this niche's three settings is missing, so it cannot pay.
    *
    * This line used to read "A hit here is 1,000,000 views" — the company-wide
    * number, borrowed. It said the bar was known when it was not, and the bonus
    * underneath it was real money paid against a figure nobody had chosen for
-   * this niche. Now the row says the true thing, which is that the setting is
+   * this niche. Now the row says the true thing, which is that a setting is
    * missing.
+   *
+   * NOT ENOUGH ON ITS OWN TO SAY WHICH, and that is the whole of the second bug
+   * here. "unconfigured" covers a niche with no rule and a niche whose rule is
+   * finished but has no price on it — states that read identically here and
+   * send somebody to two different fields. `line.ruleMissing` is what tells
+   * them apart, and it is what every sentence and label below branches on.
    */
   const unconfigured = line.thresholdSource === "unconfigured";
+  /**
+   * A niche the studio follows rather than publishes into.
+   *
+   * NOT the same state as `unconfigured`, and the row must not read as though
+   * it were. Nothing is missing here and nobody has to go and fix anything —
+   * hits in a watchlist niche are measured, shown, and deliberately not paid.
+   * Telling somebody to chase a setting that should not exist wastes their time
+   * and their administrator's.
+   */
+  const watchlist = line.thresholdSource === "watchlist";
 
   return (
     <div className="flex items-baseline justify-between gap-4 py-2.5">
@@ -988,25 +1024,46 @@ function NicheHitLine({
             rules out — so it is a sentence instead.
           */}
           {/*
-            THE RULE HAS TWO HALVES AND THE ROW NAMES THE MISSING ONE.
+            A HIT IS THREE SETTINGS AND THE ROW NAMES THE MISSING ONE.
             "A hit here is 500,000 views" was a complete sentence when a
-            threshold was the whole rule. It is now half of one — a Short can
-            reach 500,000 views and not be a hit — so the window is stated with
-            it, and when either half is unset the row says WHICH, because the
-            person reading it will be the one asking an administrator to fix it.
+            threshold was the whole rule. It is now a third of one — a Short can
+            reach 500,000 views and not be a hit, and it can be a hit and still
+            be worth nothing — so the window is stated with it and the gap comes
+            from `ruleMissing`, which is the server's own answer to "what is
+            absent here". Derived rather than re-inferred from the two rule
+            columns, because that inference is what sent somebody after a hit
+            window that was never missing.
           */}
-          {unconfigured || line.thresholdApplied === null || line.windowHoursApplied === null
-            ? missingRuleSentence(line)
-            : `A hit here is ${formatNumber(line.thresholdApplied)} views within ${formatHitWindow(line.windowHoursApplied)} of going live.`}
+          {watchlist
+            ? line.thresholdApplied === null || line.windowHoursApplied === null
+              ? "A niche Northstar follows rather than publishes into. Hits here are not paid a bonus."
+              : `A hit here is ${formatNumber(line.thresholdApplied)} views within ${formatHitWindow(line.windowHoursApplied)} of going live — but this is a niche Northstar follows rather than publishes into, so hits in it are not paid a bonus.`
+            : line.ruleMissing !== null
+              ? missingRuleSentence(line, line.ruleMissing)
+              : line.thresholdApplied === null || line.windowHoursApplied === null
+                ? unrecordedRuleSentence(line)
+                : `A hit here is ${formatNumber(line.thresholdApplied)} views within ${formatHitWindow(line.windowHoursApplied)} of going live.`}
         </p>
       </div>
 
       <p className="tnum shrink-0 text-[14px] text-foreground">
-        {unconfigured ? (
-          // NOT "No hits". Zero hits is an outcome, and this is not one — the
-          // counting never happened. Saying "none" here would be the whole bug
-          // over again, one row lower down.
-          <span className="text-subtle-foreground">Waiting on a number</span>
+        {watchlist ? (
+          // NOT "waiting on a number" and NOT a zero. Nothing is missing and
+          // nothing is coming: this is the arrangement working as intended.
+          <span className="text-subtle-foreground">Not paid</span>
+        ) : unconfigured ? (
+          // NOT "No hits" in either case. Zero hits is an outcome and neither of
+          // these is one, so saying "none" here would be the whole bug over
+          // again, one row lower down.
+          //
+          // TWO WORDINGS, because the two gaps stopped at different points. A
+          // rule gap means the counting never happened; a payment gap means it
+          // did, some of these Shorts won, and the price is the thing that is
+          // absent — and the sentence to the left of this now says exactly that,
+          // so a label claiming nothing was counted would contradict it.
+          <span className="text-subtle-foreground">
+            {line.ruleMissing?.rule === null ? "Waiting on a price" : "Waiting on a number"}
+          </span>
         ) : line.hitCount === 0 ? (
           // "yet" only while the number can still change. On a closed period it
           // would promise a hit that is never coming.
@@ -1016,10 +1073,19 @@ function NicheHitLine({
         ) : (
           <>
             <span className="text-muted-foreground">
-              {formatNumber(line.hitCount)} {line.hitCount === 1 ? "hit" : "hits"} × {rate} ={" "}
+              {formatNumber(line.hitCount)} {line.hitCount === 1 ? "hit" : "hits"}
+              {rate === null ? " " : ` × ${rate} = `}
             </span>
+            {/*
+              An em dash rather than a zero when the rate could not be stated.
+              "This niche earned nothing" and "this settled month cannot be
+              broken down by niche" are different claims, and the total above
+              these rows is the stored figure either way.
+            */}
             <span className="font-medium">
-              {formatMoneyTrimmed(line.bonusMinor, currency)}
+              {line.bonusMinor === null
+                ? EM_DASH
+                : formatMoneyTrimmed(line.bonusMinor, currency)}
             </span>
           </>
         )}

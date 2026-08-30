@@ -20,6 +20,20 @@
  * every chart, every report and the payroll run, which is precisely the
  * organization-wide analysis configuration `settings.manage` already guards.
  *
+ * THE THREE NUMBERS ARE ONE RULE, SO THEY SHARE ONE PERMISSION. A hit is a bar,
+ * a clock, and — now — what it is worth. `hitPaymentMinor` joins the other two
+ * behind `settings.manage` rather than getting a permission of its own: it is
+ * the same decision made in the same dialog, and guarding two thirds of a rule
+ * would let somebody redefine what a hit pays by editing the third nobody
+ * thought to protect.
+ *
+ * `kind` IS DIFFERENT AND STAYS ON `niches.manage`. Calling a niche production
+ * or watchlist is a statement about what the studio is doing, not about how a
+ * number is computed — it is the same class of act as naming the niche in the
+ * first place, and the person who organises the taxonomy is the person who
+ * knows the answer. It does move the portfolio hit rate, which is why it is not
+ * free: it is `niches.manage`, the floor for touching a shared label at all.
+ *
  * The check lives in this file rather than only in the route because a service
  * function is reachable from anywhere on the server — another service, a job, a
  * future route somebody writes in a hurry. A rule enforced one layer up is a
@@ -29,13 +43,15 @@
 import { z } from "zod";
 import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
-import { requireActor } from "@/server/auth/dal";
+import { actorCan, requireActor } from "@/server/auth/dal";
 import {
   MAX_HIT_WINDOW_HOURS,
   MAX_THRESHOLD,
   MIN_HIT_WINDOW_HOURS,
   MIN_THRESHOLD,
 } from "@/lib/analytics/constants";
+import { MAX_MONEY_MINOR } from "@/lib/finance/money";
+import { NICHE_KINDS, type NicheKind } from "@/lib/niches/niche-kind";
 import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
@@ -69,7 +85,7 @@ async function assertMayConfigureRule(): Promise<void> {
   const actor = await requireActor();
   if (!actor.permissions.has("settings.manage")) {
     throw errors.forbidden(
-      "set a hit rate threshold. Hit rate thresholds and windows are configured by an Admin",
+      "set a hit rate threshold. Hit rate thresholds, windows and payments are configured by an Admin",
     );
   }
 }
@@ -88,9 +104,44 @@ export const nicheNameSchema = z
   .min(1, "Give the niche a name.")
   .max(48, "Niche names must be 48 characters or fewer.");
 
+/**
+ * What one hit is worth, in minor units.
+ *
+ * `min(1)` rather than `min(0)`: zero is not a rate anybody meant to type, and
+ * letting it through would produce a niche that looks configured and pays
+ * nothing — the silent half-configured state this whole round exists to name.
+ * Clearing is done with an explicit `null`, which is a visible "unconfigured"
+ * everywhere and is reported before a payroll run is finalized.
+ *
+ * The ceiling is the money ceiling, because this number is multiplied by a hit
+ * count and written into an `Int` column further downstream.
+ */
+const hitPaymentMinorSchema = z
+  .number()
+  .int("A hit payment is a whole number of minor units (cents), never a fraction of one.")
+  .min(1, "A hit payment of nothing is not a rate. Clear it instead to leave it unset.")
+  .max(MAX_MONEY_MINOR, "That hit payment is too large to record.")
+  .nullable()
+  .optional();
+
+/**
+ * "production" | "watchlist".
+ *
+ * A Zod enum over the shared union rather than a free string, because this
+ * column decides which niches the portfolio hit rate is measured over — an
+ * unrecognised value reaching the database would put a niche in neither group
+ * and quietly change the studio's headline number.
+ */
+const nicheKindSchema = z.enum(
+  NICHE_KINDS as unknown as [NicheKind, ...NicheKind[]],
+  { message: "A niche is either production or watchlist." },
+);
+
 export const createNicheSchema = z.object({
   name: nicheNameSchema,
   colorIndex: z.number().int().min(0).max(NICHE_COLOR_COUNT - 1).optional(),
+  /** Absent means production — the column default, and the inclusive answer. */
+  kind: nicheKindSchema.optional(),
   hitThreshold: z.number().int().min(MIN_THRESHOLD).max(MAX_THRESHOLD).nullable().optional(),
   hitWindowHours: z
     .number()
@@ -99,12 +150,29 @@ export const createNicheSchema = z.object({
     .max(MAX_HIT_WINDOW_HOURS)
     .nullable()
     .optional(),
+  hitPaymentMinor: hitPaymentMinorSchema,
 });
 
 export const updateNicheSchema = z.object({
   name: nicheNameSchema.optional(),
   colorIndex: z.number().int().min(0).max(NICHE_COLOR_COUNT - 1).optional(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
+  /**
+   * Reclassifying a niche. `niches.manage`, like renaming it.
+   *
+   * Moving a niche to watchlist takes its channels out of the portfolio hit
+   * rate and stops any hit in it paying. Moving it back puts them straight
+   * back, including the rate it was carrying — nothing is cleared on the way
+   * through, so the act is reversible and an admin who mis-clicks loses no
+   * number they chose.
+   */
+  kind: nicheKindSchema.optional(),
+  /**
+   * What one hit here pays. `null` clears it, leaving the niche unable to pay
+   * anything — a visible state the payroll run names before it is finalized,
+   * never a quiet fall back to the employee's own rate.
+   */
+  hitPaymentMinor: hitPaymentMinorSchema,
   /**
    * `null` clears the threshold, leaving the niche unconfigured — which is now
    * a visible state ("Hit rate threshold: Not configured"), not a quiet fall
@@ -142,8 +210,22 @@ function toSlug(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+/**
+ * Who may see what a hit PAYS, as opposed to what counts as one.
+ *
+ * `settings.manage` — the same permission that lets somebody SET the rate.
+ * Anybody who can change a number can obviously read it, and nobody else has a
+ * use for the catalogue-wide view: an employee's own rates reach them through
+ * their Earnings page, per niche and beside the hits they earned, which is the
+ * only place the figure means anything to them.
+ */
+async function mayReadHitPayment(): Promise<boolean> {
+  return actorCan("settings.manage");
+}
+
 export async function listNiches(): Promise<NicheDTO[]> {
   const organizationId = await getCurrentOrgId();
+  const includePay = await mayReadHitPayment();
 
   const niches = await prisma.niche.findMany({
     // The whole team shares one taxonomy, so this lists the organization's
@@ -165,24 +247,31 @@ export async function listNiches(): Promise<NicheDTO[]> {
   });
 
   return niches.map((niche) =>
-    toNicheDTO(niche, niche._count.channels, niche.createdBy),
+    toNicheDTO(niche, niche._count.channels, niche.createdBy, { includePay }),
   );
 }
 
 export async function createNiche(input: {
   name: string;
   colorIndex?: number;
+  kind?: NicheKind;
   hitThreshold?: number | null;
   hitWindowHours?: number | null;
+  hitPaymentMinor?: number | null;
 }): Promise<NicheDTO> {
-  // The threshold check comes before anything is read or written. An employee's
-  // create request that carries a threshold is REFUSED, not quietly stripped:
-  // silently dropping it would create the niche and tell them nothing, and they
-  // would go on believing they had set a number that does not exist.
+  // The rule check comes before anything is read or written. An employee's
+  // create request that carries any of the three numbers is REFUSED, not
+  // quietly stripped: silently dropping one would create the niche and tell
+  // them nothing, and they would go on believing they had set a value that does
+  // not exist.
   //
-  // `in` rather than `!== undefined` so an explicit `hitThreshold: null` is
-  // caught too — clearing a threshold is a threshold write.
-  if (sent(input, "hitThreshold") || sent(input, "hitWindowHours")) {
+  // `in` rather than `!== undefined` so an explicit `null` is caught too —
+  // clearing any of the three is a write to the rule.
+  if (
+    sent(input, "hitThreshold") ||
+    sent(input, "hitWindowHours") ||
+    sent(input, "hitPaymentMinor")
+  ) {
     await assertMayConfigureRule();
   }
 
@@ -214,6 +303,11 @@ export async function createNiche(input: {
       // Cycle the accent so consecutively created niches are visually distinct
       // without the user having to pick a colour.
       colorIndex: input.colorIndex ?? count % NICHE_COLOR_COUNT,
+      // Production unless somebody says otherwise — the inclusive default. A
+      // niche that defaulted to watchlist would drop its channels out of the
+      // portfolio hit rate the moment it was created, which is a number moving
+      // for a reason nobody chose. Opting OUT of the scorecard is deliberate.
+      kind: input.kind ?? "production",
       // Null when an employee created it, and null is a real state now: the
       // niche exists, works as a filter, and reports no hit rate until an admin
       // says what a hit is.
@@ -222,12 +316,16 @@ export async function createNiche(input: {
       // nothing rather than falling back to comparing lifetime views, which is
       // the age-biased number this whole rule exists to replace.
       hitWindowHours: input.hitWindowHours ?? null,
+      // The price, and null for the same reason again: a niche that cannot say
+      // what a hit is worth pays nothing rather than guessing, and the payroll
+      // run names it before anybody finalizes.
+      hitPaymentMinor: input.hitPaymentMinor ?? null,
       sortOrder: count,
     },
     include: { createdBy: AUTHOR_SELECT },
   });
 
-  return toNicheDTO(niche, 0, niche.createdBy);
+  return toNicheDTO(niche, 0, niche.createdBy, { includePay: await mayReadHitPayment() });
 }
 
 export async function updateNiche(
@@ -236,15 +334,21 @@ export async function updateNiche(
     name?: string;
     colorIndex?: number;
     sortOrder?: number;
+    kind?: NicheKind;
     hitThreshold?: number | null;
     hitWindowHours?: number | null;
+    hitPaymentMinor?: number | null;
   },
 ): Promise<NicheDTO> {
   // Same rule as on create, and checked before the row is even looked up: a
-  // rename is `niches.manage`, a threshold is `settings.manage`. Somebody who
-  // may do the first and not the second gets a 403 rather than a niche that
-  // silently kept its old number.
-  if (sent(update, "hitThreshold") || sent(update, "hitWindowHours")) {
+  // rename and a reclassification are `niches.manage`, the three numbers are
+  // `settings.manage`. Somebody who may do the first and not the second gets a
+  // 403 rather than a niche that silently kept its old figures.
+  if (
+    sent(update, "hitThreshold") ||
+    sent(update, "hitWindowHours") ||
+    sent(update, "hitPaymentMinor")
+  ) {
     await assertMayConfigureRule();
   }
 
@@ -261,8 +365,10 @@ export async function updateNiche(
     slug?: string;
     colorIndex?: number;
     sortOrder?: number;
+    kind?: NicheKind;
     hitThreshold?: number | null;
     hitWindowHours?: number | null;
+    hitPaymentMinor?: number | null;
   } = {};
 
   if (update.name !== undefined) {
@@ -282,8 +388,21 @@ export async function updateNiche(
 
   if (update.colorIndex !== undefined) data.colorIndex = update.colorIndex;
   if (update.sortOrder !== undefined) data.sortOrder = update.sortOrder;
+  if (update.kind !== undefined) data.kind = update.kind;
   if (update.hitThreshold !== undefined) data.hitThreshold = update.hitThreshold;
   if (update.hitWindowHours !== undefined) data.hitWindowHours = update.hitWindowHours;
+  /*
+   * The stored rate is written when it is sent and LEFT ALONE otherwise —
+   * including when the niche is being moved to watchlist in the same request.
+   *
+   * Clearing it on reclassification was the tempting rule and is the wrong one.
+   * `kind` is a reversible statement about what the studio is doing, and a
+   * mis-click that silently destroyed the number an admin chose for GTA would
+   * make it not reversible. Nothing READS the rate while a niche is watchlist —
+   * the mapper does not ship it, the payroll engine does not consider the niche
+   * at all — so keeping it costs nothing and losing it costs a decision.
+   */
+  if (update.hitPaymentMinor !== undefined) data.hitPaymentMinor = update.hitPaymentMinor;
 
   const updated = await prisma.niche.update({
     where: { id: niche.id },
@@ -296,12 +415,21 @@ export async function updateNiche(
 
   // The rule moved, so every stored verdict it produced answers a question
   // nobody is asking any more.
+  //
+  // NEITHER `hitPaymentMinor` NOR `kind` IS PART OF THAT TEST, and both
+  // omissions are deliberate. A verdict is "did this Short reach the bar inside
+  // the window" — what the answer is worth, and whether the studio competes in
+  // this niche, change nothing about it. Re-deciding a library because a rate
+  // moved would be a lot of work to reach the identical answer, and a watchlist
+  // niche keeps scoring its Shorts precisely because watching them is the point.
   const ruleChanged =
     (update.hitThreshold !== undefined && update.hitThreshold !== niche.hitThreshold) ||
     (update.hitWindowHours !== undefined && update.hitWindowHours !== niche.hitWindowHours);
   if (ruleChanged) await rejudgeAfterRuleChange(organizationId, niche.id);
 
-  return toNicheDTO(updated, updated._count.channels, updated.createdBy);
+  return toNicheDTO(updated, updated._count.channels, updated.createdBy, {
+    includePay: await mayReadHitPayment(),
+  });
 }
 
 /**

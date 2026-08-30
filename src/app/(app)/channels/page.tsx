@@ -8,6 +8,8 @@ import { toast } from "sonner";
 import { PageContainer, PageHeader } from "@/components/layout/app-shell";
 import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
 import { ChannelRowMenu } from "@/components/channels/channel-row-menu";
+import { ConnectYouTubePanel } from "@/components/youtube/connect-youtube-panel";
+import { ChannelSourceLine } from "@/components/youtube/channel-source";
 import { SearchInput } from "@/components/dashboard/search-input";
 import { PeriodSelector } from "@/components/dashboard/period-selector";
 import { ThresholdSelector } from "@/components/dashboard/threshold-selector";
@@ -21,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { HitRateValue } from "@/components/metrics/hit-rate-value";
 import {
   filterRows,
+  channelCountsByContentType,
   untaggedChannelCount,
   useChannelRows,
   useScopedRows,
@@ -60,6 +63,15 @@ export default function ChannelsPage() {
   const nicheScopedRows = useScopedRows(allRows, niche, ownership);
   const visible = React.useMemo(() => filterRows(rows, query), [rows, query]);
 
+  // Taken over EVERY tracked channel, not the filtered view: whether the studio
+  // has connected its own channels is a fact about the workspace, and a niche
+  // filter that happened to exclude the one own channel must not make the
+  // connect panel swell back to its first-run size.
+  const hasOwnChannel = React.useMemo(
+    () => allRows.some((row) => row.channel.ownershipType === "own"),
+    [allRows],
+  );
+
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
@@ -83,6 +95,22 @@ export default function ChannelsPage() {
         </Card>
       ) : (
         <>
+          {/*
+            Connecting lives HERE, not only three clicks away under Admin.
+            This is the screen where somebody first wonders why their own
+            channel's numbers look like the public ones, and the answer belongs
+            beside the question. It takes the full treatment until an own channel
+            is actually tracked, then shrinks to a strip — the panel should stop
+            competing with the roster once it has done its job.
+          */}
+          {/* Held back until the tracker has loaded. The variant depends on
+              whether an own channel exists, and rendering before the answer is
+              known would show the full panel and then visibly collapse it on
+              every first load. */}
+          {isLoading ? null : (
+            <ConnectYouTubePanel variant={hasOwnChannel ? "compact" : "full"} />
+          )}
+
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="flex flex-wrap items-center gap-2">
               <NicheFilterControl
@@ -94,6 +122,7 @@ export default function ChannelsPage() {
               <ContentTypeFilterControl
                 contentTypes={data?.contentTypes ?? []}
                 unassignedCount={untaggedChannelCount(nicheScopedRows)}
+                channelCounts={channelCountsByContentType(nicheScopedRows)}
               />
               <OwnershipFilterControl
                 ownCount={allRows.filter((r) => r.channel.ownershipType === "own").length}
@@ -272,6 +301,18 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
             : `${formatCompactNumber(channel.subscriberCount)} subs`}
         </span>
       </div>
+
+      {/*
+        Where these numbers came from — and, when a connection has failed, that
+        they have stopped moving. Renders nothing for a competitor on the public
+        API, which is every competitor forever and not worth a caption. Above
+        the card's own link overlay so its tooltip is reachable.
+      */}
+      <ChannelSourceLine
+        dataSource={channel.dataSource}
+        ownershipType={channel.ownershipType}
+        className="relative z-10 mt-2"
+      />
     </Card>
   );
 }

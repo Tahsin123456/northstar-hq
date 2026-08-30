@@ -1,5 +1,6 @@
 import type {
   Channel,
+  ChannelContentTypeRule,
   ContentType,
   Niche,
   OrganizationSettings,
@@ -8,6 +9,8 @@ import type {
   Video,
 } from "@prisma/client";
 import type {
+  ChannelContentTypeRuleDTO,
+  ChannelDataSource,
   ChannelDTO,
   ContentTypeDTO,
   ContentTypeRefDTO,
@@ -21,6 +24,7 @@ import type {
   VideoHitDTO,
 } from "@/lib/dto";
 import { isOwnershipType } from "@/lib/dto";
+import { toNicheKind } from "@/lib/niches/niche-kind";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
 import { youtubeChannelUrl } from "@/lib/format";
 
@@ -46,8 +50,18 @@ function bigIntToNumberOrZero(value: bigint | null | undefined): number {
   return bigIntToNumber(value) ?? 0;
 }
 
-export function toNicheRefDTO(niche: Pick<Niche, "id" | "name" | "colorIndex">): NicheRefDTO {
-  return { id: niche.id, name: niche.name, colorIndex: niche.colorIndex };
+export function toNicheRefDTO(
+  niche: Pick<Niche, "id" | "name" | "colorIndex" | "kind">,
+): NicheRefDTO {
+  return {
+    id: niche.id,
+    name: niche.name,
+    colorIndex: niche.colorIndex,
+    // Narrowed here rather than cast. The column is a portable `String`, and an
+    // unreadable value has to read as "production" so a bad row over-counts
+    // visibly instead of silently dropping a niche out of the studio's numbers.
+    kind: toNicheKind(niche.kind),
+  };
 }
 
 /**
@@ -68,10 +82,45 @@ export function toNicheDTO(
   niche: Niche,
   channelCount: number,
   createdBy?: NicheAuthorRow,
+  /**
+   * Whether this reader may see what a hit here PAYS.
+   *
+   * `GET /api/niches` is gated on `analytics.view`, which every employee role
+   * holds, and it returns the whole catalogue. Carrying the rate unconditionally
+   * would publish "a Red Dead hit pays $8, a GTA hit pays $5" to everybody — pay
+   * configuration, on the one endpoint in the app that everybody reads.
+   *
+   * Defaults to false so a caller that has not thought about it discloses
+   * nothing. The one ambiguity this creates — null meaning "not set" OR "not
+   * yours to see" — has no consumer: every surface that reads the amount is
+   * inside the admin section, and the "needs configuration" badge an employee
+   * sees is computed from the threshold and the window, not from this.
+   */
+  options?: { readonly includePay?: boolean },
 ): NicheDTO {
   return {
     ...toNicheRefDTO(niche),
     slug: niche.slug,
+    // Carried, never coerced. `null` is "nobody has said what a hit here is
+    // worth" — a state every payroll surface reports, not a zero it pays.
+    //
+    // A WATCHLIST NICHE NEVER SHIPS A RATE, whatever is stored. Nobody is paid
+    // for a niche the studio only watches, so a number on the wire could only
+    // be rendered beside a bonus that cannot exist. The row keeps its value so
+    // reclassifying a niche is reversible without destroying it.
+    //
+    // AND IT IS NOT WIDENED FOR THE ADMIN WHO MAY CONFIGURE IT, which was the
+    // other way to keep that reversibility honest. This DTO's one list endpoint
+    // is `analytics.view` — every employee role holds it — so a "carried for
+    // whoever may set it" rate would reach the whole team, and a per-hit price
+    // on a niche that pays no bonus is a number that can only mislead whoever
+    // reads it. The reversibility is kept on the WRITE side instead:
+    // `NicheThresholdForm` does not submit a payment field it was never given a
+    // value for, and `updateNiche` leaves the column alone when no key arrives.
+    hitPaymentMinor:
+      options?.includePay !== true || toNicheKind(niche.kind) === "watchlist"
+        ? null
+        : niche.hitPaymentMinor,
     hitThreshold: niche.hitThreshold,
     hitWindowHours: niche.hitWindowHours,
     sortOrder: niche.sortOrder,
@@ -104,18 +153,22 @@ export function toContentTypeRefDTO(
  * what "in use" means (content-type-service) from being quietly duplicated
  * here.
  *
- * THREE counts, because a tag now attaches to a channel and DEVIATES on a
- * Short, and those are three different facts. The channel count is the one that
- * describes reach — a tag on 6 channels labels every Short those channels have
- * published, with no row per Short anywhere. The two video counts describe only
- * the exceptions: Shorts that carry the tag their channel does not give them,
- * and Shorts that refuse the one it does. Reporting a single "videoCount" here
- * would state a fraction of the truth under a label that claims to be all of
- * it.
+ * THREE counts, because a tag attaches to a STRETCH of a channel's output and
+ * DEVIATES on a Short, and those are three different facts. The rule count is
+ * the one that describes reach — a tag with 6 rules labels every Short inside
+ * those six windows, with no row per Short anywhere. The two video counts
+ * describe only the exceptions: Shorts that carry the tag their rules do not
+ * give them, and Shorts that refuse one their rules do. Reporting a single
+ * "videoCount" here would state a fraction of the truth under a label that
+ * claims to be all of it.
  */
 export function toContentTypeDTO(
   contentType: ContentType,
-  counts: { manualVideoCount: number; excludedVideoCount: number; channelCount: number },
+  counts: {
+    manualVideoCount: number;
+    excludedVideoCount: number;
+    channelRuleCount: number;
+  },
 ): ContentTypeDTO {
   return {
     ...toContentTypeRefDTO(contentType),
@@ -124,7 +177,7 @@ export function toContentTypeDTO(
     isActive: contentType.isActive,
     manualVideoCount: counts.manualVideoCount,
     excludedVideoCount: counts.excludedVideoCount,
-    channelCount: counts.channelCount,
+    channelRuleCount: counts.channelRuleCount,
     createdAt: contentType.createdAt.getTime(),
   };
 }
@@ -147,23 +200,67 @@ export type TrackedChannelProjection = Pick<
   TrackedChannel,
   "label" | "addedAt" | "isActive" | "ownershipType"
 > & {
-  niches?: Array<{ niche: Pick<Niche, "id" | "name" | "colorIndex"> }>;
+  niches?: Array<{ niche: Pick<Niche, "id" | "name" | "colorIndex" | "kind"> }>;
   /**
-   * The channel's content-type tags.
+   * The channel's content-type RULES — what it made, and when.
    *
    * Optional like `niches` and unlike the video side's, and the difference is
-   * the tenancy: `ChannelContentType` hangs off `TrackedChannel`, which is
+   * the tenancy: `ChannelContentTypeRule` hangs off `TrackedChannel`, which is
    * already this organization's row, so a query that omits the relation is
    * simply not asking about tags. `VideoContentType` hangs off a globally
    * shared `Video`, where the same omission would silently publish another
    * team's Short as unclassified — which is why that one is required.
    */
-  contentTypes?: Array<{ contentTypeId: string }>;
+  contentTypeRules?: ChannelContentTypeRuleProjection[];
 };
 
+/** The rule columns the DTO needs. Narrower than the row, and named so. */
+export type ChannelContentTypeRuleProjection = Pick<
+  ChannelContentTypeRule,
+  | "id"
+  | "contentTypeId"
+  | "effectiveFrom"
+  | "effectiveUntil"
+  | "consecutiveOverrides"
+  | "overrideStreakFrom"
+  | "autoClosedAt"
+>;
+
+/**
+ * One rule, with every `DateTime` flattened to epoch milliseconds.
+ *
+ * The flattening is not cosmetic. `resolveContentTypes` runs in the browser
+ * against these same windows, and a `Date` that has been through JSON arrives
+ * there as a STRING — where `publishedAt < effectiveUntil` silently becomes a
+ * comparison between a number and a string and is false for every Short ever
+ * published. Numbers on the wire mean the rule the client evaluates is the rule
+ * the server wrote.
+ */
+export function toChannelContentTypeRuleDTO(
+  rule: ChannelContentTypeRuleProjection,
+): ChannelContentTypeRuleDTO {
+  return {
+    id: rule.id,
+    contentTypeId: rule.contentTypeId,
+    effectiveFrom: rule.effectiveFrom.getTime(),
+    effectiveUntil: rule.effectiveUntil?.getTime() ?? null,
+    consecutiveOverrides: rule.consecutiveOverrides,
+    overrideStreakFrom: rule.overrideStreakFrom?.getTime() ?? null,
+    autoClosedAt: rule.autoClosedAt?.getTime() ?? null,
+  };
+}
+
+/**
+ * @param dataSource Where this channel's figures were read from. Defaults to
+ * "public", which is both the truth for every competitor and the correct answer
+ * for any caller that has not asked — a channel is only ever read through a
+ * connection when one demonstrably exists, so defaulting the other way would let
+ * an omission ASSERT a connection that is not there. See `ChannelDataSource`.
+ */
 export function toChannelDTO(
   channel: Channel,
   tracked: TrackedChannelProjection | null,
+  dataSource: ChannelDataSource = "public",
 ): ChannelDTO {
   const label = tracked?.label ?? null;
   return {
@@ -190,17 +287,26 @@ export function toChannelDTO(
     addedAt: tracked?.addedAt.getTime() ?? channel.createdAt.getTime(),
     isActive: tracked?.isActive ?? false,
     ownershipType: toOwnershipType(tracked?.ownershipType),
+    dataSource,
     // Sorted by name because the join rows come back in insertion order, so
     // without this the chips on a channel silently reshuffle whenever somebody
     // re-saves the assignment.
     niches: (tracked?.niches ?? [])
       .map((assignment) => toNicheRefDTO(assignment.niche))
       .sort((a, b) => a.name.localeCompare(b.name)),
-    // Sorted for the same reason the video side is: stable chip order, and a
-    // stable array for the client memos that key on it.
-    contentTypeIds: (tracked?.contentTypes ?? [])
-      .map((assignment) => assignment.contentTypeId)
-      .sort(),
+    /*
+     * Sorted by when each rule STARTS, oldest first.
+     *
+     * Chronological rather than by tag name, because that is what these are: a
+     * channel's history of what it made. A reader scanning them is following a
+     * story — rankings, then cutscenes — and alphabetical order would shuffle it
+     * into nonsense. `id` breaks the tie so two rules that start at the same
+     * instant do not reshuffle between requests, which would defeat the client
+     * memos that key on this array.
+     */
+    contentTypeRules: (tracked?.contentTypeRules ?? [])
+      .map(toChannelContentTypeRuleDTO)
+      .sort((a, b) => a.effectiveFrom - b.effectiveFrom || a.id.localeCompare(b.id)),
   };
 }
 

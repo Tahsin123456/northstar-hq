@@ -46,7 +46,7 @@ describe("unauthenticated visitors", () => {
   it("sends a protected page to the login screen", () => {
     expect(destinationOf("/")).toBe("/login");
     expect(destinationOf("/finance")).toBe("/login?next=%2Ffinance");
-    expect(destinationOf("/admin/users")).toBe("/login?next=%2Fadmin%2Fusers");
+    expect(destinationOf("/admin/people")).toBe("/login?next=%2Fadmin%2Fpeople");
   });
 
   it("lets the public pages through", () => {

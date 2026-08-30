@@ -73,10 +73,26 @@ export function RecordBreakdown({
                   label={
                     <span className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
                       <span className="text-foreground">{line.nicheName}</span>
+                      {/*
+                        "12 hits × $5", where the $5 is the NICHE's rate. Two
+                        lines on one record can carry two different prices now,
+                        so the figure comes off the line rather than off the
+                        record above it.
+
+                        A line with no rate says the count alone. That happens
+                        on a frozen record whose hits spanned several niches at
+                        several prices and whose rates could not be recovered —
+                        `PayrollRecord` has one rate column, and the recovery
+                        refuses to quote a price that no longer adds up to the
+                        bonus that was actually paid. The count is stored on the
+                        hits themselves and is never in doubt.
+                      */}
                       <span className="tnum text-subtle-foreground">
                         {formatNumber(line.hitCount)}{" "}
-                        {pluralize(line.hitCount, "hit")} ×{" "}
-                        {formatMoney(line.hitPaymentMinor, currency)}
+                        {pluralize(line.hitCount, "hit")}
+                        {line.hitPaymentMinor === null
+                          ? null
+                          : ` × ${formatMoney(line.hitPaymentMinor, currency)}`}
                       </span>
                       {/*
                         THE WHOLE RULE, OR AN HONEST HALF OF IT.
@@ -105,7 +121,15 @@ export function RecordBreakdown({
                       </Badge>
                     </span>
                   }
-                  value={formatMoney(line.bonusMinor, currency)}
+                  // An em dash, never a zero. "This niche earned nothing" and
+                  // "this record cannot be broken down by niche" are different
+                  // claims, and the hit bonus below still states the total that
+                  // was paid.
+                  value={
+                    line.bonusMinor === null
+                      ? EM_DASH
+                      : formatMoney(line.bonusMinor, currency)
+                  }
                   muted
                 />
               ))}

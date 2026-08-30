@@ -6,17 +6,18 @@ import { api, type EmployeePayPatch } from "@/lib/api-client";
 import { ADMIN_KEY } from "./use-admin";
 
 /**
- * Admin › Employees: the roster, one person's profile, and the writes behind
- * both.
+ * The roster half of Admin › People, one person's profile, and the writes
+ * behind both.
  *
  * WHY EVERY WRITE ALSO INVALIDATES THE `["admin"]` NAMESPACE
- * These two screens overlap with Users by design rather than by accident. An
- * approval flips `AppUser.status`, which is a column the Users table renders and
- * a figure the Overview tiles count. A niche assignment and a pay change each
- * write an audit entry, which is a row the audit log shows. Refreshing only the
- * employee caches would leave the neighbouring admin screen quietly asserting
- * the opposite of what this one just did — on the pair of screens whose whole
- * job is to say who works here and what they can reach.
+ * These reads overlap with the account directory by design rather than by
+ * accident: People renders ONE row out of both, so a write here lands in a
+ * table the other read is also feeding. An approval flips `AppUser.status`,
+ * which is a column that row renders from the directory and a figure the
+ * Overview tiles count. A niche assignment and a pay change each write an audit
+ * entry, which is a row the audit log shows. Refreshing only the employee
+ * caches would leave half of the merged row — and the admin screen next door —
+ * quietly asserting the opposite of what this one just did.
  *
  * React Query only refetches queries that are currently mounted, so the extra
  * key costs nothing on a page that is not open.

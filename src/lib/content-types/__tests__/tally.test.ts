@@ -23,21 +23,44 @@ import { tallyEffectiveShorts, type TallyGroup, type TallyVideo } from "../tally
 const MEMES = "ct-memes";
 const RANKING = "ct-ranking";
 
+/** A fixed instant every Short below is published at unless it says otherwise. */
+const PUBLISHED = Date.UTC(2025, 5, 1);
+
 /** A Short that says nothing of its own — the overwhelmingly common row. */
 function short(overrides: Partial<TallyVideo> = {}): TallyVideo {
   return {
     isShort: true,
+    publishedAt: PUBLISHED,
     manualContentTypeIds: [],
     excludedContentTypeIds: [],
     ...overrides,
   };
 }
 
+/**
+ * A channel described by tags rather than by rules.
+ *
+ * Every tag becomes an epoch-dated, open-ended rule — which is exactly what the
+ * migration wrote for the two channels that already carried tags, and exactly
+ * what "Apply to this channel" writes today. So the cases below go on asserting
+ * the same thing they asserted before rules existed: on a channel that has never
+ * changed its mind, a rule IS a flat tag, and the tally must not have noticed the
+ * difference. The window's own behaviour is pinned separately, in
+ * `channel-content-type-rules.test.ts` and in the windowed case at the foot of
+ * this file.
+ */
 function channel(
   channelTypeIds: readonly string[],
   videos: readonly TallyVideo[],
 ): TallyGroup {
-  return { channelTypeIds, videos };
+  return {
+    rules: channelTypeIds.map((contentTypeId) => ({
+      contentTypeId,
+      effectiveFrom: 0,
+      effectiveUntil: null,
+    })),
+    videos,
+  };
 }
 
 describe("inheritance reaches Shorts that store nothing", () => {
@@ -198,7 +221,14 @@ describe("the badge agrees with the filter it labels", () => {
         group.videos.filter((video) => {
           if (!video.isShort) return false;
           const excluded = new Set(video.excludedContentTypeIds);
-          const inherited = group.channelTypeIds.filter((id) => !excluded.has(id));
+          const inherited = group.rules
+            .filter(
+              (rule) =>
+                video.publishedAt >= rule.effectiveFrom &&
+                (rule.effectiveUntil === null || video.publishedAt < rule.effectiveUntil),
+            )
+            .map((rule) => rule.contentTypeId)
+            .filter((id) => !excluded.has(id));
           const manual = video.manualContentTypeIds.filter((id) => !excluded.has(id));
           return inherited.length + manual.length > 0;
         }).length,
@@ -208,3 +238,63 @@ describe("the badge agrees with the filter it labels", () => {
     expect(tagged + tally.untagged).toBe(tally.total);
   });
 });
+
+/**
+ * ==========================================================================
+ * THE WINDOW, IN THE UNIT THE BADGES ARE COUNTED IN
+ * ==========================================================================
+ *
+ * The rule itself is pinned in `channel-content-type-rules.test.ts`. What is
+ * pinned here is that the TALLY honours it — because this is the number the
+ * filter menus print beside each tag, and a tally that ignored windows would
+ * offer "Memes · 412" on a channel that stopped making memes in March and then
+ * deliver the eighty that are still tagged.
+ */
+describe("a rule's window narrows the tally", () => {
+  const MARCH = Date.UTC(2025, 2, 4);
+
+  it("counts only the Shorts published inside the rule", () => {
+    const tally = tallyEffectiveShorts([
+      {
+        rules: [{ contentTypeId: MEMES, effectiveFrom: 0, effectiveUntil: MARCH }],
+        videos: [
+          short({ publishedAt: MARCH - DAY }),
+          short({ publishedAt: MARCH - 2 * DAY }),
+          // The switch itself and everything after it: outside the window, so
+          // untagged rather than mislabelled.
+          short({ publishedAt: MARCH }),
+          short({ publishedAt: MARCH + DAY }),
+        ],
+      },
+    ]);
+
+    expect(tally.byType.get(MEMES)).toBe(2);
+    // AND THE OTHER HALF OF THE SAME FACT. Under a flat channel tag this was
+    // always zero on a tagged channel — every Short inherited — which made the
+    // "Untagged" option useless the moment anybody characterised a channel. A
+    // window gives it something true to point at again.
+    expect(tally.untagged).toBe(2);
+    expect(tally.total).toBe(4);
+  });
+
+  it("hands two Shorts on one channel different tags, with no rows on either", () => {
+    // The case the flat model could not express at all, and the reason for the
+    // whole round: one channel, two eras, both correctly labelled, and not a
+    // single `VideoContentType` row involved.
+    const tally = tallyEffectiveShorts([
+      {
+        rules: [
+          { contentTypeId: MEMES, effectiveFrom: 0, effectiveUntil: MARCH },
+          { contentTypeId: RANKING, effectiveFrom: MARCH, effectiveUntil: null },
+        ],
+        videos: [short({ publishedAt: MARCH - DAY }), short({ publishedAt: MARCH })],
+      },
+    ]);
+
+    expect(tally.byType.get(MEMES)).toBe(1);
+    expect(tally.byType.get(RANKING)).toBe(1);
+    expect(tally.untagged).toBe(0);
+  });
+});
+
+const DAY = 86_400_000;

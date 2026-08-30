@@ -160,6 +160,24 @@ function stripCurrencyMarkers(text: string, currency: string): string {
  * digit strings, so it is not subject to the float representation error that
  * makes `Math.round(1.005 * 100)` return 100.
  */
+/**
+ * Minor units back into the text an input field holds. The inverse of
+ * `parseMoneyToMinor`, and it lives beside it so the round trip cannot drift.
+ *
+ * Plain digits and a dot, never a localised group separator: the value goes
+ * straight back into `parseMoneyToMinor`, and a round trip through the user's
+ * locale is a chance for the number to change on the way. `formatMoney` is for
+ * DISPLAY and is the wrong function here for exactly that reason — it emits
+ * symbols and separators that a form would then have to un-emit.
+ */
+export function minorToInputText(minor: number, currency: string): string {
+  const digits = minorUnitsFor(currency);
+  if (digits === 0) return String(minor);
+  const sign = minor < 0 ? "-" : "";
+  const magnitude = String(Math.abs(minor)).padStart(digits + 1, "0");
+  return `${sign}${magnitude.slice(0, -digits)}.${magnitude.slice(-digits)}`;
+}
+
 export function parseMoneyToMinor(input: string, currency: string): number | null {
   if (typeof input !== "string") return null;
   const minorUnits = minorUnitsFor(currency);

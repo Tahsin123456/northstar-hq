@@ -75,9 +75,63 @@ const PRODUCTION_HEADERS = [
   },
 ];
 
+/**
+ * Where the screens that moved used to live.
+ *
+ * Bookmarks, pasted links in chat and the browser's own autocomplete all
+ * outlive a rearrangement of the navigation, and the alternative to this list
+ * is somebody landing on a 404 for a page that is very much still there. Every
+ * in-app link was repointed at the same time; these exist purely for the URLs
+ * already out in the world.
+ *
+ * `permanent: true` (308) rather than 307: these paths are not coming back, and
+ * caching the redirect means the second visit costs nothing. Redirects are
+ * checked before the filesystem and carry the query string through, which is
+ * what keeps `/admin/payroll/history?year=2026&month=3` landing on the month it
+ * named.
+ *
+ * NOT a substitute for authorization. A redirect only moves somebody to the new
+ * URL; the layout there still decides whether they may see it.
+ */
+const MOVED_ROUTES = [
+  // Payroll is money, so it now sits beside revenue and expenses rather than
+  // beside user administration. `:path*` covers /admin/payroll/history and
+  // anything added under it later.
+  { source: "/admin/payroll", destination: "/finance/payroll", permanent: true },
+  {
+    source: "/admin/payroll/:path*",
+    destination: "/finance/payroll/:path*",
+    permanent: true,
+  },
+  // Users and Employees were two descriptions of the same colleagues. One
+  // screen now, so both old paths land on it.
+  { source: "/admin/users", destination: "/admin/people", permanent: true },
+  { source: "/admin/employees", destination: "/admin/people", permanent: true },
+  // One person's profile kept its shape and changed its parent.
+  {
+    source: "/admin/employees/:id",
+    destination: "/admin/people/:id",
+    permanent: true,
+  },
+  // Compare was deleted rather than moved, which makes it the one entry here
+  // that is not a rename. It still belongs: it was a top-level route with a
+  // sidebar item for months, so it is in bookmarks and in browser autocomplete,
+  // and the block above exists precisely so those do not land on a 404.
+  //
+  // Overview is the honest destination. Compare ranked up to six channels on
+  // hit rate, Shorts, views and consistency; the Overview table ranks ALL of
+  // them on the same metrics and sorts by any column, which is what made
+  // Compare redundant rather than merely unfashionable.
+  { source: "/compare", destination: "/", permanent: true },
+];
+
 const nextConfig: NextConfig = {
   // Do not advertise the framework version to scanners.
   poweredByHeader: false,
+
+  async redirects() {
+    return MOVED_ROUTES;
+  },
 
   async headers() {
     const headers = [

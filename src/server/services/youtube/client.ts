@@ -52,6 +52,43 @@ export class QuotaLedger {
   }
 }
 
+/**
+ * =========================================================================
+ * WHO IS ASKING — THE SHARED KEY, OR ONE CHANNEL'S OWNER
+ * =========================================================================
+ *
+ * Every call in this file used to authenticate the same way: the shared
+ * `YOUTUBE_API_KEY`, which reads public data about anybody. That is still the
+ * only way to see a competitor, and nothing about competitors changes.
+ *
+ * It is NOT how Northstar's own channels should be read. The owner was explicit
+ * that their own channels' data must come from the account they connected and
+ * not from an external key, and they are right on the merits as well: a request
+ * carrying the channel owner's own grant is the authoritative reading, it is not
+ * limited to what YouTube shows the public, and it is charged to the OAuth
+ * client's own project rather than to the key every competitor refresh is also
+ * spending.
+ *
+ * (Charged to that project, note — not to nobody. Data API quota belongs to a
+ * Google Cloud project, so whether these units come out of the same 10,000 as
+ * the API key depends entirely on whether the key and the OAuth client were
+ * created in the same project. The ledger therefore goes on counting them: they
+ * are real units, and a refresh that reports a cost of zero because it happened
+ * to use a bearer token would be lying about what it spent.)
+ *
+ * A credential is a plain access token plus the connection it came from. It is
+ * resolved by the CALLER — `channel-sync.ts`, from `resolveChannelCredential` —
+ * and never by this module: deciding which channels are ours is a question about
+ * one organization's tracker, and a fetch client that answered it would need a
+ * tenancy it has no business holding.
+ */
+export interface YouTubeCredential {
+  /** A live access token. Minted and refreshed by `youtube-oauth-service`. */
+  readonly accessToken: string;
+  /** Which connection it came from, for error messages that name the account. */
+  readonly connectionId: string;
+}
+
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 400;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -68,13 +105,61 @@ function sleep(ms: number): Promise<void> {
  * (momentary throttle — back off and retry). Both arrive as HTTP 403, so the
  * reason string is the only way to tell them apart.
  */
-function mapApiError(status: number, body: RawApiErrorBody | null): AppError {
+function mapApiError(
+  status: number,
+  body: RawApiErrorBody | null,
+  authorisedByConnection: boolean,
+): AppError {
   const reason = body?.error?.errors?.[0]?.reason ?? body?.error?.status ?? "";
   const upstreamMessage = body?.error?.message ?? `HTTP ${status}`;
+
+  /**
+   * A dead bearer token, which only a connection-authorised call can produce.
+   *
+   * Mapped explicitly, and to a NON-retryable code, because the default branch
+   * below would treat it as UPSTREAM_ERROR and retry it three times with
+   * backoff — three identical rejections and a second of sleep to learn what
+   * the first one already said. `MISSING_API_KEY` is this codebase's "correctly
+   * built, not yet authorised" code (503 with a setup message) rather than a
+   * fault, which is exactly what a grant that needs re-consenting is.
+   */
+  if (status === 401 && authorisedByConnection) {
+    return new AppError(
+      // NOT_CONFIGURED and deliberately NOT `MISSING_API_KEY`, which is in the
+      // scheduled sweep's RUN_ENDING_CODES. That set exists for failures every
+      // REMAINING channel would share — a bad shared key, a spent quota — and a
+      // dead grant is the opposite: it belongs to exactly one channel, and the
+      // competitor refreshes queued behind it are completely unaffected. Ending
+      // the run here would let one expired connection freeze the whole tracker.
+      "NOT_CONFIGURED",
+      "Google rejected this channel's connection while reading it. The account needs to be " +
+        "reconnected from Admin → YouTube before this channel can be synced again.",
+      { internalMessage: `YouTube 401 (${reason}) on a connection-authorised call: ${upstreamMessage}` },
+    );
+  }
 
   if (status === 403) {
     if (/quotaExceeded|dailyLimitExceeded/i.test(reason)) return errors.quotaExceeded();
     if (/rateLimitExceeded|userRateLimitExceeded/i.test(reason)) return errors.rateLimited();
+    /**
+     * A refused grant, told apart from a refused key by which one we sent.
+     *
+     * The branch below names the API key and tells the reader to go and check
+     * it — advice that would send somebody auditing a key that was not involved
+     * in the request at all. The two failures have completely different fixes
+     * (re-consent versus fix the key), so the discriminator is the credential
+     * this call actually carried, which is a fact rather than an inference.
+     */
+    if (authorisedByConnection) {
+      return new AppError(
+        // Per-channel, not run-ending — same reasoning as the 401 above.
+        "NOT_CONFIGURED",
+        "Google refused to read this channel with the connected account's authorisation. " +
+          "Reconnect the account from Admin → YouTube, leaving every permission ticked.",
+        { internalMessage: `YouTube 403 (${reason}) on a connection-authorised call: ${upstreamMessage}` },
+      );
+    }
+
     if (/keyInvalid|badRequest|forbidden|accessNotConfigured|API_KEY/i.test(reason + upstreamMessage)) {
       return new AppError(
         "MISSING_API_KEY",
@@ -117,21 +202,36 @@ function isRetryable(error: AppError): boolean {
   );
 }
 
-/** Single place where an outbound YouTube Data API call happens. */
+/**
+ * Single place where an outbound YouTube Data API call happens.
+ *
+ * `credential` decides how it is authorised, and it is one or the other rather
+ * than both: sending a bearer token AND a `key` parameter makes Google's
+ * behaviour depend on which it decides to honour, which is not a thing to leave
+ * to chance on a request whose whole point is *whose* authority it carries.
+ * `requireYouTubeApiKey()` is therefore called only on the key path — so a
+ * deployment that has connected an account but never set a shared key can still
+ * read its own channels, which is precisely the setup the owner described.
+ */
 async function apiRequest<T>(
   path: string,
   params: Record<string, string | number | undefined>,
   ledger: QuotaLedger | undefined,
   endpoint: keyof typeof QUOTA_COST,
+  credential?: YouTubeCredential,
 ): Promise<T> {
-  const apiKey = requireYouTubeApiKey();
-
   const url = new URL(`${API_BASE}/${path}`);
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined || value === "") continue;
     url.searchParams.set(key, String(value));
   }
-  url.searchParams.set("key", apiKey);
+  if (!credential) url.searchParams.set("key", requireYouTubeApiKey());
+
+  const headers: Record<string, string> = { Accept: "application/json" };
+  // In the header, never the query string: URLs reach access logs and error
+  // reports, and this one is a live credential. Same rule as the Analytics
+  // client in youtube-revenue-service.ts.
+  if (credential) headers.Authorization = `Bearer ${credential.accessToken}`;
 
   let lastError: AppError | null = null;
 
@@ -142,7 +242,7 @@ async function apiRequest<T>(
     try {
       const response = await fetch(url, {
         signal: controller.signal,
-        headers: { Accept: "application/json" },
+        headers,
         cache: "no-store",
       });
 
@@ -161,7 +261,7 @@ async function apiRequest<T>(
         body = null;
       }
 
-      lastError = mapApiError(response.status, body);
+      lastError = mapApiError(response.status, body, credential !== undefined);
       if (!isRetryable(lastError) || attempt === MAX_ATTEMPTS) throw lastError;
     } catch (caught) {
       if (caught instanceof AppError) {
@@ -313,8 +413,21 @@ const VIDEO_PARTS = "snippet,contentDetails,statistics,player";
 export const MAX_BATCH = 50;
 
 export const youtubeClient = {
-  /** Look up channels by canonical `UC…` id. Up to 50 per call, 1 quota unit. */
-  async getChannelsByIds(ids: readonly string[], ledger?: QuotaLedger): Promise<YouTubeChannel[]> {
+  /**
+   * Look up channels by canonical `UC…` id. Up to 50 per call, 1 quota unit.
+   *
+   * `credential` reads the channel with its owner's own grant instead of the
+   * shared key — the same endpoint and the same normalisation, so an own channel
+   * and a competitor produce identical rows and nothing downstream has to know
+   * which door the data came through. Only the three methods the sync pipeline
+   * uses take one; the resolver's handle and username lookups deliberately do
+   * not, because those run BEFORE anybody knows whose channel it is.
+   */
+  async getChannelsByIds(
+    ids: readonly string[],
+    ledger?: QuotaLedger,
+    credential?: YouTubeCredential,
+  ): Promise<YouTubeChannel[]> {
     if (ids.length === 0) return [];
     const out: YouTubeChannel[] = [];
     for (let i = 0; i < ids.length; i += MAX_BATCH) {
@@ -324,6 +437,7 @@ export const youtubeClient = {
         { part: CHANNEL_PARTS, id: batch.join(","), maxResults: MAX_BATCH },
         ledger,
         "channelsList",
+        credential,
       );
       for (const item of data.items ?? []) {
         const channel = normalizeChannel(item);
@@ -386,7 +500,12 @@ export const youtubeClient = {
    */
   async listUploads(
     playlistId: string,
-    options: { stopBefore?: Date; maxPages?: number; ledger?: QuotaLedger } = {},
+    options: {
+      stopBefore?: Date;
+      maxPages?: number;
+      ledger?: QuotaLedger;
+      credential?: YouTubeCredential;
+    } = {},
   ): Promise<{ entries: UploadsPlaylistEntry[]; reachedEnd: boolean; pagesFetched: number }> {
     const maxPages = options.maxPages ?? env.maxUploadPages;
     const entries: UploadsPlaylistEntry[] = [];
@@ -405,6 +524,7 @@ export const youtubeClient = {
         },
         options.ledger,
         "playlistItemsList",
+        options.credential,
       );
       pagesFetched += 1;
 
@@ -447,7 +567,11 @@ export const youtubeClient = {
    * video's true aspect ratio, giving the Shorts classifier a vertical/
    * horizontal signal for free.
    */
-  async getVideos(ids: readonly string[], ledger?: QuotaLedger): Promise<YouTubeVideo[]> {
+  async getVideos(
+    ids: readonly string[],
+    ledger?: QuotaLedger,
+    credential?: YouTubeCredential,
+  ): Promise<YouTubeVideo[]> {
     if (ids.length === 0) return [];
     const out: YouTubeVideo[] = [];
     for (let i = 0; i < ids.length; i += MAX_BATCH) {
@@ -462,6 +586,7 @@ export const youtubeClient = {
         },
         ledger,
         "videosList",
+        credential,
       );
       for (const item of data.items ?? []) {
         const video = normalizeVideo(item);

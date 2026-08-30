@@ -4,6 +4,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { OwnershipType } from "@/lib/dto";
+import type { NicheKind } from "@/lib/niches/niche-kind";
 import { useInvalidateDataset } from "./use-dataset";
 
 /**
@@ -63,7 +64,7 @@ function useInvalidateNicheCatalogue() {
 export function useCreateNiche() {
   const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
-    mutationFn: (payload: { name: string; hitThreshold?: number }) =>
+    mutationFn: (payload: { name: string; hitThreshold?: number; kind?: NicheKind }) =>
       api.createNiche(payload),
     onSuccess: () => invalidate(),
   });
@@ -78,12 +79,16 @@ export function useRenameNiche() {
 }
 
 /**
- * Writes either half of a niche's hit rule, or both at once.
+ * Writes any part of a niche's hit rule, or all of it at once.
  *
- * One mutation rather than two because the two halves are one decision: an
- * admin setting "500K in 48 hours" is answering a single question, and two
- * requests would let a niche sit in a state where the bar had moved and the
- * clock had not.
+ * One mutation rather than three because they are one decision: an admin
+ * setting "500K in 48 hours, worth $5" is answering a single question, and
+ * separate requests would let a niche sit in a state where the bar had moved
+ * and the clock had not, or where it scored hits it could not pay for.
+ *
+ * `kind` rides along for the same reason — the dialog that sets it is the
+ * dialog that sets the rest, and a watchlist niche has no payment to write, so
+ * the two decisions are made in one place and land in one request.
  */
 export function useUpdateNicheRule() {
   const invalidate = useInvalidateNicheCatalogue();
@@ -95,6 +100,8 @@ export function useUpdateNicheRule() {
       id: string;
       hitThreshold?: number | null;
       hitWindowHours?: number | null;
+      hitPaymentMinor?: number | null;
+      kind?: NicheKind;
     }) => api.setNicheRule(id, rule),
     onSuccess: () => invalidate(),
   });

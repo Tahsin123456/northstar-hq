@@ -102,6 +102,14 @@ export default function AdminOverviewPage() {
   const { range, threshold } = useFilters();
 
   const rows = useChannelRows(data);
+  /*
+   * The studio's scorecard, always. This page offers no niche control, so it
+   * only ever asks one question — "how is the operation doing?" — and the
+   * answer must not include niches Northstar watches rather than publishes
+   * into. The volume tiles still count every tracked channel, because those
+   * describe the tracker and the Channels group underneath them counts the
+   * same rows.
+   */
   const summary = usePortfolioSummary(rows);
 
   const ourChannels = React.useMemo(
@@ -192,7 +200,29 @@ export default function AdminOverviewPage() {
                     {TOTAL_VIEWS_DEFINITION} {TOTAL_VIEWS_VS_STUDIO}
                   </InfoTip>
                 }
-                caption={`${formatNumber(summary.channelsWithData)} of ${formatNumber(summary.channelCount)} channels published`}
+                /*
+                 * BOTH HALVES OF THIS FRACTION COME FROM THE SAME POPULATION.
+                 *
+                 * `channelsWithData` counts channels with a DECIDED Short, and
+                 * only within the studio's scorecard — so it is stated as what
+                 * it is rather than as "published", which the total views
+                 * beside it really is over every tracked channel. But
+                 * `channelCount` is every tracked channel, and pairing the two
+                 * understated coverage by exactly the watchlist channels: "30
+                 * of 48" where 18 of the 48 were never eligible for the
+                 * numerator reads as a gap somebody should close, and there is
+                 * nothing there to close.
+                 *
+                 * So the denominator is the scorecard when the two differ, and
+                 * the watchlist count is named beside it rather than left as
+                 * the unexplained difference between two numbers — the shape
+                 * `summary-cards.tsx` already settled on for the same pair.
+                 */
+                caption={
+                  summary.scorecardChannelCount < summary.channelCount
+                    ? `${formatNumber(summary.channelsWithData)} of ${formatNumber(summary.scorecardChannelCount)} scorecard channels have a decided Short · ${formatNumber(summary.channelCount - summary.scorecardChannelCount)} watchlist`
+                    : `${formatNumber(summary.channelsWithData)} of ${formatNumber(summary.channelCount)} channels have a decided Short`
+                }
               />
             </Tile>
 
@@ -212,7 +242,11 @@ export default function AdminOverviewPage() {
                     ) : (
                       <>
                         The mean of each channel&rsquo;s own hit rate, counting only
-                        channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}
+                        channels that uploaded Shorts this period. {HIT_RATE_DEFINITION}{" "}
+                        Channels that sit only in watchlist niches — ones Northstar
+                        follows rather than publishes into — are counted in the totals
+                        beside this and left out of the rate, because averaging them in
+                        would describe work the studio does not do.
                       </>
                     )}
                   </InfoTip>
@@ -222,7 +256,9 @@ export default function AdminOverviewPage() {
                     ? "No threshold set for this niche"
                     : summary.averageHitRate === null
                       ? "No Shorts uploaded in this period"
-                      : `At ${formatThreshold(threshold)} views`
+                      : summary.scorecardChannelCount < summary.channelCount
+                        ? `Over ${formatNumber(summary.scorecardChannelCount)} of ${formatNumber(summary.channelCount)} tracked channels — watchlist niches excluded`
+                        : `At ${formatThreshold(threshold)} views`
                 }
               />
             </Tile>
@@ -621,7 +657,7 @@ function TeamGroup({
    *
    * This tile has always been able to say that three people cannot sign in; it
    * has never been able to do anything about it, and "three awaiting approval"
-   * followed by a hunt through the Employees table for the three rows is how a
+   * followed by a hunt through the People table for the three rows is how a
    * queue goes unworked. The number and the screen that clears it are now the
    * same click.
    *
@@ -669,9 +705,9 @@ function TeamGroup({
               </span>
             </GroupLink>
           ) : null}
-          <GroupLink href="/admin/employees">Employees</GroupLink>
+          <GroupLink href="/admin/people">People</GroupLink>
           <IfPermitted to="payroll.view">
-            <GroupLink href="/admin/payroll">Payroll</GroupLink>
+            <GroupLink href="/finance/payroll">Payroll</GroupLink>
           </IfPermitted>
         </div>
       }

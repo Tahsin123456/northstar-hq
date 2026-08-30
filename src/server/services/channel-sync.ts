@@ -20,6 +20,7 @@
  */
 
 import type { Channel, Prisma } from "@prisma/client";
+import type { ChannelDataSource } from "@/lib/dto";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { AppError, toAppError, type AppErrorCode } from "@/server/errors";
@@ -29,8 +30,52 @@ import {
   QuotaLedger,
   youtubeClient,
 } from "./youtube";
-import type { VideoClassification, YouTubeChannel, YouTubeVideo } from "./youtube";
+import type {
+  VideoClassification,
+  YouTubeChannel,
+  YouTubeCredential,
+  YouTubeVideo,
+} from "./youtube";
 import { snapshotIntervalMinutes } from "@/lib/sync/snapshot-cadence";
+
+/**
+ * =========================================================================
+ * WHOSE AUTHORITY THIS SYNC READS WITH
+ * =========================================================================
+ *
+ * Resolved by the CALLER and handed in, never looked up here — the same contract
+ * `hitWindowHours` works to, and for the same reason. This module is the
+ * fetch/classify/persist pipeline for ONE channel and has no organization: which
+ * connections exist, and whether one of them owns this channel, are questions
+ * about a tracker. Deciding it here would also mean the Refresh button and the
+ * scheduled sweep each answering it separately, which is exactly how two paths
+ * start disagreeing about the same channel.
+ *
+ * The three cases are `youtube-oauth-service.resolveChannelCredential`'s, and the
+ * long note there is where the reasoning lives. What this file does with them:
+ *
+ *   • "public"                 — the shared API key, unchanged. Every competitor,
+ *                                and any own channel nobody has connected yet.
+ *   • "connection"             — the account's own grant, on every Data API call
+ *                                the sync makes.
+ *   • "connection_unavailable" — REFUSE. Not a fallback to the key; a recorded
+ *                                failure. See `syncChannel`.
+ */
+export type ChannelCredential =
+  | { readonly source: "public" }
+  | {
+      readonly source: "connection";
+      readonly credential: YouTubeCredential;
+      /** The account or channel name, for messages that have to name it. */
+      readonly label: string;
+    }
+  | {
+      readonly source: "connection_unavailable";
+      readonly connectionId: string;
+      readonly label: string;
+      /** Already written for a person to read; surfaced verbatim. */
+      readonly reason: string;
+    };
 
 const MS_PER_DAY = 86_400_000;
 const MS_PER_HOUR = 3_600_000;
@@ -62,6 +107,14 @@ export interface SyncOptions {
    * user's settings; falls back to the environment default when omitted.
    */
   readonly probeEnabled?: boolean;
+  /**
+   * Which credential reads this channel — see `ChannelCredential`.
+   *
+   * Omitting it means the shared API key, which keeps every existing caller and
+   * every test working unchanged: a channel nobody has connected is read exactly
+   * as it always was.
+   */
+  readonly credential?: ChannelCredential;
 }
 
 export interface SyncResult {
@@ -87,6 +140,36 @@ export interface SyncResult {
    */
   readonly errorCode: AppErrorCode | null;
   readonly durationMs: number;
+  /**
+   * Which credential this run actually read with.
+   *
+   * Reported rather than inferred by the caller, because the caller asked for a
+   * source and did not necessarily get one: a run handed a "connection"
+   * credential still reports "connection", but a run refused for a broken
+   * connection reports "connection_unavailable" — and a refresh summary that
+   * said "public" over either of those would misdescribe where the numbers on
+   * the screen came from.
+   */
+  readonly dataSource: ChannelDataSource;
+}
+
+/**
+ * The credential's own name for itself, as it reaches a DTO.
+ *
+ * A straight mapping today, and worth keeping as a function rather than a cast:
+ * the two enums answer different questions — one is "what should read this", the
+ * other is "what did" — and the day they diverge, this is the one place that has
+ * to change.
+ */
+function sourceOf(credential: ChannelCredential): ChannelDataSource {
+  switch (credential.source) {
+    case "connection":
+      return "connection";
+    case "connection_unavailable":
+      return "connection_unavailable";
+    default:
+      return "public";
+  }
 }
 
 function toBigInt(value: number | null | undefined): bigint | null {
@@ -145,6 +228,14 @@ export async function syncChannel(
     throw new AppError("NOT_FOUND", "That channel is not in the database.");
   }
 
+  // Absent means the shared key, which is what every channel nobody has
+  // connected has always used and still uses.
+  const credential = options.credential ?? { source: "public" };
+  const dataSource = sourceOf(credential);
+  // Present only on the connection path, and `undefined` on the key path so the
+  // client sets `key=` exactly as it did before.
+  const apiCredential = credential.source === "connection" ? credential.credential : undefined;
+
   const run = await prisma.channelRefreshRun.create({
     data: {
       channelId: channel.id,
@@ -163,8 +254,36 @@ export async function syncChannel(
   let reachedPlaylistEnd = false;
 
   try {
+    /**
+     * ---- 0. Refuse to read an own channel through the wrong door -----------
+     *
+     * A channel whose connection has stopped working does NOT get read with the
+     * shared key instead. The owner asked that their own channels' data come
+     * from the connected account and not from an external source, and a public
+     * read would succeed — quietly substituting a different, weaker source and
+     * leaving the dashboard full of plausible numbers with nothing to say the
+     * ground had shifted.
+     *
+     * Failing here instead records the reason on the channel row, turns
+     * `lastFetchStatus` to "error" and reports `connection_unavailable` to every
+     * screen, so the figures visibly stop rather than invisibly change meaning.
+     * Nothing already collected is touched; reconnecting resumes it.
+     *
+     * Thrown rather than returned early so it takes the ordinary failure path —
+     * the ChannelRefreshRun row, the channel's `lastFetchError` and the
+     * `SyncResult` are all written by the catch below, and a second copy of that
+     * bookkeeping is a second thing to keep correct.
+     */
+    if (credential.source === "connection_unavailable") {
+      throw new AppError("NOT_CONFIGURED", credential.reason);
+    }
+
     // ---- 1. Refresh channel-level metadata (subscribers move constantly) ---
-    const [fresh] = await youtubeClient.getChannelsByIds([channel.youtubeChannelId], ledger);
+    const [fresh] = await youtubeClient.getChannelsByIds(
+      [channel.youtubeChannelId],
+      ledger,
+      apiCredential,
+    );
     if (!fresh) {
       throw new AppError(
         "CHANNEL_NOT_FOUND",
@@ -189,6 +308,7 @@ export async function syncChannel(
       stopBefore: cutoff,
       maxPages: options.maxPages ?? env.maxUploadPages,
       ledger,
+      credential: apiCredential,
     });
     reachedPlaylistEnd = reachedEnd;
     counters.videosDiscovered = entries.length;
@@ -197,7 +317,7 @@ export async function syncChannel(
 
     // ---- 3. Statistics for everything in the window -----------------------
     const videos = discoveredIds.length > 0
-      ? await youtubeClient.getVideos(discoveredIds, ledger)
+      ? await youtubeClient.getVideos(discoveredIds, ledger, apiCredential)
       : [];
 
     // ---- 4. Classify only what actually needs it --------------------------
@@ -383,6 +503,7 @@ export async function syncChannel(
       error: null,
       errorCode: null,
       durationMs: Date.now() - startedAt,
+      dataSource,
     };
   } catch (caught) {
     const appError = toAppError(caught);
@@ -422,6 +543,7 @@ export async function syncChannel(
       error: appError.userMessage,
       errorCode: appError.code,
       durationMs: Date.now() - startedAt,
+      dataSource,
     };
   }
 }

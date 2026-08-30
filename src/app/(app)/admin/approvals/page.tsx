@@ -44,7 +44,7 @@ import type {
  *
  * WHY THIS SCREEN EXISTS AT ALL
  * The decision was already possible: accepting an invitation leaves an account
- * at `pending_approval`, and the Employees table has carried an Approve and a
+ * at `pending_approval`, and the People table has carried an Approve and a
  * Reject button on those rows for as long as the gate has existed. What it did
  * not have was a place to *go*. The pending row sorts wherever the person's
  * role and name put it, in a table of everybody who has ever worked here, on a
@@ -275,8 +275,8 @@ function ApprovalsScreen() {
             deactivates the account rather than deleting it — the account, the invitation
             behind it and the record of the decision are all kept, and an admin who
             changes their mind can reactivate it from{" "}
-            <Link href="/admin/users" className="text-accent underline-offset-4 hover:underline">
-              Users
+            <Link href="/admin/people" className="text-accent underline-offset-4 hover:underline">
+              People
             </Link>
             .
           </FieldHint>
@@ -392,7 +392,7 @@ function ApprovalsTable({
           description="Everyone who has accepted an invitation has been let in or turned away. New requests appear here the moment somebody accepts theirs and chooses a password."
           action={
             <Button variant="secondary" size="sm" asChild>
-              <Link href="/admin/users">Invite someone</Link>
+              <Link href="/admin/people">Invite someone</Link>
             </Button>
           }
         />
@@ -608,7 +608,7 @@ function WaitingSince({ acceptedAt, now }: { acceptedAt: number | null; now: num
  * batch alike.
  *
  * Approve commits immediately: it is the expected outcome, it is reversible
- * from the Users screen, and a confirmation on the common path is how people
+ * from the People screen, and a confirmation on the common path is how people
  * learn to click through confirmations without reading them. Denying signs
  * somebody out and turns their account off, so it asks once.
  *

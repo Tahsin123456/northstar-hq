@@ -10,7 +10,7 @@ import {
  * THE RULE, PINNED
  * ==========================================================================
  *
- *     effective(short) = (channel's tags − short's exclusions) ∪ short's manual tags
+ *     effective(short) = (inherited − short's exclusions) ∪ short's manual tags
  *
  * These tests are deliberately about the RULE and not about the database. Every
  * consequence the design claims — a channel tag reaching Shorts nobody touched,
@@ -35,7 +35,7 @@ const NOTHING = { manualIds: [] as string[], excludedIds: [] as string[] };
 describe("inheritance", () => {
   it("gives a Short its channel's tags with nothing written against the Short", () => {
     const resolution = resolveContentTypes({
-      channelTypeIds: [RANKING, FUNNY],
+      inheritedIds: [RANKING, FUNNY],
       ...NOTHING,
     });
 
@@ -51,7 +51,7 @@ describe("inheritance", () => {
     // is no backfill step that could have been missed, which is the whole
     // argument for not copying the channel's tags down.
     const freshlyImported = resolveContentTypes({
-      channelTypeIds: [RANKING],
+      inheritedIds: [RANKING],
       ...NOTHING,
     });
 
@@ -59,8 +59,8 @@ describe("inheritance", () => {
   });
 
   it("stops giving a tag the moment the channel drops it, leaving nothing stale", () => {
-    const before = effectiveContentTypeIds({ channelTypeIds: [RANKING, FUNNY], ...NOTHING });
-    const after = effectiveContentTypeIds({ channelTypeIds: [FUNNY], ...NOTHING });
+    const before = effectiveContentTypeIds({ inheritedIds: [RANKING, FUNNY], ...NOTHING });
+    const after = effectiveContentTypeIds({ inheritedIds: [FUNNY], ...NOTHING });
 
     expect(before).toContain(RANKING);
     expect(after).not.toContain(RANKING);
@@ -71,7 +71,7 @@ describe("inheritance", () => {
 
   it("yields only the manual tags when the channel has none", () => {
     const resolution = resolveContentTypes({
-      channelTypeIds: [],
+      inheritedIds: [],
       manualIds: [CUTSCENE],
       excludedIds: [],
     });
@@ -81,14 +81,14 @@ describe("inheritance", () => {
   });
 
   it("yields nothing when neither side offers anything", () => {
-    expect(effectiveContentTypeIds({ channelTypeIds: [], ...NOTHING })).toEqual([]);
+    expect(effectiveContentTypeIds({ inheritedIds: [], ...NOTHING })).toEqual([]);
   });
 });
 
 describe("exclusions", () => {
   it("hides an inherited tag", () => {
     const resolution = resolveContentTypes({
-      channelTypeIds: [RANKING, FUNNY],
+      inheritedIds: [RANKING, FUNNY],
       manualIds: [],
       excludedIds: [RANKING],
     });
@@ -107,14 +107,14 @@ describe("exclusions", () => {
     const excludedIds = [RANKING];
 
     const whileChannelHasIt = resolveContentTypes({
-      channelTypeIds: [RANKING],
+      inheritedIds: [RANKING],
       manualIds: [],
       excludedIds,
     });
     expect(whileChannelHasIt.effectiveIds).toEqual([]);
 
     const whileChannelDropsIt = resolveContentTypes({
-      channelTypeIds: [],
+      inheritedIds: [],
       manualIds: [],
       excludedIds,
     });
@@ -123,7 +123,7 @@ describe("exclusions", () => {
     expect(whileChannelDropsIt.suppressedIds).toEqual([]);
 
     const whenChannelReAddsIt = resolveContentTypes({
-      channelTypeIds: [RANKING],
+      inheritedIds: [RANKING],
       manualIds: [],
       excludedIds,
     });
@@ -136,7 +136,7 @@ describe("exclusions", () => {
     // does not provide suppresses nothing and must not be reported as though a
     // person could undo something visible.
     const resolution = resolveContentTypes({
-      channelTypeIds: [FUNNY],
+      inheritedIds: [FUNNY],
       manualIds: [],
       excludedIds: [RANKING],
     });
@@ -154,19 +154,19 @@ describe("manual tags", () => {
     // leaves the Short bare.
     const manualIds = [FUNNY];
 
-    const channelSilent = resolveContentTypes({ channelTypeIds: [], manualIds, excludedIds: [] });
+    const channelSilent = resolveContentTypes({ inheritedIds: [], manualIds, excludedIds: [] });
     expect(channelSilent.effectiveIds).toEqual([FUNNY]);
     expect(channelSilent.effective[0]?.origin).toBe("manual");
 
     const channelAlsoHasIt = resolveContentTypes({
-      channelTypeIds: [FUNNY],
+      inheritedIds: [FUNNY],
       manualIds,
       excludedIds: [],
     });
     expect(channelAlsoHasIt.effectiveIds).toEqual([FUNNY]);
 
     const channelDropsItAgain = resolveContentTypes({
-      channelTypeIds: [],
+      inheritedIds: [],
       manualIds,
       excludedIds: [],
     });
@@ -179,7 +179,7 @@ describe("manual tags", () => {
     // "Remove" on that chip mean "exclude it from this Short" rather than
     // "delete a row and watch the tag come straight back".
     const resolution = resolveContentTypes({
-      channelTypeIds: [FUNNY],
+      inheritedIds: [FUNNY],
       manualIds: [FUNNY],
       excludedIds: [],
     });
@@ -191,7 +191,7 @@ describe("manual tags", () => {
 describe("no id ever appears twice", () => {
   it("collapses a tag the channel and the Short both provide", () => {
     const resolution = resolveContentTypes({
-      channelTypeIds: [RANKING, FUNNY],
+      inheritedIds: [RANKING, FUNNY],
       manualIds: [FUNNY, CUTSCENE],
       excludedIds: [],
     });
@@ -205,7 +205,7 @@ describe("no id ever appears twice", () => {
     // content type) — but an optimistically patched client cache can, and a
     // double entry here would inflate a performance row silently.
     const resolution = resolveContentTypes({
-      channelTypeIds: [RANKING, RANKING],
+      inheritedIds: [RANKING, RANKING],
       manualIds: [FUNNY, FUNNY],
       excludedIds: [],
     });
@@ -219,7 +219,7 @@ describe("no id ever appears twice", () => {
     // the two readings — it shows less than somebody asked for rather than
     // re-applying a tag they explicitly removed.
     const resolution = resolveContentTypes({
-      channelTypeIds: [],
+      inheritedIds: [],
       manualIds: [RANKING],
       excludedIds: [RANKING],
     });
@@ -237,12 +237,12 @@ describe("no id ever appears twice", () => {
  */
 describe("planDeviations", () => {
   const plan = (
-    channelTypeIds: string[],
+    inheritedIds: string[],
     desiredIds: string[],
     existingManualIds: string[] = [],
     existingExcludedIds: string[] = [],
   ) =>
-    planDeviations({ channelTypeIds, desiredIds, existingManualIds, existingExcludedIds });
+    planDeviations({ inheritedIds, desiredIds, existingManualIds, existingExcludedIds });
 
   /**
    * THE DORMANT TOMBSTONE — the case that was broken.
@@ -351,7 +351,7 @@ describe("the two directions round-trip", () => {
   for (const { name, channel, desired } of cases) {
     it(name, () => {
       const stored = planDeviations({
-        channelTypeIds: channel,
+        inheritedIds: channel,
         desiredIds: desired,
         existingManualIds: [],
         existingExcludedIds: [],
@@ -359,7 +359,7 @@ describe("the two directions round-trip", () => {
 
       expect(
         effectiveContentTypeIds({
-          channelTypeIds: channel,
+          inheritedIds: channel,
           manualIds: stored.manualIds,
           excludedIds: stored.excludedIds,
         }),

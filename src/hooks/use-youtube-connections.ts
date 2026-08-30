@@ -4,6 +4,7 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { ADMIN_KEY } from "./use-admin";
+import { DATASET_KEY } from "./use-dataset";
 import { FINANCE_KEY } from "./use-finance";
 
 /**
@@ -39,10 +40,71 @@ export const YOUTUBE_CONNECT_PATH = "/api/youtube/connect";
  * (`google.missing`, in the order to set them, and `google.redirectUri` to
  * register). Both arrive together so the wrong one is never shown first.
  */
-export function useYouTubeConnections() {
+export function useYouTubeConnections(enabled = true) {
   return useQuery({
     queryKey: YOUTUBE_CONNECTIONS_KEY,
     queryFn: api.listYouTubeConnections,
+    // Defaults to on, so the admin screen — which has already checked the
+    // permission before mounting the component that calls this — is unchanged.
+    // The surfaces that render the connect panel beside ordinary analytics pass
+    // `can("youtube.manage")`, so an editor never fires a request that could
+    // only return 403.
+    enabled,
+  });
+}
+
+export const OWN_YOUTUBE_CHANNELS_KEY = ["youtube", "own-channels"] as const;
+
+/**
+ * The channels the connected accounts own, offered for adding.
+ *
+ * `enabled` rather than an unconditional fetch, and every caller passes
+ * `can("youtube.manage")`. The endpoint is permission-gated server-side, so this
+ * is not the boundary — it exists so the three surfaces that render this panel
+ * do not fire a request that can only come back 403 for an editor who was never
+ * going to see the list.
+ *
+ * Each read costs one live Data API call per connection, which is why it is not
+ * folded into the dataset: the dataset is fetched on every session and this is
+ * needed only when somebody is actually looking at the connect panel.
+ * `staleTime` keeps navigating between the two surfaces that show it from
+ * spending that twice in a minute.
+ */
+export function useOwnYouTubeChannels(enabled: boolean) {
+  return useQuery({
+    queryKey: OWN_YOUTUBE_CHANNELS_KEY,
+    queryFn: api.listOwnYouTubeChannels,
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+/**
+ * Track one of the connected account's own channels.
+ *
+ * Invalidates three things, and all three are load-bearing. The dataset, because
+ * a channel has appeared in the tracker and every screen reads that array. This
+ * list, because the channel that was just added must stop offering an "Add"
+ * button. And the connection list, because linking a channel is exactly when a
+ * connection's own summary changes.
+ *
+ * Resolves with the server's result rather than a bare ok: `created`, `restored`
+ * and `reclassified` are three different things that can have happened, and a
+ * toast saying "added" over a channel that was already there under the wrong
+ * label would describe the wrong event.
+ */
+export function useAddOwnYouTubeChannel() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { connectionId: string; youtubeChannelId: string }) =>
+      api.addOwnYouTubeChannel(input),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: DATASET_KEY }),
+        queryClient.invalidateQueries({ queryKey: OWN_YOUTUBE_CHANNELS_KEY }),
+        queryClient.invalidateQueries({ queryKey: YOUTUBE_CONNECTIONS_KEY }),
+      ]);
+    },
   });
 }
 

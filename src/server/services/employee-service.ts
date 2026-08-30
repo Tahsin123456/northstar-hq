@@ -9,6 +9,7 @@ import { listAuditEvents, recordAudit, type AuditEntryDTO } from "@/server/audit
 import type { AuditAction } from "@/lib/audit/actions";
 import { ROLE_ORDER, roleDefinition } from "@/lib/auth/permissions";
 import { MAX_MONEY_MINOR, isSupportedCurrency, normalizeCurrencyCode } from "@/lib/finance/money";
+import { toNicheKind, type NicheKind } from "@/lib/niches/niche-kind";
 import {
   calculateEmployeePayroll,
   payDateFor,
@@ -66,6 +67,16 @@ export interface EmployeeNicheDTO {
   readonly name: string;
   /** `--chart-N` accent index, so the chip here matches the chip everywhere else. */
   readonly colorIndex: number;
+  /**
+   * "production" | "watchlist".
+   *
+   * Carried so this chip satisfies `NicheRefDTO` and renders identically to the
+   * one on the dashboard — but it earns its place here on its own too. Somebody
+   * assigned only to watchlist niches can earn no hit bonus at all, and an
+   * admin looking at the roster should be able to see that from the chips
+   * rather than from an empty payroll line a month later.
+   */
+  readonly kind: NicheKind;
 }
 
 /** The pay columns of the Employees table. Present only behind payroll.view. */
@@ -199,7 +210,24 @@ export interface EmployeeNicheBonusDTO {
    */
   readonly windowHoursApplied: number | null;
   readonly hitCount: number;
-  readonly bonusMinor: number;
+  /**
+   * The NICHE's per-hit rate these hits were paid at, in minor units.
+   *
+   * On the line rather than beside the person, because the rate is a property
+   * of the work now: one record can hold GTA hits at one price and Minecraft
+   * hits at another, and a single figure on the profile could not describe
+   * that. The employee's own `hitPaymentMinor` is a historical column and no
+   * longer produces any of these numbers.
+   *
+   * Null on a frozen line whose record was paid at more than one rate. This
+   * screen deliberately does not go and recover the individual prices the way
+   * the payroll detail view does — a roster card is not the place a bonus gets
+   * audited — so a null means "not shown here", and the row states its hit
+   * count without a price rather than inventing one.
+   */
+  readonly hitPaymentMinor: number | null;
+  /** `hitCount × hitPaymentMinor`, or null in lockstep with it. */
+  readonly bonusMinor: number | null;
 }
 
 export interface EmployeePeriodEstimateDTO {
@@ -254,6 +282,31 @@ export interface EmployeePaymentDTO {
 
 export interface EmployeePayrollDTO {
   readonly salaryMinor: number;
+  /**
+   * =======================================================================
+   * THE EMPLOYEE-LEVEL PER-HIT RATE. HISTORICAL — IT NO LONGER DECIDES PAY.
+   * =======================================================================
+   *
+   * `EmployeeProfile.hitPaymentMinor`, the column that used to price every hit
+   * this person earned. `Niche.hitPaymentMinor` prices them now, because a rate
+   * is a property of the WORK rather than of the person: a hit in a niche that
+   * takes a day to produce is not worth the same as one that takes an hour, and
+   * paying two editors different amounts for the identical Short was never what
+   * anybody meant.
+   *
+   * IT IS STILL HERE, AND ON PURPOSE. Every `PayrollRecord` finalized before the
+   * change was computed from it, and a bonus that has been paid has to stay
+   * explicable — deleting the column would turn a run of real payslips into
+   * figures nobody can account for. Nothing READS it for a new calculation:
+   * `toPayrollEmployee` does not pass it to the engine, and the engine has no
+   * field to receive it on.
+   *
+   * So it is shown on the profile as what it is — a record of what this person
+   * used to be paid per hit — and the screen says where the live rate lives
+   * instead. Editing it is still allowed, because correcting a historical figure
+   * an old payslip references is a legitimate thing to want; it changes no
+   * future run.
+   */
   readonly hitPaymentMinor: number;
   readonly currency: string;
   readonly joinedOn: number | null;
@@ -606,7 +659,11 @@ function toPayrollEmployee(
     email: row.email ?? "",
     role: row.role,
     salaryMinor: row.pay?.salaryMinor ?? 0,
-    hitPaymentMinor: row.pay?.hitPaymentMinor ?? 0,
+    // `row.pay.hitPaymentMinor` IS DELIBERATELY NOT PASSED. The per-hit rate
+    // moved to the niche and the engine has no field to receive this one on —
+    // see `PayrollEmployee`. The column is still read for the profile screen,
+    // where it explains finalized records that were computed from it; it is
+    // simply not an input to a new calculation any more.
     currency: row.pay?.currency ?? fallbackCurrency,
     nicheIds: row.nicheIds,
     joinedOnMs: row.joinedOn?.getTime() ?? null,
@@ -641,6 +698,7 @@ interface NicheChip {
   readonly id: string;
   readonly name: string;
   readonly colorIndex: number;
+  readonly kind: NicheKind;
 }
 
 /**
@@ -657,9 +715,11 @@ async function loadNicheChips(organizationId: string): Promise<Map<string, Niche
   const rows = await prisma.niche.findMany({
     where: { organizationId },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
-    select: { id: true, name: true, colorIndex: true },
+    select: { id: true, name: true, colorIndex: true, kind: true },
   });
-  return new Map(rows.map((row) => [row.id, row]));
+  return new Map(
+    rows.map((row) => [row.id, { ...row, kind: toNicheKind(row.kind) }] as const),
+  );
 }
 
 function toNicheDTOs(
@@ -669,7 +729,12 @@ function toNicheDTOs(
   return nicheIds
     .map((id) => nicheById.get(id))
     .filter((niche): niche is NicheChip => niche !== undefined)
-    .map((niche) => ({ id: niche.id, name: niche.name, colorIndex: niche.colorIndex }))
+    .map((niche) => ({
+      id: niche.id,
+      name: niche.name,
+      colorIndex: niche.colorIndex,
+      kind: niche.kind,
+    }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -858,6 +923,9 @@ async function estimateCurrentPeriod(
         // rule. The frozen branch below cannot — see the field's own note.
         windowHoursApplied: bucket.windowHoursApplied,
         hitCount: bucket.hitCount,
+        // Straight off the engine's line: a draft was computed from the niches
+        // as they stand right now, so there is nothing to recover.
+        hitPaymentMinor: bucket.hitPaymentMinor,
         bonusMinor: bucket.bonusMinor,
       })),
     });
@@ -960,8 +1028,16 @@ async function loadFrozenPeriodFigures(
  * null once the niche is deleted, and two hits credited to a since-deleted
  * "GTA" still belong on one line.
  *
- * The rate comes from the RECORD, not from today's EmployeeProfile: a hit
- * payment raised in September must not rewrite what August's bonus was made of.
+ * The rate comes from the RECORD, not from today's EmployeeProfile and not from
+ * today's niches: a hit payment raised in September must not rewrite what
+ * August's bonus was made of.
+ *
+ * A RECORD PAID AT SEVERAL RATES CANNOT STATE THEM HERE, and says so. The rate
+ * lives on the niche now, `PayrollRecord` has one rate column, and it holds 0
+ * when the month's hits spanned more than one price. The payroll detail screen
+ * recovers the individual prices — with a guard that they still add up to what
+ * was paid — because that is where a bonus gets audited; this card shows the
+ * counts and leaves the money to the total above them.
  */
 function groupStoredHits(
   hits: readonly { nicheId: string | null; nicheName: string; thresholdAtRun: number }[],
@@ -997,9 +1073,16 @@ function groupStoredHits(
       // detail screen is where a frozen bonus gets explained in full.
       windowHoursApplied: null,
       hitCount: bucket.hitCount,
-      bonusMinor: bucket.hitCount * hitPaymentMinor,
+      // 0 on the record means "several rates", not "free" — see the note above.
+      hitPaymentMinor: hitPaymentMinor > 0 ? hitPaymentMinor : null,
+      bonusMinor: hitPaymentMinor > 0 ? bucket.hitCount * hitPaymentMinor : null,
     }))
-    .sort((a, b) => b.bonusMinor - a.bonusMinor || a.nicheName.localeCompare(b.nicheName));
+    // Unpriced lines last rather than as zeroes: an unknown amount is not a
+    // small one.
+    .sort(
+      (a, b) =>
+        (b.bonusMinor ?? -1) - (a.bonusMinor ?? -1) || a.nicheName.localeCompare(b.nicheName),
+    );
 }
 
 function toPeriodEstimateDTO(
@@ -1475,7 +1558,7 @@ export async function setEmployeeNiches(
   // tenant boundary — and that row is what a payroll bonus is calculated from.
   const known = await prisma.niche.findMany({
     where: { organizationId, id: { in: desired } },
-    select: { id: true, name: true, colorIndex: true },
+    select: { id: true, name: true, colorIndex: true, kind: true },
   });
 
   if (known.length !== desired.length) {
@@ -1551,7 +1634,13 @@ export async function setEmployeeNiches(
   return {
     userId,
     assignedNiches: known
-      .map((niche) => ({ id: niche.id, name: niche.name, colorIndex: niche.colorIndex }))
+      .map((niche) => ({
+        id: niche.id,
+        name: niche.name,
+        colorIndex: niche.colorIndex,
+        // Narrowed at the boundary, like every other read of this column.
+        kind: toNicheKind(niche.kind),
+      }))
       .sort((a, b) => a.name.localeCompare(b.name)),
     added: addedNames,
     removed: removedNames,

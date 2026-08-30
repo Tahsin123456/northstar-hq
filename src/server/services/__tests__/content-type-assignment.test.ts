@@ -12,7 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * AND A SHORT'S TAGS ARE MOSTLY ITS CHANNEL'S
  * ==========================================================================
  *
- *     effective(short) = (channel's tags − exclusions) ∪ manual tags
+ *     effective(short) = (rules covering its publish date − exclusions) ∪ manual
  *
  * The RULE itself is pinned in `src/lib/__tests__/content-type-inheritance.test.ts`,
  * against the pure function both sides share. What is pinned HERE is the thing
@@ -47,23 +47,30 @@ const USER_ID = "user_head";
 const mocks = vi.hoisted(() => ({
   findVideos: vi.fn(),
   findTrackedChannel: vi.fn(),
+  findTrackedChannelById: vi.fn(),
   findContentTypes: vi.fn(),
   findContentType: vi.fn(),
   findVideoAssignments: vi.fn(),
   deleteVideoAssignments: vi.fn(),
   updateVideoAssignments: vi.fn(),
   createVideoAssignments: vi.fn(),
-  findChannelAssignments: vi.fn(),
-  deleteChannelAssignments: vi.fn(),
-  createChannelAssignments: vi.fn(),
+  findRules: vi.fn(),
+  findRule: vi.fn(),
+  createRule: vi.fn(),
+  updateRule: vi.fn(),
+  findChannel: vi.fn(),
+  findEarliestVideo: vi.fn(),
   transaction: vi.fn(),
   recordAudit: vi.fn<(context: unknown, payload: unknown) => Promise<void>>(),
 }));
 
 vi.mock("@/server/db", () => ({
   prisma: {
-    video: { findMany: mocks.findVideos },
-    trackedChannel: { findFirst: mocks.findTrackedChannel },
+    video: { findMany: mocks.findVideos, findFirst: mocks.findEarliestVideo },
+    trackedChannel: {
+      findFirst: mocks.findTrackedChannel,
+      findUnique: mocks.findTrackedChannelById,
+    },
     contentType: { findMany: mocks.findContentTypes, findFirst: mocks.findContentType },
     videoContentType: {
       findMany: mocks.findVideoAssignments,
@@ -71,11 +78,13 @@ vi.mock("@/server/db", () => ({
       updateMany: mocks.updateVideoAssignments,
       createMany: mocks.createVideoAssignments,
     },
-    channelContentType: {
-      findMany: mocks.findChannelAssignments,
-      deleteMany: mocks.deleteChannelAssignments,
-      createMany: mocks.createChannelAssignments,
+    channelContentTypeRule: {
+      findMany: mocks.findRules,
+      findFirst: mocks.findRule,
+      create: mocks.createRule,
+      update: mocks.updateRule,
     },
+    channel: { findUnique: mocks.findChannel },
     $transaction: mocks.transaction,
   },
 }));
@@ -106,28 +115,86 @@ const {
   assignContentTypeToVideos,
   excludeContentTypeFromVideo,
   restoreInheritedContentType,
-  setChannelContentTypes,
+  applyContentTypeToChannel,
+  setChannelContentTypeRuleWindow,
   setVideoContentTypes,
 } = await import("../content-type-service");
+
+const DAY = 86_400_000;
+/** When the channel itself was created, and its oldest stored upload. */
+const CHANNEL_CREATED = Date.UTC(2020, 0, 1);
+const FIRST_UPLOAD = Date.UTC(2021, 0, 1);
+/** When every Short below was published, unless it says otherwise. */
+const PUBLISHED = Date.UTC(2025, 5, 1);
+
+/** The tag the bulk path files under, restated where the streak cases need it. */
+const BULK_TAG = { id: "ct_ranking", name: "Ranking", isActive: true };
+
+/**
+ * One rule as `loadTaggableVideos` reads it back, with its streak state.
+ *
+ * Open-ended and epoch-dated by default — which is what the migration wrote for
+ * the two channels that already carried tags, and what "Apply to this channel"
+ * writes. So a caller that only says "this channel gives Rankings" gets exactly
+ * the old flat behaviour, and every case in this file that predates rules goes
+ * on asserting what it always asserted.
+ */
+function ruleRow(
+  contentTypeId: string,
+  overrides: {
+    id?: string;
+    effectiveFrom?: number;
+    effectiveUntil?: number | null;
+    consecutiveOverrides?: number;
+    overrideStreakFrom?: number | null;
+  } = {},
+) {
+  return {
+    id: overrides.id ?? `rule_${contentTypeId}`,
+    contentTypeId,
+    effectiveFrom: new Date(overrides.effectiveFrom ?? 0),
+    effectiveUntil:
+      overrides.effectiveUntil === undefined || overrides.effectiveUntil === null
+        ? null
+        : new Date(overrides.effectiveUntil),
+    consecutiveOverrides: overrides.consecutiveOverrides ?? 0,
+    overrideStreakFrom:
+      overrides.overrideStreakFrom === undefined || overrides.overrideStreakFrom === null
+        ? null
+        : new Date(overrides.overrideStreakFrom),
+  };
+}
 
 /**
  * The projection `loadTaggableVideos` selects, for one Short.
  *
- * THE CHANNEL COMES WITH IT, and that is the interesting part of the shape: no
- * decision this service makes can be reached without knowing what the channel
- * already gives, so the tracking row rides along inside the same query. The
- * nested `trackedBy` array is the organization-filtered relation — one row at
- * most, because the tag hangs off OUR tracking row and not off the globally
- * shared channel.
+ * THE CHANNEL'S RULES COME WITH IT, and that is the interesting part of the
+ * shape: no decision this service makes can be reached without knowing what the
+ * channel's rules give THIS Short — which depends on when it was published — so
+ * the tracking row and its rules ride along inside the same query. The nested
+ * `trackedBy` array is the organization-filtered relation, one row at most,
+ * because a rule hangs off OUR tracking row and not off the globally shared
+ * channel.
  */
-function videoRow(id: string, title: string, channelTypeIds: readonly string[] = []) {
+function videoRow(
+  id: string,
+  title: string,
+  channelTypeIds: readonly (string | ReturnType<typeof ruleRow>)[] = [],
+  publishedAt: number = PUBLISHED,
+) {
   return {
     id,
     title,
     channelId: "channel_1",
+    publishedAt: new Date(publishedAt),
     channel: {
       trackedBy: [
-        { contentTypes: channelTypeIds.map((contentTypeId) => ({ contentTypeId })) },
+        {
+          id: "tracked_1",
+          contentTypeRules: channelTypeIds.map((entry) =>
+            typeof entry === "string" ? ruleRow(entry) : entry,
+          ),
+        },
       ],
     },
   };
@@ -161,7 +228,20 @@ function written(): Array<Record<string, unknown>> {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.findVideoAssignments.mockResolvedValue([]);
-  mocks.findChannelAssignments.mockResolvedValue([]);
+  mocks.findRules.mockResolvedValue([]);
+  // The name a closure notice puts in front of the person. Looked up only when a
+  // rule actually retires, so most tests never reach it.
+  mocks.findTrackedChannelById.mockResolvedValue({
+    label: null,
+    channel: { title: "GTA Moments" },
+  });
+  mocks.findRule.mockResolvedValue(null);
+  mocks.updateRule.mockResolvedValue(undefined);
+  // The channel a rule would be applied to, and the oldest thing it published.
+  // Both feed `earliestPossiblePublish`, which is what decides how far back a
+  // new rule reaches.
+  mocks.findChannel.mockResolvedValue({ channelPublishedAt: new Date(CHANNEL_CREATED) });
+  mocks.findEarliestVideo.mockResolvedValue({ publishedAt: new Date(FIRST_UPLOAD) });
   mocks.transaction.mockResolvedValue([]);
   mocks.recordAudit.mockResolvedValue(undefined);
   // The bulk path resolves its tag through `findFirst`; default to an active
@@ -473,72 +553,367 @@ describe("restoreInheritedContentType", () => {
   });
 });
 
-describe("setChannelContentTypes", () => {
-  it("adds and removes only what actually changed", async () => {
+/**
+ * ==========================================================================
+ * APPLYING A TAG TO A CHANNEL — AND THE WINDOW IT WRITES
+ * ==========================================================================
+ *
+ * `setChannelContentTypes` is gone; there is no whole-set channel write left to
+ * test. What replaces it writes ONE rule, and the property worth pinning is
+ * where that rule STARTS — because "the whole back catalogue" has to keep being
+ * true after the next sync, not only on the day it was written.
+ */
+describe("applyContentTypeToChannel", () => {
+  it("starts the rule before anything the channel could ever have published", async () => {
     mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
-    mocks.findChannelAssignments.mockResolvedValue([
-      { contentTypeId: "ct_keep" },
-      { contentTypeId: "ct_drop" },
-    ]);
-    mocks.findContentTypes.mockResolvedValue([
-      contentTypeRow("ct_keep", "Rankings"),
-      contentTypeRow("ct_add", "Cutscenes"),
-    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+    mocks.findRules.mockResolvedValue([]);
+    mocks.createRule.mockResolvedValue(ruleRow("ct_memes"));
 
-    await expect(
-      setChannelContentTypes("channel_1", ["ct_keep", "ct_add"]),
-    ).resolves.toBeUndefined();
-
-    expect(mocks.deleteChannelAssignments).toHaveBeenCalledWith({
-      where: { trackedChannelId: "tracked_1", contentTypeId: { in: ["ct_drop"] } },
-    });
-    expect(mocks.createChannelAssignments).toHaveBeenCalledWith({
-      data: [
-        { trackedChannelId: "tracked_1", contentTypeId: "ct_add", assignedById: USER_ID },
-      ],
-    });
+    await applyContentTypeToChannel("channel_1", "ct_memes");
 
     /*
-     * NOTHING IS WRITTEN TO THE VIDEO TABLE, and that is the property worth
-     * pinning here. Dropping "ct_drop" from the channel removes it from every
-     * Short beneath it, and adding "ct_add" gives it to every one of them —
-     * including Shorts imported after this edit. A design that copied tags down
-     * would have had to touch every video row on both counts, and would have
-     * left the ones it missed asserting something the channel no longer says.
+     * THE CHANNEL'S CREATION DATE, not the oldest Short currently stored.
+     *
+     * The library grows BACKWARDS as well as forwards — the lookback window is a
+     * setting, and a sync can import Shorts older than anything held today. A
+     * rule dated to today's earliest upload would silently fail to cover them,
+     * and nobody would connect the missing labels to a rule written months
+     * before. A video cannot predate its channel, so this bound stays true
+     * permanently.
      */
-    expect(mocks.createVideoAssignments).not.toHaveBeenCalled();
-    expect(mocks.deleteVideoAssignments).not.toHaveBeenCalled();
+    expect(mocks.createRule).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        organizationId: ORG_ID,
+        trackedChannelId: "tracked_1",
+        contentTypeId: "ct_memes",
+        effectiveFrom: new Date(CHANNEL_CREATED),
+        createdById: USER_ID,
+      }),
+    });
   });
 
-  /**
-   * The reason the path reconciles instead of rewriting.
-   *
-   * A delete-all-then-recreate would store the same final set and quietly stamp
-   * every surviving row with whoever pressed Save — reassigning a colleague's
-   * decision to somebody who only looked at it.
-   */
-  it("writes nothing when the selection is unchanged", async () => {
+  it("takes the older of the channel's creation date and its oldest upload", async () => {
+    // YouTube's channel creation date is occasionally later than a video it
+    // hosts. Ours is not, so the stored upload wins when it is older.
+    const ANCIENT = Date.UTC(2015, 0, 1);
     mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
-    mocks.findChannelAssignments.mockResolvedValue([{ contentTypeId: "ct_keep" }]);
-    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_keep", "Rankings")]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+    mocks.findEarliestVideo.mockResolvedValue({ publishedAt: new Date(ANCIENT) });
+    mocks.createRule.mockResolvedValue(ruleRow("ct_memes"));
 
-    await expect(
-      setChannelContentTypes("channel_1", ["ct_keep"]),
-    ).resolves.toBeUndefined();
+    await applyContentTypeToChannel("channel_1", "ct_memes");
 
-    expect(mocks.transaction).not.toHaveBeenCalled();
-    // And no audit entry describing work that did not happen.
+    expect(mocks.createRule).toHaveBeenCalledWith({
+      data: expect.objectContaining({ effectiveFrom: new Date(ANCIENT) }),
+    });
+  });
+
+  it("writes nothing when an open rule already covers the whole history", async () => {
+    // The double-click, and the second person to have the same thought. Both
+    // must be one rule and no audit entry claiming a channel was characterised
+    // twice.
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+    mocks.findRules.mockResolvedValue([ruleRow("ct_memes")]);
+
+    await applyContentTypeToChannel("channel_1", "ct_memes");
+
+    expect(mocks.createRule).not.toHaveBeenCalled();
+    expect(mocks.updateRule).not.toHaveBeenCalled();
     expect(mocks.recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("re-opens a closed rule rather than writing a second one at the same date", async () => {
+    // The schema is unique on (channel, type, start), so a duplicate would be a
+    // constraint violation surfacing as a 500 — and, more to the point, would be
+    // the same claim written twice.
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+    mocks.findRules.mockResolvedValue([
+      ruleRow("ct_memes", {
+        effectiveFrom: CHANNEL_CREATED,
+        effectiveUntil: Date.UTC(2025, 2, 4),
+        consecutiveOverrides: 3,
+        overrideStreakFrom: Date.UTC(2025, 2, 4),
+      }),
+    ]);
+    mocks.updateRule.mockResolvedValue(ruleRow("ct_memes"));
+
+    await applyContentTypeToChannel("channel_1", "ct_memes");
+
+    expect(mocks.createRule).not.toHaveBeenCalled();
+    // AND THE STREAK GOES WITH IT. Leaving it at three would arm the rule to
+    // retire itself again on the very next removal, for evidence a person has
+    // just overruled — a re-open that lasts one click is not an undo.
+    expect(mocks.updateRule).toHaveBeenCalledWith({
+      where: { id: "rule_ct_memes" },
+      data: {
+        effectiveUntil: null,
+        autoClosedAt: null,
+        consecutiveOverrides: 0,
+        overrideStreakFrom: null,
+      },
+    });
   });
 
   it("404s a channel this caller cannot reach", async () => {
     mocks.findTrackedChannel.mockResolvedValue(null);
 
     await expect(
-      setChannelContentTypes("channel_elsewhere", ["ct_keep"]),
+      applyContentTypeToChannel("channel_elsewhere", "ct_memes"),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
 
-    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.createRule).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * THE MANUAL LEVER.
+ *
+ * The automatic path is a safety net, not the only door. Somebody who knows a
+ * channel switched in March must be able to say so without removing the tag from
+ * three Shorts, and somebody who thinks the streak got it wrong must be able to
+ * undo it in one action.
+ */
+describe("setChannelContentTypeRuleWindow", () => {
+  const MARCH = Date.UTC(2025, 2, 4);
+
+  it("closes a rule at the date given, without claiming the app decided it", async () => {
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findRule.mockResolvedValue(ruleRow("ct_memes"));
+    mocks.findContentType.mockResolvedValue({ name: "Funny Memes" });
+    mocks.updateRule.mockResolvedValue(ruleRow("ct_memes", { effectiveUntil: MARCH }));
+
+    await setChannelContentTypeRuleWindow("channel_1", "rule_ct_memes", MARCH);
+
+    // `autoClosedAt` STAYS NULL. That column is the difference between "the app
+    // retired this" and "Ada closed it", and the UI reads it to decide which
+    // sentence to print.
+    expect(mocks.updateRule).toHaveBeenCalledWith({
+      where: { id: "rule_ct_memes" },
+      data: {
+        effectiveUntil: new Date(MARCH),
+        autoClosedAt: null,
+        consecutiveOverrides: 0,
+        overrideStreakFrom: null,
+      },
+    });
+  });
+
+  it("re-opens with null, clearing the retirement and its evidence", async () => {
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findRule.mockResolvedValue(
+      ruleRow("ct_memes", {
+        effectiveUntil: MARCH,
+        consecutiveOverrides: 3,
+        overrideStreakFrom: MARCH,
+      }),
+    );
+    mocks.findContentType.mockResolvedValue({ name: "Funny Memes" });
+    mocks.updateRule.mockResolvedValue(ruleRow("ct_memes"));
+
+    await setChannelContentTypeRuleWindow("channel_1", "rule_ct_memes", null);
+
+    expect(mocks.updateRule).toHaveBeenCalledWith({
+      where: { id: "rule_ct_memes" },
+      data: {
+        effectiveUntil: null,
+        autoClosedAt: null,
+        consecutiveOverrides: 0,
+        overrideStreakFrom: null,
+      },
+    });
+  });
+
+  it("refuses a close before the rule starts", async () => {
+    // A window that ends before it starts covers nothing — a delete wearing a
+    // close's clothes. It would strip the tag off the whole back catalogue while
+    // the UI went on describing the rule as "closed on the 4th".
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findRule.mockResolvedValue(ruleRow("ct_memes", { effectiveFrom: MARCH }));
+    mocks.findContentType.mockResolvedValue({ name: "Funny Memes" });
+
+    await expect(
+      setChannelContentTypeRuleWindow("channel_1", "rule_ct_memes", MARCH - DAY),
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+
+    expect(mocks.updateRule).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing when the window is already exactly that", async () => {
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findRule.mockResolvedValue(ruleRow("ct_memes"));
+    mocks.findContentType.mockResolvedValue({ name: "Funny Memes" });
+
+    await setChannelContentTypeRuleWindow("channel_1", "rule_ct_memes", null);
+
+    expect(mocks.updateRule).not.toHaveBeenCalled();
+    expect(mocks.recordAudit).not.toHaveBeenCalled();
+  });
+
+  it("404s a rule that belongs to another team's channel", async () => {
+    // Both ids are in the `where`, so somebody else's rule id misses exactly as
+    // a made-up one does — the endpoint never confirms it is real.
+    mocks.findTrackedChannel.mockResolvedValue(CHANNEL_ROW);
+    mocks.findRule.mockResolvedValue(null);
+
+    await expect(
+      setChannelContentTypeRuleWindow("channel_1", "rule_elsewhere", null),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    expect(mocks.updateRule).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * ==========================================================================
+ * THE RULE NOTICING THE CHANNEL CHANGED — AS THE SERVICE WIRES IT
+ * ==========================================================================
+ *
+ * The state machine itself is driven directly in
+ * `src/lib/__tests__/channel-content-type-rules.test.ts`, where a streak can be
+ * run without inventing five Prisma stubs per step. What is pinned HERE is the
+ * thing that file cannot see: which gestures the service feeds into it, and what
+ * it writes when one completes.
+ */
+describe("removals feed the streak", () => {
+  const MARCH = Date.UTC(2025, 2, 4);
+
+  /** A Short published in March, on a channel whose Memes rule is still open. */
+  function marchShort(rule: ReturnType<typeof ruleRow>) {
+    return videoRow("video_1", "Trevor loses it", [rule], MARCH);
+  }
+
+  it("grows the streak on the first removal without closing anything", async () => {
+    mocks.findVideos.mockResolvedValue([marchShort(ruleRow("ct_memes"))]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+
+    await excludeContentTypeFromVideo("video_1", "ct_memes");
+
+    expect(mocks.transaction).toHaveBeenCalled();
+    const streakWrite = mocks.updateRule.mock.calls.at(-1)?.[0];
+    expect(streakWrite).toMatchObject({
+      where: { id: "rule_ct_memes" },
+      data: { consecutiveOverrides: 1, overrideStreakFrom: new Date(MARCH) },
+    });
+    // One removal is noise — a collab, an experiment, a repost. Retiring a
+    // year-old rule for it would make the feature dangerous to use.
+    expect(streakWrite?.data).not.toHaveProperty("effectiveUntil");
+  });
+
+  it("closes the rule on the third, dated to where the streak began", async () => {
+    const APRIL = Date.UTC(2025, 3, 10);
+    mocks.findVideos.mockResolvedValue([
+      videoRow(
+        "video_1",
+        "Franklin's ranking",
+        [ruleRow("ct_memes", { consecutiveOverrides: 2, overrideStreakFrom: MARCH })],
+        APRIL,
+      ),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+    mocks.findChannel.mockResolvedValue({ channelPublishedAt: new Date(CHANNEL_CREATED) });
+
+    const result = await excludeContentTypeFromVideo("video_1", "ct_memes");
+
+    /*
+     * THE DATE IS MARCH, NOT APRIL, and that is the whole point of storing
+     * `overrideStreakFrom` rather than counting to three and stamping `now`.
+     * The channel changed in March; April is when somebody worked it out. Dating
+     * the close to April would leave every upload in between falsely tagged
+     * forever, which is the exact failure this round exists to remove.
+     */
+    expect(mocks.updateRule).toHaveBeenCalledWith({
+      where: { id: "rule_ct_memes" },
+      data: expect.objectContaining({
+        consecutiveOverrides: 3,
+        effectiveUntil: new Date(MARCH),
+        autoClosedAt: expect.any(Date),
+      }),
+    });
+
+    // AND THE PERSON IS TOLD, in the response to the click that caused it. A
+    // rule that retires silently is indistinguishable from a bug.
+    expect(result.closedRules).toEqual([
+      expect.objectContaining({
+        ruleId: "rule_ct_memes",
+        contentTypeName: "Funny Memes",
+        channelId: "channel_1",
+        effectiveUntil: MARCH,
+        automatic: true,
+      }),
+    ]);
+  });
+
+  it("a removal on a Short older than the rule counts for nothing", async () => {
+    // Correcting the label on an old upload is tidying the back catalogue. It
+    // says nothing whatever about what the channel is publishing now, and under
+    // the flat model there was no way to tell the two apart.
+    mocks.findVideos.mockResolvedValue([
+      videoRow(
+        "video_1",
+        "An old one",
+        [ruleRow("ct_memes", { effectiveFrom: MARCH })],
+        MARCH - DAY,
+      ),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+
+    const result = await excludeContentTypeFromVideo("video_1", "ct_memes");
+
+    expect(mocks.updateRule).not.toHaveBeenCalled();
+    expect(result.closedRules).toEqual([]);
+  });
+
+  it("putting the tag back on a newer Short clears the streak", async () => {
+    const APRIL = Date.UTC(2025, 3, 10);
+    mocks.findVideos.mockResolvedValue([
+      videoRow(
+        "video_1",
+        "Still a meme",
+        [ruleRow("ct_memes", { consecutiveOverrides: 2, overrideStreakFrom: MARCH })],
+        APRIL,
+      ),
+    ]);
+    mocks.findVideoAssignments.mockResolvedValue([
+      deviation("video_1", "ct_memes", "excluded"),
+    ]);
+    mocks.findContentTypes.mockResolvedValue([contentTypeRow("ct_memes", "Funny Memes")]);
+
+    await restoreInheritedContentType("video_1", "ct_memes");
+
+    expect(mocks.updateRule).toHaveBeenCalledWith({
+      where: { id: "rule_ct_memes" },
+      data: { consecutiveOverrides: 0, overrideStreakFrom: null },
+    });
+  });
+
+  it("a bulk run never feeds the streak, however many tags it strips", async () => {
+    /*
+     * THE DECISION THIS TEST EXISTS TO PIN, because it looks like an omission.
+     *
+     * A bulk replace over a back catalogue is a mass removal, and feeding it in
+     * would satisfy the threshold instantly — then date the retirement to the
+     * OLDEST Short in the selection, retiring the rule across the very history
+     * the person was tidying. The streak is evidence that a channel changed at a
+     * point in time; one statement about a hand-assembled selection is not that.
+     * Somebody who means "this stopped in March" has the manual lever.
+     */
+    mocks.findVideos.mockResolvedValue([
+      videoRow("video_1", "One", [ruleRow("ct_memes")]),
+      videoRow("video_2", "Two", [ruleRow("ct_memes")]),
+      videoRow("video_3", "Three", [ruleRow("ct_memes")]),
+    ]);
+    mocks.findContentType.mockResolvedValue(BULK_TAG);
+
+    await assignContentTypeToVideos({
+      videoIds: ["video_1", "video_2", "video_3"],
+      contentTypeId: BULK_TAG.id,
+      mode: "replace",
+    });
+
+    expect(mocks.updateRule).not.toHaveBeenCalled();
   });
 });
 

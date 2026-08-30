@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Minus, Swords, TrendingDown, TrendingUp, Users } from "lucide-react";
+import { Eye, Minus, Swords, TrendingDown, TrendingUp, Users } from "lucide-react";
 import {
   Bar,
   BarChart,
@@ -37,11 +37,18 @@ import {
   UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
 import {
+  nicheSelection,
+  scopeMarketComparison,
+  type MarketScopeKind,
+} from "@/lib/analytics/market-scope";
+import {
   calculateMarketShare,
   calculateMarketShareSeries,
   pickShareGranularity,
   TRACKED_MARKET_SHARE_DEFINITION,
 } from "@/lib/analytics/market-share";
+import { NICHE_KIND_LABEL } from "@/lib/niches/niche-kind";
+import type { NicheDTO } from "@/lib/dto";
 import { calculateTrend, previousRange } from "@/lib/analytics/trends";
 import { MarketShareDonut, MarketShareTrendChart } from "@/components/charts/market-share-charts";
 import { TrendIndicator } from "@/components/metrics/trend-indicator";
@@ -58,6 +65,9 @@ import { HitRuleNotConfiguredNotice } from "@/components/metrics/hit-rule-not-co
 import { EM_DASH, formatCompactNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
+/** Stable identity for the "dataset has not arrived" case, so the memos hold. */
+const EMPTY_NICHES: readonly NicheDTO[] = [];
+
 /**
  * Our vs Market — are we beating the field in this niche?
  *
@@ -66,6 +76,15 @@ import { cn } from "@/lib/utils";
  * scoped to one niche at a time: comparing our GTA channels against the
  * combined average of GTA, Finance and Minecraft competitors would be
  * meaningless.
+ *
+ * AND SPLIT BY NICHE KIND, LIKE EVERY OTHER AGGREGATE. This screen's entire job
+ * is "how are we doing against the field", which makes it the last place a
+ * watchlist niche belongs in the pooled answer — a channel nobody at Northstar
+ * is trying to be is not part of our output and is not part of the field we are
+ * measured against either. `scopeMarketComparison` makes that decision once,
+ * for BOTH pools, and hands back what to call the result; the module comment
+ * beside it argues why splitting only the "ours" half would have been worse
+ * than not splitting at all.
  */
 export default function OurVsMarketPage() {
   const { data, isLoading, error, refetch } = useDataset();
@@ -83,8 +102,39 @@ export default function OurVsMarketPage() {
     [rows, niche],
   );
 
-  const ourChannels = inNiche.filter((r) => r.channel.ownershipType === "own");
-  const competitorChannels = inNiche.filter((r) => r.channel.ownershipType !== "own");
+  /*
+   * The catalogue read straight off the payload rather than through a `?? []`
+   * fallback: a fresh empty array every render would be a new memo key every
+   * render, and the scope below feeds every chart on the page.
+   */
+  const nicheCatalogue = data?.niches;
+  const selection = React.useMemo(
+    () => nicheSelection(niche, nicheCatalogue ?? EMPTY_NICHES),
+    [niche, nicheCatalogue],
+  );
+  const scope = React.useMemo(
+    () => scopeMarketComparison(inNiche, selection),
+    [inNiche, selection],
+  );
+
+  /*
+   * ONE SCOPED LIST, SPLIT BY OWNERSHIP AFTERWARDS.
+   *
+   * Both halves therefore come from the same population by construction, which
+   * is the property that has to survive every future edit to this file: a
+   * difference in hit rate between two differently-shaped pools is not a fact
+   * about our output. Memoised because they key the six comparisons below —
+   * they used to be bare `.filter()` calls, and a new array each render made
+   * every one of those `useMemo`s decorative.
+   */
+  const ourChannels = React.useMemo(
+    () => scope.rows.filter((r) => r.channel.ownershipType === "own"),
+    [scope],
+  );
+  const competitorChannels = React.useMemo(
+    () => scope.rows.filter((r) => r.channel.ownershipType !== "own"),
+    [scope],
+  );
 
   const comparison = React.useMemo(
     () =>
@@ -145,6 +195,22 @@ export default function OurVsMarketPage() {
         ? "uncategorised channels"
         : (data?.niches.find((n) => n.id === niche)?.name ?? "this niche");
 
+  /*
+   * What this page is a comparison OF, in one sentence.
+   *
+   * Three genuinely different claims, and the header has to make the right one
+   * before anything below it is read. "All niches" stopped being true the
+   * moment the watchlist channels came out of both pools, so the description
+   * names the population rather than the filter — and a watchlist niche gets
+   * told, up front, that what follows is not the studio's scorecard.
+   */
+  const description =
+    scope.kind === "watchlist"
+      ? `How your channels compare to the competitor pool in ${nicheName} — a niche Northstar follows rather than publishes into.`
+      : scope.watchlistExcluded > 0
+        ? `How your channels compare to the competitor pool across the niches Northstar publishes into. ${channelPhrase(scope.watchlistExcluded)} sitting only in watchlist niches ${scope.watchlistExcluded === 1 ? "is" : "are"} left out of both sides.`
+        : `How your channels compare to the competitor pool in ${nicheName}.`;
+
   if (error) {
     return (
       <PageContainer>
@@ -161,7 +227,7 @@ export default function OurVsMarketPage() {
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="Our vs Market"
-        description={`How your channels compare to the competitor pool in ${nicheName}.`}
+        description={description}
         actions={<GenerateReportDialog />}
       />
 
@@ -189,18 +255,36 @@ export default function OurVsMarketPage() {
                 : "No competitor channels in this niche"
             }
             description={
-              ourChannels.length === 0 ? (
-                <>
-                  This page compares your channels against the market. Mark at least one
-                  channel as <strong className="text-foreground">Our channel</strong> from
-                  its row menu, then come back.
-                </>
-              ) : (
-                <>
-                  There is nothing to compare against yet. Add a competitor channel to{" "}
-                  {nicheName} to see how you stack up.
-                </>
-              )
+              <>
+                {ourChannels.length === 0 ? (
+                  <>
+                    This page compares your channels against the market. Mark at least one
+                    channel as <strong className="text-foreground">Our channel</strong>{" "}
+                    from its row menu, then come back.
+                  </>
+                ) : (
+                  <>
+                    There is nothing to compare against yet. Add a competitor channel to{" "}
+                    {nicheName} to see how you stack up.
+                  </>
+                )}
+                {/*
+                  "Nothing here" is a lie whenever the scope did the emptying.
+                  A viewer who can see the channels on the Channels page needs
+                  to know they were left out on purpose and where to go to look
+                  at them — otherwise this reads as the tracker having lost
+                  them.
+                */}
+                {scope.watchlistExcluded > 0 ? (
+                  <>
+                    {" "}
+                    {channelPhrase(scope.watchlistExcluded)}{" "}
+                    {scope.watchlistExcluded === 1 ? "sits" : "sit"} only in watchlist
+                    niches and {scope.watchlistExcluded === 1 ? "is" : "are"} left out of
+                    both sides here. Select a watchlist niche above to compare inside one.
+                  </>
+                ) : null}
+              </>
             }
             action={
               <Button variant="primary" asChild>
@@ -219,11 +303,20 @@ export default function OurVsMarketPage() {
             <HitRuleNotConfiguredNotice nicheName={nicheName} />
           ) : null}
 
+          {/* Above the scoreboard, not below it: by the time somebody has read
+              "you're outperforming the market in 4 of 6", the label has arrived
+              too late to change how they read it. */}
+          {scope.kind === "watchlist" ? (
+            <WatchlistComparisonNotice nicheName={nicheName} />
+          ) : null}
+
           <Scoreboard
             comparison={comparison}
             nicheName={nicheName}
             ourCount={ourChannels.length}
             marketCount={competitorChannels.length}
+            scopeKind={scope.kind}
+            watchlistExcluded={scope.watchlistExcluded}
           />
 
           <div className="grid gap-4 xl:grid-cols-[minmax(260px,1fr)_1.6fr]">
@@ -231,7 +324,24 @@ export default function OurVsMarketPage() {
               <CardHeader>
                 <div className="flex items-center gap-1.5">
                   <CardTitle>Tracked market share</CardTitle>
-                  <InfoTip>{TRACKED_MARKET_SHARE_DEFINITION}</InfoTip>
+                  <InfoTip>
+                    {TRACKED_MARKET_SHARE_DEFINITION}
+                    {/* The denominator moved with the split, so the sentence
+                        that exists to describe the denominator has to say so.
+                        A share diluted by views from niches Northstar does not
+                        publish into would understate exactly the thing this
+                        donut is read for. */}
+                    {scope.watchlistExcluded > 0 ? (
+                      <>
+                        {" "}
+                        It is also scoped to the niches Northstar publishes into:{" "}
+                        {channelPhrase(scope.watchlistExcluded).toLowerCase()} sitting
+                        only in watchlist niches{" "}
+                        {scope.watchlistExcluded === 1 ? "contributes" : "contribute"} to
+                        neither half of it.
+                      </>
+                    ) : null}
+                  </InfoTip>
                 </div>
                 <CardDescription>
                   <span className="inline-flex items-center gap-2">
@@ -300,16 +410,70 @@ export default function OurVsMarketPage() {
   );
 }
 
+/**
+ * "1 channel" / "4 channels".
+ *
+ * Four captions on this page count the same excluded set — the header, the
+ * empty state, the market-share tooltip and the scoreboard's scope line — and
+ * four hand-rolled ternaries is four chances for one of them to say
+ * "1 channels".
+ */
+function channelPhrase(count: number): string {
+  return `${count} ${count === 1 ? "channel" : "channels"}`;
+}
+
+/**
+ * The label on a comparison that is real but is NOT the studio's scorecard.
+ *
+ * "How does our stuff compare inside a niche we only watch" is a fair question
+ * and the product answers it — refusing would be excluding a watchlist niche
+ * from the app rather than from the average, which is not what the split is
+ * for. What the answer must never do is arrive wearing the scorecard's clothes,
+ * because this screen is the one people quote. So the page states the kind of
+ * niche before the numbers, in the owner's own word.
+ *
+ * Deliberately not styled as a warning. Nothing is wrong and nobody has to go
+ * and fix anything — the same tone `HitRuleNotConfiguredNotice` reaches for and
+ * one step calmer, since this state is not even waiting on a decision.
+ */
+function WatchlistComparisonNotice({ nicheName }: { nicheName: string }) {
+  return (
+    <div
+      className="flex flex-wrap items-start gap-3 rounded-lg border border-border bg-surface-sunken px-4 py-3"
+      role="status"
+    >
+      <Eye className="mt-px size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-medium text-foreground">
+          {NICHE_KIND_LABEL.watchlist} niche
+          <span className="font-normal text-muted-foreground"> · {nicheName}</span>
+        </p>
+        <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+          Everything below is a real comparison inside {nicheName} — same period, same
+          rule, both sides judged alike. It is not part of how {BRAND.company} is doing:
+          this is a niche the studio follows rather than publishes into, so nobody is
+          measured on these numbers and no hit in them is paid. The scorecard is the
+          all-niches view.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function Scoreboard({
   comparison,
   nicheName,
   ourCount,
   marketCount,
+  scopeKind,
+  watchlistExcluded,
 }: {
   comparison: ReturnType<typeof compareToMarket>;
   nicheName: string;
   ourCount: number;
   marketCount: number;
+  scopeKind: MarketScopeKind;
+  watchlistExcluded: number;
 }) {
   // Niche names are user-supplied and often already start with an article
   // ("The Last of Us"), so a hardcoded "the" would read as "the The Last of
@@ -322,15 +486,41 @@ function Scoreboard({
     (m) => m.direction === "neutral" || m.outperforming === null,
   );
 
+  /**
+   * Who this tally is over, said in the line under it.
+   *
+   * The counts above it — "3 of your channels vs 11 competitor channels" —
+   * describe the pools honestly but cannot say why a channel the viewer knows
+   * about is absent, or why the win/loss line is not the studio's report card.
+   * Both facts live here, one sentence each, in the same place so a future edit
+   * cannot add a scope without a caption.
+   */
+  const scopeNote =
+    scopeKind === "watchlist"
+      ? "Watchlist niche: measured on the same rule as everywhere else, and deliberately outside how Northstar is doing. Nobody is judged on this and no hit in it is paid."
+      : watchlistExcluded > 0
+        ? `${channelPhrase(watchlistExcluded)} sitting only in watchlist niches ${watchlistExcluded === 1 ? "is" : "are"} excluded from BOTH sides — a channel nobody at Northstar is trying to be belongs in neither our output nor the field we measure it against.`
+        : null;
+
   return (
     <Card className="p-5">
       <div className="flex items-start gap-3">
         <span
           className={cn(
             "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border",
-            comparison.outperformingCount * 2 >= comparison.comparableCount
-              ? "border-success/25 bg-success-subtle text-success"
-              : "border-warning/25 bg-warning-subtle text-warning",
+            /*
+              A watchlist comparison gets NO VERDICT COLOUR.
+              Green and amber here mean "good for us" and "bad for us", which is
+              a judgement on work the studio is accountable for. Painting a
+              niche nobody publishes into in the scorecard's colours is the
+              cheapest possible way to make it look like the scorecard, and it
+              would happen below the reading level of the banner above.
+            */
+            scopeKind === "watchlist"
+              ? "border-border bg-surface-sunken text-muted-foreground"
+              : comparison.outperformingCount * 2 >= comparison.comparableCount
+                ? "border-success/25 bg-success-subtle text-success"
+                : "border-warning/25 bg-warning-subtle text-warning",
           )}
         >
           <Swords className="size-4" />
@@ -340,6 +530,20 @@ function Scoreboard({
           <h2 className="text-[15px] font-medium tracking-tight text-foreground">
             {comparison.comparableCount === 0 ? (
               <>Not enough data to score {nicheName} yet.</>
+            ) : scopeKind === "watchlist" ? (
+              /*
+                "You're outperforming" is a claim about the studio. Inside a
+                niche the studio only watches it is the same arithmetic and a
+                different sentence — the channels lead the field there, which is
+                worth knowing and is not an achievement anybody is measured on.
+              */
+              <>
+                Your channels lead the {marketLabel} field on{" "}
+                <span className="text-accent">
+                  {comparison.outperformingCount} of {comparison.comparableCount}
+                </span>{" "}
+                scored metrics — inside a niche Northstar watches.
+              </>
             ) : (
               <>
                 You&rsquo;re outperforming the {marketLabel} market in{" "}
@@ -358,6 +562,11 @@ function Scoreboard({
             {comparison.ours.shorts.length} vs {comparison.market.shorts.length} Shorts in
             this period.
           </p>
+          {scopeNote ? (
+            <p className="mt-1 text-[11px] leading-relaxed text-subtle-foreground">
+              {scopeNote}
+            </p>
+          ) : null}
 
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <ScoreList title="Above market" tone="success" metrics={above} />

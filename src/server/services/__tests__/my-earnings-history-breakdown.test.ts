@@ -354,7 +354,7 @@ describe("the lines are the hits the run recorded", () => {
     for (const line of breakdown.byNiche) {
       expect(line.bonusMinor).toBe(line.hitCount * breakdown.hitPaymentMinor);
     }
-    const summed = breakdown.byNiche.reduce((total, line) => total + line.bonusMinor, 0);
+    const summed = breakdown.byNiche.reduce((total, line) => total + (line.bonusMinor ?? 0), 0);
     expect(summed).toBe(breakdown.hitBonusMinor);
   });
 

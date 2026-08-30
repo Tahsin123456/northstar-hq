@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import {
   Archive,
   ArchiveRestore,
@@ -35,14 +36,22 @@ import { FieldHint, Input, Label } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { contentTypeColor } from "./content-type-chip";
 import {
+  useContentTypesFromDataset,
   useCreateContentType,
   useDeleteContentType,
   useRenameContentType,
   useReorderContentTypes,
+  useSetChannelRuleWindow,
   useSetContentTypeActive,
 } from "@/hooks/use-content-types";
+import { useDataset } from "@/hooks/use-dataset";
+import { RULE_AUTO_CLOSE_STREAK } from "@/lib/content-types/rules";
 import { ApiError } from "@/lib/api-client";
-import type { ContentTypeDTO } from "@/lib/dto";
+import type {
+  ChannelContentTypeRuleDTO,
+  ChannelDTO,
+  ContentTypeDTO,
+} from "@/lib/dto";
 import { formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -194,6 +203,8 @@ export function ContentTypeManager({
         )}
       </Card>
 
+      <RetiredRules canManage={canManage} />
+
       <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
         One list for the whole team. Any channel and any Short can carry any of these
         tags, whichever niche it belongs to. Archiving keeps everything already tagged;
@@ -280,18 +291,23 @@ function ContentTypeRow({
           </div>
           <p className="mt-0.5 text-[11px] text-subtle-foreground">
             {/*
-                THE CHANNEL COUNT LEADS, because it is the one that describes
-                reach: a tag on six channels labels every Short those channels
-                have published and every one they publish next week, and no row
-                exists for any of them. The number beside it is only the
-                EXCEPTIONS — Shorts individually tagged over and above what
-                their channel gives them — which is why it is labelled "tagged
-                directly" rather than left to read as "Shorts with this tag".
-                Both are always shown, zero included, because together they are
-                what decides whether this type can be deleted.
+                THE RULE COUNT LEADS, because it is the one that describes
+                reach: six rules label every Short published inside their six
+                windows, and no row exists for any of them. The number beside it
+                is only the EXCEPTIONS — Shorts individually tagged over and
+                above what their rules give them — which is why it is labelled
+                "tagged directly" rather than left to read as "Shorts with this
+                tag". Both are always shown, zero included, because together
+                they are what decides whether this type can be deleted.
+
+                "Channel rules" rather than "channels", and the extra word earns
+                its place: one channel can carry two windows of the same tag, and
+                a delete would destroy both stretches of its history. Saying
+                "1 channel" would understate what is at stake by exactly the
+                amount that matters.
             */}
-            <span className="tnum">{formatNumber(contentType.channelCount)}</span>{" "}
-            {contentType.channelCount === 1 ? "channel" : "channels"}
+            <span className="tnum">{formatNumber(contentType.channelRuleCount)}</span>{" "}
+            {contentType.channelRuleCount === 1 ? "channel rule" : "channel rules"}
             {" · "}
             <span className="tnum">{formatNumber(contentType.manualVideoCount)}</span>{" "}
             {contentType.manualVideoCount === 1 ? "Short" : "Shorts"} tagged directly
@@ -580,7 +596,7 @@ function DeleteContentTypeDialog({
   const looksInUse =
     contentType.manualVideoCount > 0 ||
     contentType.excludedVideoCount > 0 ||
-    contentType.channelCount > 0;
+    contentType.channelRuleCount > 0;
 
   return (
     <Dialog
@@ -606,18 +622,19 @@ function DeleteContentTypeDialog({
               ? refusal.message
               : looksInUse
                 ? /*
-                   * The channel clause carries its consequence with it. "6
-                   * channels" reads as the smallest of these numbers and is by
-                   * far the largest thing a delete would take: those channels
-                   * hand this tag to their entire back catalogue.
+                   * The rule clause carries its consequence with it. "6 channel
+                   * rules" reads as the smallest of these numbers and is by far
+                   * the largest thing a delete would take: each rule hands this
+                   * tag to a whole stretch of a channel's output, and a retired
+                   * one is still labelling a back catalogue.
                    *
                    * Exclusions are named too, and not as a technicality. A
-                   * refusal is somebody looking at a Short their channel had
-                   * labelled and saying no; cascading it away would mean
-                   * re-creating a type of the same name silently puts the tag
-                   * back on precisely the Shorts a person had refused it for.
+                   * refusal is somebody looking at a Short a rule had labelled
+                   * and saying no; cascading it away would mean re-creating a
+                   * type of the same name silently puts the tag back on
+                   * precisely the Shorts a person had refused it for.
                    */
-                  `“${contentType.name}” is on ${formatNumber(contentType.channelCount)} ${contentType.channelCount === 1 ? "channel" : "channels"} — which gives it to every Short they have published — and ${formatNumber(contentType.manualVideoCount)} ${contentType.manualVideoCount === 1 ? "Short is" : "Shorts are"} tagged with it directly${
+                  `“${contentType.name}” is on ${formatNumber(contentType.channelRuleCount)} channel ${contentType.channelRuleCount === 1 ? "rule" : "rules"} — each giving it to every Short published inside its dates — and ${formatNumber(contentType.manualVideoCount)} ${contentType.manualVideoCount === 1 ? "Short is" : "Shorts are"} tagged with it directly${
                     contentType.excludedVideoCount > 0
                       ? `, with ${formatNumber(contentType.excludedVideoCount)} explicitly refusing it`
                       : ""
@@ -694,4 +711,143 @@ function DeleteContentTypeDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/**
+ * ==========================================================================
+ * RULES THAT RETIRED THEMSELVES, GATHERED IN ONE PLACE
+ * ==========================================================================
+ *
+ * THE SECOND HALF OF "TELL THE PERSON IT HAPPENED". The toast catches whoever
+ * was standing there when a rule closed; the channel page answers somebody who
+ * has gone looking at that channel. Neither reaches the person who was not there
+ * and does not yet know which channel to look at — and that is exactly who is
+ * standing on this screen when they ask "why has the Rankings feed gone quiet?".
+ *
+ * SELF-RETIRED ONLY. A rule somebody closed by hand is not news: they know, and
+ * listing it here would bury the ones nobody decided under the ones somebody
+ * did. This is a list of things the APP did, which is the only category that
+ * needs volunteering.
+ *
+ * IT DISAPPEARS WHEN IT IS EMPTY, which is the normal state. A permanently
+ * visible "nothing has retired itself" panel would advertise a mechanism most
+ * teams will meet twice a year as though it were part of the furniture.
+ *
+ * FROM THE DATASET RATHER THAN A FETCH OF ITS OWN. The rules already travelled
+ * with every channel — that is what makes the browser able to resolve tags at
+ * all — so this is a filter over data in memory. A screen that added a request
+ * to show a list that is usually empty would be paying on every visit for the
+ * rare one.
+ */
+function RetiredRules({ canManage }: { canManage: boolean }) {
+  const { data } = useDataset();
+  const catalogue = useContentTypesFromDataset();
+  const reopen = useSetChannelRuleWindow();
+
+  const retired = React.useMemo(() => {
+    const byId = new Map(catalogue.map((type) => [type.id, type]));
+    const rows: Array<{
+      rule: ChannelContentTypeRuleDTO;
+      channel: ChannelDTO;
+      name: string;
+    }> = [];
+
+    for (const entry of data?.channels ?? []) {
+      for (const rule of entry.channel.contentTypeRules) {
+        if (rule.autoClosedAt === null) continue;
+        rows.push({
+          rule,
+          channel: entry.channel,
+          name: byId.get(rule.contentTypeId)?.name ?? "A content type",
+        });
+      }
+    }
+
+    // Most recently noticed first: the newest retirement is the one somebody is
+    // most likely to be here about.
+    return rows.sort((a, b) => (b.rule.autoClosedAt ?? 0) - (a.rule.autoClosedAt ?? 0));
+  }, [catalogue, data]);
+
+  if (retired.length === 0) return null;
+
+  return (
+    <Card className="flex flex-col gap-2 p-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h3 className="text-[13px] font-medium text-foreground">
+          Rules that stopped applying
+        </h3>
+        <span className="text-[11px] text-subtle-foreground">
+          retired after {RULE_AUTO_CLOSE_STREAK} removals in a row
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        {retired.map(({ rule, channel, name }) => (
+          <div
+            key={rule.id}
+            className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-relaxed"
+          >
+            <span className="text-foreground">{name}</span>
+            <span className="text-subtle-foreground">on</span>
+            {/* Straight to the channel, because the next question after "which
+                rule?" is always "what does that channel look like now?" — and
+                the page it lands on is where the rule's full window is. */}
+            <Link
+              href={`/channels/${channel.id}`}
+              className="truncate text-accent transition-colors hover:text-accent-hover hover:underline"
+            >
+              {channel.displayName}
+            </Link>
+            <span className="text-subtle-foreground">
+              {/* THE DATE THE CHANNEL CHANGED, not the date it was noticed.
+                  They are different, deliberately, and this is the one that
+                  says which uploads lost the tag. */}
+              &mdash; stopped from {formatRuleDate(rule.effectiveUntil ?? 0)}
+            </span>
+            {canManage ? (
+              <button
+                type="button"
+                disabled={reopen.isPending}
+                onClick={() =>
+                  reopen.mutate(
+                    { channelId: channel.id, ruleId: rule.id, effectiveUntil: null },
+                    {
+                      onSuccess: () =>
+                        toast.success(
+                          `“${name}” applies to new uploads on ${channel.displayName} again`,
+                        ),
+                      onError: (error) =>
+                        toast.error("Could not re-open that rule", {
+                          description:
+                            error instanceof Error ? error.message : undefined,
+                        }),
+                    },
+                  )
+                }
+                className="rounded text-accent transition-colors hover:text-accent-hover hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:pointer-events-none disabled:opacity-50"
+              >
+                re-open
+              </button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * "4 March 2025" — the same phrasing as the toast, the channel page and the
+ * audit log.
+ *
+ * UTC on all four, so a reader comparing them never finds two different days
+ * because one was formatted against a browser in a different zone.
+ */
+function formatRuleDate(epochMs: number): string {
+  return new Date(epochMs).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
 }

@@ -1,5 +1,6 @@
 import type {
   ApiErrorDTO,
+  ChannelContentTypeRuleDTO,
   ChannelDTO,
   ChannelPreviewDTO,
   ContentTypeDTO,
@@ -15,6 +16,7 @@ import type {
   MyProfileDTO,
   NotificationAttemptDTO,
   OrganizationSettingsDTO,
+  OwnChannelDTO,
   OwnershipType,
   PersonalSettingsDTO,
   SavedShortDTO,
@@ -28,6 +30,7 @@ import type {
   FinanceEntryDTO,
   FinanceKind,
 } from "@/lib/finance/types";
+import type { NicheKind } from "@/lib/niches/niche-kind";
 
 /**
  * Response and input types imported straight from the services that produce
@@ -345,6 +348,8 @@ export const api = {
   createNiche: (payload: {
     name: string;
     hitThreshold?: number;
+    /** Absent means production — the column default and the inclusive answer. */
+    kind?: NicheKind;
   }): Promise<{ niche: NicheDTO }> =>
     request("/api/niches", { method: "POST", body: JSON.stringify(payload) }),
 
@@ -352,16 +357,30 @@ export const api = {
     request(`/api/niches/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
 
   /**
-   * Both halves of the rule: the bar and the clock.
+   * The whole rule: the bar, the clock, the price — and what kind of niche it is.
    *
-   * Either may be omitted — an absent key is not a write, so the dashboard's
-   * threshold control can save a number without touching the window. Either may
-   * be `null`, which CLEARS that half and leaves the niche unable to score
-   * anything until it is set again. Half a rule is not a rule.
+   * ANY KEY MAY BE OMITTED, and an absent key is not a write: the dashboard's
+   * threshold control can save a number without touching the window, and the
+   * dialog omits `hitPaymentMinor` entirely for a watchlist niche so that
+   * reclassifying one leaves whatever rate it was carrying exactly where it is.
+   *
+   * Any of the three numbers may be `null`, which CLEARS that setting and leaves
+   * the niche unable to score or unable to pay until it is set again. Half a
+   * rule is not a rule, and a rule with no price cannot pay for what it scores.
+   *
+   * TWO PERMISSIONS BEHIND ONE CALL. The three numbers need `settings.manage`;
+   * `kind` needs `niches.manage`, the floor for touching a shared label at all.
+   * The service checks both, so a caller sending a key it may not write gets a
+   * 403 rather than a silently dropped field.
    */
   setNicheRule: (
     id: string,
-    rule: { hitThreshold?: number | null; hitWindowHours?: number | null },
+    rule: {
+      hitThreshold?: number | null;
+      hitWindowHours?: number | null;
+      hitPaymentMinor?: number | null;
+      kind?: NicheKind;
+    },
   ): Promise<{ niche: NicheDTO }> =>
     request(`/api/niches/${id}`, {
       method: "PATCH",
@@ -516,18 +535,45 @@ export const api = {
     }),
 
   /**
-   * Replaces a channel's content-type tags — "what this channel makes".
+   * "Apply to this channel" — one tag, over the whole back catalogue and
+   * everything published next.
    *
-   * Takes the CHANNEL id, matching `setChannelNiches` above, and returns the
-   * updated channel so the caller re-renders from what the server stored.
+   * REPLACES `setChannelContentTypes`, which took the channel's complete tag set
+   * and could therefore only ever say "this is what the channel makes, forever".
+   * What it writes now is a RULE with a start date, so the same channel can have
+   * made rankings until March and cutscenes since without either claim being a
+   * lie about the other.
+   *
+   * Idempotent: applying a tag a rule already covers returns the rule that was
+   * already there. Takes the CHANNEL id, matching `setChannelNiches` above, and
+   * returns the updated channel so the caller re-renders from what the server
+   * stored.
    */
-  setChannelContentTypes: (
+  applyContentTypeToChannel: (
     channelId: string,
-    contentTypeIds: readonly string[],
-  ): Promise<{ channel: ChannelDTO }> =>
-    request(`/api/channels/${channelId}/content-types`, {
-      method: "PUT",
-      body: JSON.stringify({ contentTypeIds }),
+    contentTypeId: string,
+  ): Promise<{ rule: ChannelContentTypeRuleDTO; channel: ChannelDTO }> =>
+    request(`/api/channels/${channelId}/content-type-rules`, {
+      method: "POST",
+      body: JSON.stringify({ contentTypeId }),
+    }),
+
+  /**
+   * Close a rule at a date, or re-open it with `null`.
+   *
+   * BOTH DIRECTIONS THROUGH ONE CALL, which is what makes the undo on the
+   * "stopped applying…" toast the same shape of request as the thing it undoes.
+   * Re-opening also clears the streak that retired the rule — otherwise the next
+   * removal would retire it again, for reasons a person had just rejected.
+   */
+  setChannelContentTypeRuleWindow: (
+    channelId: string,
+    ruleId: string,
+    effectiveUntil: number | null,
+  ): Promise<{ rule: ChannelContentTypeRuleDTO; channel: ChannelDTO }> =>
+    request(`/api/channels/${channelId}/content-type-rules/${ruleId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ effectiveUntil }),
     }),
 
   setChannelOwnership: (
@@ -1216,6 +1262,48 @@ export const api = {
     connections: readonly YouTubeConnectionDTO[];
     google: GoogleOAuthStatusDTO;
   }> => request("/api/youtube/connections"),
+
+  /**
+   * The channels the connected Google accounts actually own.
+   *
+   * The whole reason for connecting, and the reason there is no channel id in
+   * `addOwnYouTubeChannel`'s argument that a person had to type: Google has
+   * already said which channels these are, so the app offers them rather than
+   * asking somebody to prove it again.
+   *
+   * A connection that cannot currently mint a token contributes nothing rather
+   * than failing the call — one expired grant must not hide three working ones —
+   * so an empty array means "none found", never "something went wrong".
+   */
+  listOwnYouTubeChannels: (): Promise<{ channels: readonly OwnChannelDTO[] }> =>
+    request("/api/youtube/own-channels"),
+
+  /**
+   * Track one of them, and pull its history immediately.
+   *
+   * The server matches `youtubeChannelId` against what the connection reports
+   * owning and refuses anything else, so this cannot be used to mark an
+   * arbitrary channel as one of Northstar's.
+   *
+   * `sync` is the first read's own result, and worth looking at: its
+   * `dataSource` says whether that read went through the connection, which is
+   * the promise the button made when it was pressed.
+   */
+  addOwnYouTubeChannel: (input: {
+    connectionId: string;
+    youtubeChannelId: string;
+  }): Promise<{
+    channelId: string;
+    title: string;
+    created: boolean;
+    restored: boolean;
+    reclassified: boolean;
+    sync: RefreshResultDTO;
+  }> =>
+    request("/api/youtube/own-channels", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
 
   /**
    * `revokedAtGoogle` is false when Google could not be reached. The local

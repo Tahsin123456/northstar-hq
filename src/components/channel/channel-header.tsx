@@ -17,20 +17,58 @@ import { useContentTypesByIds } from "@/hooks/use-content-types";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ChannelRowMenu } from "@/components/channels/channel-row-menu";
+import { ChannelSourceLine, channelSourceCopy } from "@/components/youtube/channel-source";
 
 export function ChannelHeader({ channel }: { channel: ChannelDTO }) {
   const refresh = useRefreshChannel();
 
+  // Asked once here so the separator dot and the line itself agree about
+  // whether there is anything to show — a lone "·" is the classic way this
+  // kind of conditional inline list goes wrong.
+  const sourceCopy = channelSourceCopy(channel.dataSource, channel.ownershipType);
+
   // Keeps "views checked 3 minutes ago" honest, from the shared clock store.
   const now = useNow();
 
-  // Joined from the catalogue that already travelled with the dataset, so a
-  // rename shows up here without this component knowing anything about it.
-  const contentTypes = useContentTypesByIds(channel.contentTypeIds);
+  /*
+   * The tags this channel is CURRENTLY claiming — open rules only.
+   *
+   * A header states what a thing is now. A retired rule is part of the channel's
+   * history rather than its present, and showing it up here would tell somebody
+   * this channel makes rankings when the whole point of the retirement was that
+   * it has stopped. The full history, retirements included, is in the Content
+   * types block further down the page, where there is room to say when.
+   *
+   * Joined from the catalogue that already travelled with the dataset, so a
+   * rename shows up here without this component knowing anything about it.
+   */
+  const currentTypeIds = React.useMemo(
+    () =>
+      channel.contentTypeRules
+        .filter((rule) => rule.effectiveUntil === null)
+        .map((rule) => rule.contentTypeId),
+    [channel.contentTypeRules],
+  );
+  const contentTypes = useContentTypesByIds(currentTypeIds);
 
   const handleRefresh = () => {
     refresh.mutate(channel.id, {
       onSuccess: ({ result }) => {
+        /*
+         * A refusal is not a failure, and calling it one would be the screen's
+         * own small lie. Nothing broke: this channel reads through its Google
+         * account's authorisation, that authorisation has stopped working, and
+         * the sync declined to substitute the public API behind the reader's
+         * back. "Refresh failed" invites somebody to press it again; naming the
+         * reconnection is the only thing that will actually change the outcome.
+         */
+        if (result.dataSource === "connection_unavailable") {
+          toast.warning("Not refreshed — this channel's connection needs reconnecting", {
+            description: result.error ?? undefined,
+            duration: 12_000,
+          });
+          return;
+        }
         if (result.status === "error") {
           toast.error("Refresh failed", { description: result.error ?? undefined });
           return;
@@ -148,6 +186,26 @@ export function ChannelHeader({ channel }: { channel: ChannelDTO }) {
                     : "Every metric on this page reflects view counts as of this time."}
                 </TooltipContent>
               </Tooltip>
+
+              {/*
+                Which door these numbers came through, beside the freshness that
+                depends on it. Silent for a competitor on the public API — that
+                is the only source a competitor can ever have — and loud for an
+                own channel whose connection has failed, where "checked 2 hours
+                ago" is true and dangerously incomplete on its own: nothing was
+                read, and nothing will be until the account is reconnected.
+              */}
+              {sourceCopy ? (
+                <>
+                  <span className="text-border-strong" aria-hidden>
+                    ·
+                  </span>
+                  <ChannelSourceLine
+                    dataSource={channel.dataSource}
+                    ownershipType={channel.ownershipType}
+                  />
+                </>
+              ) : null}
             </div>
           </div>
         </div>

@@ -7,7 +7,14 @@ import {
   type ContentTypePerformance,
 } from "@/lib/analytics/content-type-performance";
 import type { ChannelMetrics, DateRange, PortfolioSummary } from "@/lib/analytics";
-import type { ChannelDTO, ContentTypeDTO, DatasetDTO, VideoDTO } from "@/lib/dto";
+import { isStudioChannel } from "@/lib/niches/niche-kind";
+import type {
+  ChannelContentTypeRuleDTO,
+  ChannelDTO,
+  ContentTypeDTO,
+  DatasetDTO,
+  VideoDTO,
+} from "@/lib/dto";
 import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
 import { useFilters } from "@/components/providers/filters-provider";
 import { useVideoContentTypeResolutions } from "./use-content-types";
@@ -90,7 +97,7 @@ export function filterRows(rows: readonly ChannelRow[], query: string): ChannelR
  * NO LONGER part of it — see the predicate below.
  */
 export type ScopeableRow = {
-  channel: Pick<ChannelDTO, "niches" | "ownershipType" | "contentTypeIds">;
+  channel: Pick<ChannelDTO, "niches" | "ownershipType" | "contentTypeRules">;
 };
 
 /**
@@ -101,16 +108,22 @@ export type ScopeableRow = {
  * what makes "GTA + Our Channels + 30D + ≥1M" a single coherent question
  * rather than a filtered view of a global average.
  *
- * THE CONTENT-TYPE PREDICATE READS THE CHANNEL'S OWN TAGS, AND UNDER
- * INHERITANCE THAT IS *ALREADY* THE EFFECTIVE ANSWER.
+ * THE CONTENT-TYPE PREDICATE READS THE CHANNEL'S RULES, AND DELIBERATELY
+ * IGNORES THEIR DATES.
  *
- * This is worth stating plainly, because "match on effective tags" sounds like
- * it must mean resolving something here, and here is the one surface where it
- * does not. A channel's tags are not a copy of anything — they are the SOURCE
- * every one of its Shorts resolves against. So `contentTypeIds.includes("memes")`
- * on a channel row is exactly the set of channels whose Shorts inherit Memes;
- * there is no second thing to consult, and calling `resolveContentTypes` on a
- * channel would be resolving a value against itself.
+ * This is the one surface where a date-aware match would be the wrong answer,
+ * and it is worth saying why rather than leaving it to look like an oversight.
+ * The unit here is a CHANNEL and its metrics describe everything it published,
+ * so "does this channel make Rankings?" is a question about its whole history.
+ * A rule that retired in March still means the channel spent a year making
+ * rankings, and dropping the row out of the "Rankings" filter the day the rule
+ * closed would quietly shrink the set every time somebody corrected a tag —
+ * while the hit rate beside the row went on describing all four hundred Shorts.
+ *
+ * So the match is `everClaimed`: every tag any rule has ever given this channel.
+ * Per-Short filtering, where the date genuinely decides, happens where Shorts
+ * are the unit — `useShortsFeed` and the channel page's own table, both of which
+ * resolve against the publish date.
  *
  * WHAT THIS DELIBERATELY DOES NOT DO is admit a channel because one of its
  * Shorts was manually tagged Memes while the channel is not. That is a genuine
@@ -150,9 +163,11 @@ export function filterRowsByScope<T extends ScopeableRow>(
     if (ownership !== "all" && row.channel.ownershipType !== ownership) return false;
 
     if (contentType !== "all") {
-      const tags = row.channel.contentTypeIds;
-      // "Untagged" is a channel nobody has described — the backlog this filter
-      // exists to find.
+      const tags = channelEverClaimed(row.channel.contentTypeRules);
+      // "Untagged" is a channel nobody has ever described — the backlog this
+      // filter exists to find. A channel whose only rule has retired is NOT in
+      // it: somebody characterised that channel, and the label on its back
+      // catalogue is the proof.
       if (contentType === "unassigned") {
         if (tags.length > 0) return false;
       } else if (!tags.includes(contentType)) {
@@ -167,15 +182,68 @@ export function filterRowsByScope<T extends ScopeableRow>(
 }
 
 /**
- * How many channels carry no content-type tag at all.
+ * Every tag any rule has ever given this channel.
+ *
+ * The CHANNEL-level reading of a set of rules, extracted so the predicate above
+ * and the count below cannot answer it two ways. `buildInheritanceTimeline`
+ * exposes the same list as `everClaimed`; this is the direct route for the two
+ * callers that never ask about a date and would otherwise build a whole timeline
+ * to read one of its fields.
+ */
+function channelEverClaimed(
+  rules: readonly ChannelContentTypeRuleDTO[],
+): readonly string[] {
+  if (rules.length === 0) return NO_TAGS;
+  return rules.map((rule) => rule.contentTypeId);
+}
+
+/** Shared empty list, so an untagged channel allocates nothing per filter change. */
+const NO_TAGS: readonly string[] = [];
+
+/**
+ * How many channels have never carried a content-type tag at all.
  *
  * Lives beside the predicate rather than being re-derived at each call site,
  * because it has to agree with the "unassigned" branch above exactly: a count
  * that disagreed with the filter it labels would offer "Untagged · 12" and then
- * show eleven rows.
+ * show eleven rows. Both read `channelEverClaimed`, so they cannot disagree
+ * about whether a retired rule still counts as having been described.
  */
 export function untaggedChannelCount(rows: readonly ScopeableRow[]): number {
-  return rows.filter((row) => row.channel.contentTypeIds.length === 0).length;
+  return rows.filter((row) => row.channel.contentTypeRules.length === 0).length;
+}
+
+/**
+ * typeId -> channels the "Channels that make…" menu would show.
+ *
+ * DERIVED HERE RATHER THAN READ OFF THE CATALOGUE, which is a change forced by
+ * rules. The badge used to read `ContentTypeDTO.channelCount`, and that number
+ * has stopped being the one this menu narrows to: the catalogue now counts
+ * RULES, so a channel with "Ranking until March" and "Ranking again from
+ * September" contributes two — the honest answer to "what would deleting this
+ * type destroy?", and the wrong answer to "how many rows will this filter
+ * show?". It also counts rules on channels outside this viewer's niche scope.
+ *
+ * So it is counted off the same rows the filter runs over, through the same
+ * `everClaimed` reading, exactly as the Shorts unit already does. A badge and
+ * the list it labels being two readings of one derivation is the rule this file
+ * follows everywhere else.
+ *
+ * Overlapping, like every other content-type count in this codebase: a channel
+ * with two tags is in both entries, so these do not sum to the row count.
+ */
+export function channelCountsByContentType(
+  rows: readonly ScopeableRow[],
+): ReadonlyMap<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    // Distinct per channel: two rules for one tag are one channel here, which is
+    // precisely the difference from the catalogue's number.
+    for (const id of new Set(channelEverClaimed(row.channel.contentTypeRules))) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+  }
+  return counts;
 }
 
 /**
@@ -225,15 +293,46 @@ export function useScopedRows<T extends ScopeableRow>(
 /**
  * Portfolio metrics for the active period, or for an explicit window.
  *
- * The override exists so a caller can request the *previous* equivalent period
- * with the identical calculation path — a trend is only trustworthy when both
- * of its numbers were produced the same way.
+ * `overrideRange` exists so a caller can request the *previous* equivalent
+ * period with the identical calculation path — a trend is only trustworthy when
+ * both of its numbers were produced the same way.
+ *
+ * `includeWatchlist` is the deliberate half of `PortfolioEntry.countsTowardHitRate`,
+ * and it is an argument rather than something read out of the filter store on
+ * the quiet. Two surfaces call this with genuinely different questions:
+ *
+ *   • The Overview, filtered to ALL niches, is asking "how are we doing" — so
+ *     watchlist channels are volume and nothing more.
+ *   • The Overview, filtered to ONE niche, is asking about that niche. If the
+ *     viewer picked a watchlist niche, silently reporting no rate for it would
+ *     be the product refusing to answer the question it was just asked; a
+ *     watchlist niche is excluded from the studio's average, not from the
+ *     product. That call site passes `includeWatchlist: true`.
+ *
+ * The Command Centre offers no niche control at all, so it always asks the
+ * first question and never passes the flag. Reading the niche filter in here
+ * instead would have made that page's headline depend on a control it does not
+ * show.
  */
+export interface PortfolioSummaryOptions {
+  readonly overrideRange?: DateRange;
+  /**
+   * Count watchlist channels in the rate as well as the volume.
+   *
+   * Only for a view that is explicitly ABOUT a watchlist niche. Default false:
+   * the studio's own scorecard is the question a portfolio figure is asked by
+   * default, and the safe direction for a forgotten flag is to describe less
+   * rather than to quietly describe work the studio does not do.
+   */
+  readonly includeWatchlist?: boolean;
+}
+
 export function usePortfolioSummary(
   rows: readonly ChannelRow[],
-  overrideRange?: DateRange,
+  options: PortfolioSummaryOptions = {},
 ): PortfolioSummary {
   const { range, threshold } = useFilters();
+  const { overrideRange, includeWatchlist = false } = options;
   const effective = overrideRange ?? range;
 
   return React.useMemo(
@@ -247,9 +346,12 @@ export function usePortfolioSummary(
           metrics: overrideRange
             ? calculateChannelMetrics({ videos: row.videos, range: effective, threshold })
             : row.metrics,
+          // Decided from the channel's own niche chips, which carry their kind
+          // — no catalogue to join and nothing to forget to pass.
+          countsTowardHitRate: includeWatchlist || isStudioChannel(row.channel.niches),
         })),
       ),
-    [rows, overrideRange, effective, threshold],
+    [rows, overrideRange, effective, threshold, includeWatchlist],
   );
 }
 

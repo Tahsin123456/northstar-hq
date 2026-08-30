@@ -14,6 +14,7 @@
 
 import type { AnalyticsVideo } from "@/lib/analytics/types";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
+import type { NicheKind } from "@/lib/niches/niche-kind";
 
 /**
  * Whether the user operates a channel or is researching it.
@@ -30,15 +31,87 @@ export function isOwnershipType(value: unknown): value is OwnershipType {
   return value === "own" || value === "competitor";
 }
 
-/** A niche as referenced from a channel — just enough to render a chip. */
+/**
+ * =========================================================================
+ * WHICH DOOR THIS CHANNEL'S NUMBERS CAME THROUGH
+ * =========================================================================
+ *
+ * The owner's instruction was unambiguous: "My own channels data should only
+ * come from that [the connected account], not from external API or sources."
+ * Competitors have no such door and keep using the public Data API with the
+ * shared key, because there is no other way to see them.
+ *
+ * That makes the SOURCE a property a reader has to be able to see, not an
+ * implementation detail — a figure read with the channel owner's own
+ * authorisation and a figure scraped from the public API are different claims
+ * about the same channel, and the second is the one the owner asked not to rely
+ * on for their own channels.
+ *
+ *   • "connection"            — read with the connected account's own OAuth
+ *                               grant. Authoritative, and spends that account's
+ *                               quota rather than the shared key's.
+ *   • "connection_unavailable" — this channel HAS a connection and it has
+ *                               stopped working. The sync refuses to run rather
+ *                               than falling back to the public API, so these
+ *                               figures are frozen at the last good read. This
+ *                               value is the whole reason the enum is not a
+ *                               boolean: "we use the connection" and "we would
+ *                               use the connection but cannot" are the two
+ *                               states an owner has to be able to tell apart,
+ *                               and collapsing them is how a frozen channel
+ *                               passes for a healthy one.
+ *   • "public"                — the public Data API. Correct and permanent for
+ *                               a competitor; for an own channel it means nobody
+ *                               has connected the account that owns it yet, and
+ *                               the screen says so.
+ */
+export type ChannelDataSource = "connection" | "connection_unavailable" | "public";
+
+export function isChannelDataSource(value: unknown): value is ChannelDataSource {
+  return value === "connection" || value === "connection_unavailable" || value === "public";
+}
+
+/**
+ * A niche as referenced from a channel — enough to render a chip, plus the one
+ * fact a chip does not need.
+ *
+ * `kind` is here rather than only on the full `NicheDTO` because the question
+ * it answers is asked about CHANNELS: "is this channel part of the work the
+ * studio is accountable for, or is it something we watch?" That is decided from
+ * `channel.niches`, in a pure predicate, in memory, on every scoped screen. The
+ * alternative was to hand each of those call sites the niche catalogue and let
+ * it join — and a call site that forgot would silently pool watchlist channels
+ * back into the portfolio, which is the exact number this field exists to fix.
+ * One extra short string per niche per channel is a cheap way to make that
+ * unforgettable.
+ */
 export interface NicheRefDTO {
   readonly id: string;
   readonly name: string;
   readonly colorIndex: number;
+  /** "production" | "watchlist". See src/lib/niches/niche-kind.ts. */
+  readonly kind: NicheKind;
 }
 
 export interface NicheDTO extends NicheRefDTO {
   readonly slug: string;
+  /**
+   * What ONE hit in this niche pays, in minor units.
+   *
+   * `null` means UNCONFIGURED, exactly as the two rule columns below do: nobody
+   * has said what a hit here is worth, so nothing in it can pay. It is never
+   * read as zero and never falls back to the employee's own rate — the rate is
+   * a property of the work, not of the person, and a niche that cannot say what
+   * a hit is worth is reported before anybody finalizes a payroll run rather
+   * than quietly paying nothing.
+   *
+   * Always `null` on a watchlist niche as far as any screen is concerned: see
+   * `hitPaymentMinor` on the Prisma model and `payableRateFor` in the payroll
+   * engine. A stored value is kept rather than cleared when a niche is
+   * reclassified, so flipping a production niche to watchlist and back does not
+   * destroy a number an admin chose — but nothing reads it while it is one.
+   */
+  readonly hitPaymentMinor: number | null;
   /**
    * Views required for a hit in this niche.
    *
@@ -122,15 +195,59 @@ export interface ContentTypeDTO extends ContentTypeRefDTO {
    */
   readonly excludedVideoCount: number;
   /**
-   * Tracked channels tagged with it, across the organization.
+   * Channel rules that hand this tag out, across the organization.
    *
-   * A content type is a tag on two different things — channels and Shorts — so
-   * "how much is this in use?" has two answers and both are reported. The two
-   * are no longer independent: the channel tag is what REACHES the Shorts, and
-   * the per-Short rows above only record where a Short departs from it.
+   * A content type is a tag on two different things — stretches of a channel's
+   * output, and individual Shorts — so "how much is this in use?" has two
+   * answers and both are reported. The two are not independent: a rule is what
+   * REACHES the Shorts, and the per-Short rows above only record where a Short
+   * departs from what its rules say.
+   *
+   * RULES, NOT CHANNELS, and the difference is real rather than pedantic: one
+   * channel may legitimately carry "Ranking until March" and "Ranking again from
+   * September", which is two rules and two stretches of history this tag would
+   * take with it if it were deleted. Counting channels would report one and
+   * understate what a delete destroys. Closed and retired rules are counted too,
+   * for the same reason — they still label a back catalogue.
    */
-  readonly channelCount: number;
+  readonly channelRuleCount: number;
   readonly createdAt: number;
+}
+
+/**
+ * One `ChannelContentTypeRule` — "everything this channel made between these
+ * dates is a Funny Meme".
+ *
+ * THE LIVE SOURCE FOR EVERY SHORT IN ITS WINDOW, and the reason a Short's tags
+ * can change without a single row being written against the Short. See
+ * `src/lib/content-types/resolve.ts`, which turns a channel's rules and one
+ * publish date into the inherited half of that Short's tags, for the server and
+ * the browser alike.
+ *
+ * THE STREAK FIELDS TRAVEL TOO, and they are not decoration. A rule that retires
+ * itself is indistinguishable from a bug unless the UI can say so — which needs
+ * `autoClosedAt` to tell a self-retirement from somebody closing it by hand, and
+ * `effectiveUntil` to say the date the channel actually changed rather than the
+ * date anybody noticed. `consecutiveOverrides` is what lets a reader see a rule
+ * that is one removal away from retiring, before it happens rather than after.
+ */
+export interface ChannelContentTypeRuleDTO {
+  readonly id: string;
+  /** Into `DatasetDTO.contentTypes`, like every other content-type reference. */
+  readonly contentTypeId: string;
+  readonly effectiveFrom: number;
+  /** `null` while the rule is still claiming new uploads. */
+  readonly effectiveUntil: number | null;
+  readonly consecutiveOverrides: number;
+  readonly overrideStreakFrom: number | null;
+  /**
+   * Set when the streak closed it, cleared when somebody re-opens it.
+   *
+   * `effectiveUntil !== null && autoClosedAt === null` is therefore a rule
+   * somebody closed deliberately, which reads very differently on a channel page
+   * and must not be presented as the app having decided something.
+   */
+  readonly autoClosedAt: number | null;
 }
 
 export interface ChannelDTO {
@@ -168,26 +285,45 @@ export interface ChannelDTO {
 
   /** Whether this is one of the user's own channels. Defaults to "competitor". */
   readonly ownershipType: OwnershipType;
+  /**
+   * Where the figures above were actually read from — see `ChannelDataSource`.
+   *
+   * Derived per request from the workspace's YouTube connections rather than
+   * stored on the row, and that is deliberate: the answer changes the moment a
+   * grant is revoked or restored, and a stored column would go on asserting
+   * "connection" about a channel nothing can read any more. Nothing about this
+   * field is a preference — it is a report of what happened.
+   */
+  readonly dataSource: ChannelDataSource;
   /** Niches this channel is filed under. Empty means unassigned. */
   readonly niches: readonly NicheRefDTO[];
   /**
-   * Content types tagged on the channel itself — what the team says this
-   * channel makes.
+   * What the team says this channel makes, AND WHEN IT MADE IT.
    *
    * THE LIVE SOURCE FOR EVERY SHORT ON THIS CHANNEL, not merely an editorial
    * note beside them. A Short's effective tags are
    *
-   *     (this array − the Short's exclusions) ∪ the Short's manual tags
+   *     (the rules covering its publish date − its exclusions) ∪ its manual tags
    *
-   * so adding a tag here reaches every Short the channel has ever published and
-   * every one it publishes tomorrow, with nothing written per Short. See
-   * `src/lib/content-types/resolve.ts`, which is where that is computed for both
-   * the server and the browser.
+   * so applying a tag to the channel reaches its whole back catalogue and
+   * everything it publishes next, with nothing written per Short. See
+   * `src/lib/content-types/resolve.ts`, where that is computed for both the
+   * server and the browser.
    *
-   * Ids into `DatasetDTO.contentTypes`, for the same reason the video side ships
-   * ids: the catalogue travels once and renaming a tag stays a one-row change.
+   * THIS REPLACES A FLAT `contentTypeIds` ARRAY, and the array was not merely
+   * less expressive — it was wrong in a way that got worse the longer it was
+   * right. A channel that switched format in March went on handing "Ranking" to
+   * every upload after it, and the only fix available was to untag the channel,
+   * which took the label off the year of rankings that genuinely were rankings.
+   * A window keeps both halves of that history true at once.
+   *
+   * EVERY rule, including closed and retired ones. A closed rule is what makes
+   * the back catalogue resolve correctly, so dropping it from the payload would
+   * un-label a year of Shorts in the browser while the database still knew
+   * better — and it is also the state the UI has to render to offer the one-click
+   * re-open.
    */
-  readonly contentTypeIds: readonly string[];
+  readonly contentTypeRules: readonly ChannelContentTypeRuleDTO[];
 }
 
 /**
@@ -289,13 +425,14 @@ export interface VideoDTO extends AnalyticsVideo {
    * There used to be one `contentTypeIds` array here meaning "this Short's
    * tags". That is now ambiguous, so it is gone: a Short's tags are
    *
-   *     (its channel's tags − `excludedContentTypeIds`) ∪ `manualContentTypeIds`
+   *     (what its publish date inherits − `excludedContentTypeIds`) ∪ `manualContentTypeIds`
    *
    * and the join is done by `resolveContentTypes` in
    * `src/lib/content-types/resolve.ts`, which both the server and the browser
-   * import. Consumers resolve against `ChannelDTO.contentTypeIds`; that is what
-   * keeps the channel the LIVE source rather than a thing that was copied onto
-   * these rows once.
+   * import. Consumers resolve `ChannelDTO.contentTypeRules` against THIS row's
+   * `publishedAt` first; that is what keeps the rules the LIVE source rather
+   * than a thing that was copied onto these rows once — and what makes a rule
+   * retiring reach every upload after the switch and none before it.
    *
    * A PRECOMPUTED EFFECTIVE LIST WOULD BE WRONG HERE, not merely redundant. It
    * would be a snapshot taken when the server assembled the payload: the client
@@ -475,6 +612,17 @@ export interface RefreshResultDTO {
   readonly markedUnavailable: number;
   readonly error: string | null;
   readonly durationMs: number;
+  /**
+   * Which credential this particular run read with.
+   *
+   * On the result and not only on the channel, because the two answer different
+   * questions and a refresh is exactly when they diverge: the channel says what
+   * we would use, this says what was used. A run that reports
+   * "connection_unavailable" read nothing at all — it refused rather than
+   * falling back — and a toast saying "refreshed" over that would be the one
+   * sentence on the screen that is not true.
+   */
+  readonly dataSource: ChannelDataSource;
 }
 
 export interface ExcludedVideoDTO {
@@ -827,6 +975,55 @@ export interface GoogleOAuthStatusDTO {
    * it cannot be derived, which is itself the thing the admin must fix.
    */
   readonly redirectUri: string | null;
+}
+
+/**
+ * =========================================================================
+ * A CHANNEL THE CONNECTED ACCOUNT OWNS, OFFERED FOR ADDING
+ * =========================================================================
+ *
+ * The owner asked for this by name in an earlier round and again in this one:
+ * after connecting, their own channels should be discoverable and addable
+ * WITHOUT anybody pasting a channel id. Pasting an id to add a channel Google
+ * has just told us the account owns is asking the person to prove something the
+ * app already knows — and it is the one step where a typo silently tracks
+ * somebody else's channel as your own.
+ *
+ * Read live from `channels?mine=true` on the connection's own token rather than
+ * from a stored table, so a channel created since the connection was made shows
+ * up without a reconnection, and a channel that left the account stops being
+ * offered. That is also why there is no id of our own on this type: until it is
+ * added there is no `TrackedChannel` row for it to have one.
+ */
+export interface OwnChannelDTO {
+  /** Which connection reported it — the account whose grant will read it. */
+  readonly connectionId: string;
+  readonly googleAccountEmail: string | null;
+  readonly youtubeChannelId: string;
+  readonly title: string;
+  readonly handle: string | null;
+  readonly avatarUrl: string | null;
+  /** `null` when the channel hides it, exactly as everywhere else. */
+  readonly subscriberCount: number | null;
+  readonly hiddenSubscriberCount: boolean;
+  readonly videoCount: number | null;
+  /** Already in this workspace's tracker and active. */
+  readonly alreadyTracked: boolean;
+  /**
+   * Tracked once and removed since. Adding restores the row and every Short and
+   * snapshot collected before, rather than starting the history again.
+   */
+  readonly previouslyRemoved: boolean;
+  /**
+   * Tracked, but filed as a competitor.
+   *
+   * A real and slightly embarrassing state: somebody added their own channel by
+   * pasting a link before the account was ever connected, and it took the
+   * default. Worth naming because adding it from here does not create anything —
+   * it corrects the label, which is what makes the channel start reading through
+   * the connection.
+   */
+  readonly trackedAsCompetitor: boolean;
 }
 
 /**

@@ -158,7 +158,7 @@ export function FeedControls({
     () =>
       tallyEffectiveShorts(
         channels.map((entry) => ({
-          channelTypeIds: entry.channel.contentTypeIds,
+          rules: entry.channel.contentTypeRules,
           videos: entry.videos,
         })),
       ),

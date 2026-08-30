@@ -2,16 +2,27 @@
 
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api } from "@/lib/api-client";
-import type { ContentTypeDTO, DatasetDTO, VideoDTO } from "@/lib/dto";
+import type {
+  ChannelContentTypeRuleDTO,
+  ChannelDTO,
+  ContentTypeDTO,
+  DatasetDTO,
+  VideoDTO,
+} from "@/lib/dto";
+import type { ChannelRuleClosure } from "@/server/services/content-type-service";
 import {
   EMPTY_RESOLUTION,
+  buildInheritanceTimeline,
   planDeviations,
   resolveContentTypes,
   type ContentTypeResolution,
   type DeviationPlan,
+  type InheritanceTimeline,
 } from "@/lib/content-types/resolve";
-import { DATASET_KEY, useDataset, useInvalidateDataset } from "./use-dataset";
+import { RULE_AUTO_CLOSE_STREAK } from "@/lib/content-types/rules";
+import { DATASET_KEY, useDataset } from "./use-dataset";
 
 /**
  * Content types — catalogue reads, assignment writes, and the client-side index
@@ -24,16 +35,17 @@ import { DATASET_KEY, useDataset, useInvalidateDataset } from "./use-dataset";
  *
  * WHAT A SHORT CARRIES IS COMPUTED HERE, NEVER READ OFF THE WIRE
  *
- * `VideoDTO` ships DEVIATIONS — the tags a Short adds to its channel's, and the
- * ones it refuses. Its actual tags are
+ * `VideoDTO` ships DEVIATIONS — the tags a Short adds to what it inherits, and
+ * the ones it refuses. Its actual tags are
  *
- *     (channel's tags − exclusions) ∪ manual tags
+ *     (the rules covering its publish date − exclusions) ∪ manual tags
  *
  * resolved by `src/lib/content-types/resolve.ts`, the same module the server
- * imports. That is what keeps the channel the LIVE source: tagging a channel
- * relabels every Short beneath it on the next render, with nothing written per
- * Short and nothing refetched. A precomputed effective list on the wire would
- * have gone stale the moment somebody edited a channel in another tab.
+ * imports. That is what keeps the rules the LIVE source: applying a tag to a
+ * channel relabels its whole back catalogue on the next render, and a rule
+ * retiring un-labels exactly the uploads after the switch — with nothing written
+ * per Short and nothing refetched. A precomputed effective list on the wire
+ * would have gone stale the moment either happened in another tab.
  *
  * WHY ASSIGNMENT PATCHES THE CACHE INSTEAD OF INVALIDATING IT
  *
@@ -54,9 +66,11 @@ import { DATASET_KEY, useDataset, useInvalidateDataset } from "./use-dataset";
  * catalogue are adjusted by the same delta, so nothing on screen can drift out
  * of step with what was written.
  *
- * The CHANNEL-level write is the exception and invalidates like the niche
- * assignment it sits beside: it happens once per channel from a dialog, not
- * dozens of times from a table, so there is no gesture to keep fast.
+ * THE CHANNEL-LEVEL WRITE IS NO LONGER THE EXCEPTION. It used to invalidate,
+ * because it lived in a dialog on the channel page and could afford a refetch.
+ * "Apply to this channel" is offered inside the tag picker on a Short — one
+ * keystroke from the fastest control in the product — so it patches like
+ * everything else here, with the rules the server says it stored.
  *
  * It also happens to be the behaviour the rest of the app promises: the dataset
  * is held in memory and re-sliced client-side, and a content type assignment is
@@ -202,28 +216,183 @@ export function useReorderContentTypes() {
 // ---------------------------------------------------------------------------
 
 /**
- * A channel's own tags.
+ * "APPLY TO THIS CHANNEL" — one tag over the whole back catalogue and
+ * everything published next.
  *
- * Invalidates rather than patches, deliberately unlike its video siblings: this
- * is a once-per-channel edit made in a dialog, so the refetch is neither hot
- * nor racing anything — and it is the same shape of write as
- * `useSetChannelNiches`, which does exactly this next door.
+ * PATCHES RATHER THAN INVALIDATES, unlike the channel-wide write it replaces.
+ * That write lived in a dialog on the channel page and could afford a refetch;
+ * this one is offered inside the tag picker on a Short, one keystroke away from
+ * the fastest control in the product. Re-downloading every channel's view
+ * history to add one rule would make the "and while you're there, this is what
+ * the whole channel does" gesture the slowest thing in the app.
+ *
+ * The patch is not a guess: the server returns the channel it stored, and only
+ * its `contentTypeRules` are copied across. Copying the whole `ChannelDTO` would
+ * clobber whatever else has moved in the cache since — an ownership flip, a
+ * rename — with a snapshot taken for a different purpose.
  */
-export function useSetChannelContentTypes() {
-  const invalidate = useInvalidateDataset();
+export function useApplyContentTypeToChannel() {
+  const queryClient = useQueryClient();
   const invalidateCounts = useInvalidateCatalogueCounts();
+
   return useMutation({
     mutationFn: ({
       channelId,
-      contentTypeIds,
+      contentTypeId,
     }: {
       channelId: string;
-      contentTypeIds: readonly string[];
-    }) => api.setChannelContentTypes(channelId, contentTypeIds),
-    onSuccess: () => {
-      invalidate();
+      contentTypeId: string;
+    }) => api.applyContentTypeToChannel(channelId, contentTypeId),
+    onSuccess: ({ channel }) => {
+      patchChannelRules(queryClient, channel.id, () => channel.contentTypeRules);
+      // The rule count on the catalogue moved, and that number gates the delete
+      // button on the management screen.
       invalidateCounts();
     },
+  });
+}
+
+/**
+ * CLOSE A RULE AT A DATE, OR RE-OPEN IT — the manual lever, and the undo on the
+ * toast that announces a self-retirement.
+ *
+ * ONE MUTATION FOR BOTH, mirroring the one endpoint, because the undo has to be
+ * the same shape as the do or the two will drift into disagreeing about what
+ * gets reset alongside the window.
+ */
+export function useSetChannelRuleWindow() {
+  const queryClient = useQueryClient();
+  const invalidateCounts = useInvalidateCatalogueCounts();
+
+  return useMutation({
+    mutationFn: ({
+      channelId,
+      ruleId,
+      effectiveUntil,
+    }: {
+      channelId: string;
+      ruleId: string;
+      effectiveUntil: number | null;
+    }) => api.setChannelContentTypeRuleWindow(channelId, ruleId, effectiveUntil),
+    onSuccess: ({ channel }) => {
+      patchChannelRules(queryClient, channel.id, () => channel.contentTypeRules);
+      invalidateCounts();
+    },
+  });
+}
+
+/**
+ * TELL THE PERSON A RULE JUST RETIRED ITSELF, WHEREVER THEY WERE STANDING.
+ *
+ * IN THE MUTATION HOOKS RATHER THAN IN THE COMPONENTS, and that placement is the
+ * decision. A rule retires as a SIDE EFFECT of removing a tag from one Short —
+ * the third one, and nothing about the click says so — which means the surface
+ * that fired it has no reason to expect an announcement and every reason to
+ * forget to render one. There are four such surfaces. Putting the toast on the
+ * three writes that can cause it makes "the user is told" a property of the
+ * write instead of a thing four components each have to remember.
+ *
+ * THE DATE IS THE POINT OF THE SENTENCE. "Stopped applying Funny Memes to new
+ * uploads on Gaming Central from 4 March" says what changed, where, and — the
+ * part nobody could otherwise work out — how far back it reaches. A toast that
+ * said only "rule closed" would send somebody to the channel page to find out
+ * whether they had just un-labelled a week or a year.
+ *
+ * AND IT CARRIES THE UNDO. The close is a heuristic over three data points and
+ * will sometimes be wrong; the answer to that is that it is announced and
+ * reversible in one click, not that it is prevented. `duration` is long because
+ * this is the one toast in the app a person has to read and decide about rather
+ * than acknowledge.
+ */
+function useAnnounceClosedRules(): (closures: readonly ChannelRuleClosure[]) => void {
+  const queryClient = useQueryClient();
+  const reopen = useSetChannelRuleWindow();
+
+  return React.useCallback(
+    (closures) => {
+      for (const closure of closures) {
+        /*
+         * THE CACHE MOVES FIRST, before anybody reads the toast.
+         *
+         * A retirement changes what every upload since the switch inherits, and
+         * the per-Short response cannot carry that — it describes one Short's
+         * rows. Without this the table behind the toast would go on showing the
+         * tag on Shorts the database has just stopped giving it to, until
+         * something unrelated triggered a refetch. The toast would be announcing
+         * a change the screen contradicts, which is worse than not announcing it.
+         *
+         * Patched from the closure rather than refetched: it carries the rule id
+         * and the date the server actually stored, so this is applying the
+         * server's answer, not guessing at it.
+         */
+        patchChannelRules(queryClient, closure.channelId, (rules) =>
+          rules.map((rule) =>
+            rule.id === closure.ruleId
+              ? {
+                  ...rule,
+                  effectiveUntil: closure.effectiveUntil,
+                  // Stamped locally, and only to make the UI say "retired
+                  // itself" rather than "somebody closed it". The exact instant
+                  // is the server's and arrives with the next fetch; what has to
+                  // be right now is which of the two sentences the channel page
+                  // prints.
+                  autoClosedAt: Date.now(),
+                }
+              : rule,
+          ),
+        );
+
+        toast.warning(
+          `Stopped applying “${closure.contentTypeName}” to new uploads on ${closure.channelName} from ${formatRuleDate(
+            closure.effectiveUntil,
+          )}`,
+          {
+            description:
+              `${RULE_AUTO_CLOSE_STREAK} Shorts in a row had it removed, so the rule retired itself. Everything published before that date keeps the tag.`,
+            duration: 12_000,
+            action: {
+              label: "Undo",
+              onClick: () =>
+                reopen.mutate(
+                  {
+                    channelId: closure.channelId,
+                    ruleId: closure.ruleId,
+                    effectiveUntil: null,
+                  },
+                  {
+                    onSuccess: () =>
+                      toast.success(
+                        `“${closure.contentTypeName}” applies to new uploads on ${closure.channelName} again`,
+                      ),
+                    onError: (error) =>
+                      toast.error("Could not re-open that rule", {
+                        description:
+                          error instanceof Error ? error.message : undefined,
+                      }),
+                  },
+                ),
+            },
+          },
+        );
+      }
+    },
+    [queryClient, reopen],
+  );
+}
+
+/**
+ * "4 March 2025" — the same sentence the server writes into the audit log.
+ *
+ * `en-GB` and UTC on both sides deliberately: the log and the toast describe one
+ * event, and a reader comparing them must not find two different days because
+ * one was formatted against a browser in Auckland.
+ */
+function formatRuleDate(epochMs: number): string {
+  return new Date(epochMs).toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
   });
 }
 
@@ -238,6 +407,7 @@ export function useSetChannelContentTypes() {
 export function useSetVideoContentTypes() {
   const queryClient = useQueryClient();
   const invalidateCounts = useInvalidateCatalogueCounts();
+  const announce = useAnnounceClosedRules();
 
   return useMutation({
     mutationFn: ({
@@ -250,6 +420,7 @@ export function useSetVideoContentTypes() {
     onSuccess: (result) => {
       patchStoredDeviations(queryClient, result);
       invalidateCounts();
+      announce(result.closedRules);
     },
   });
 }
@@ -266,6 +437,7 @@ export function useSetVideoContentTypes() {
 export function useExcludeContentTypeFromVideo() {
   const queryClient = useQueryClient();
   const invalidateCounts = useInvalidateCatalogueCounts();
+  const announce = useAnnounceClosedRules();
 
   return useMutation({
     mutationFn: ({ videoId, contentTypeId }: { videoId: string; contentTypeId: string }) =>
@@ -273,14 +445,18 @@ export function useExcludeContentTypeFromVideo() {
     onSuccess: (result) => {
       patchStoredDeviations(queryClient, result);
       invalidateCounts();
+      // THE gesture that retires a rule — the third removal in a row. Every
+      // other announcement site exists because it amounts to this one.
+      announce(result.closedRules);
     },
   });
 }
 
-/** Take that refusal back, so the channel's tag flows through again. */
+/** Take that refusal back, so the rule's tag flows through again. */
 export function useRestoreInheritedContentType() {
   const queryClient = useQueryClient();
   const invalidateCounts = useInvalidateCatalogueCounts();
+  const announce = useAnnounceClosedRules();
 
   return useMutation({
     mutationFn: ({ videoId, contentTypeId }: { videoId: string; contentTypeId: string }) =>
@@ -288,6 +464,11 @@ export function useRestoreInheritedContentType() {
     onSuccess: (result) => {
       patchStoredDeviations(queryClient, result);
       invalidateCounts();
+      // Never fires in practice — restoring a tag CONFIRMS a rule, it cannot
+      // retire one. Wired anyway rather than asserted away: the closure array is
+      // part of this response's contract, and a silent drop here would be a
+      // change nobody was told about if that ever stopped being true.
+      announce(result.closedRules);
     },
   });
 }
@@ -326,7 +507,7 @@ export function useAssignContentTypeToVideos() {
         // two overlapping bulk runs cannot each apply a stale "before".
         const updates = new Map<string, readonly string[]>();
         for (const entry of current.channels) {
-          const channelTypeIds = entry.channel.contentTypeIds;
+          const timeline = buildInheritanceTimeline(entry.channel.contentTypeRules);
 
           for (const video of entry.videos) {
             if (!targets.has(video.id)) continue;
@@ -335,14 +516,14 @@ export function useAssignContentTypeToVideos() {
              * "Add" unions with the Short's EFFECTIVE tags, not its stored rows.
              *
              * Those are different sets now, and using the rows would be a
-             * destructive read: a Short inheriting "Ranking" from its channel
-             * stores nothing, so unioning the rows would produce a desired set
-             * of just the new tag — and `planDeviations` would dutifully write
-             * an exclusion for the Ranking nobody asked to remove. The mode is
+             * destructive read: a Short inheriting "Ranking" from a rule stores
+             * nothing, so unioning the rows would produce a desired set of just
+             * the new tag — and `planDeviations` would dutifully write an
+             * exclusion for the Ranking nobody asked to remove. The mode is
              * called "add" and it has to only add.
              */
             const effectiveIds = resolveContentTypes({
-              channelTypeIds,
+              inheritedIds: timeline.at(video.publishedAt),
               manualIds: video.manualContentTypeIds,
               excludedIds: video.excludedContentTypeIds,
             }).effectiveIds;
@@ -356,9 +537,9 @@ export function useAssignContentTypeToVideos() {
           }
         }
 
-        return applyVideoDeviations(current, targets, (video, channelTypeIds) =>
+        return applyVideoDeviations(current, targets, (video, inheritedIds) =>
           planDeviations({
-            channelTypeIds,
+            inheritedIds,
             // Present for every id in `targets` that this cache knows about;
             // one it does not know about is a Short outside this viewer's niche
             // scope, and leaving its rows alone is the correct answer there.
@@ -418,43 +599,62 @@ function indexFor(dataset: DatasetDTO): ReadonlyMap<string, ContentTypeResolutio
   const index = new Map<string, ContentTypeResolution>();
 
   for (const entry of dataset.channels) {
-    const channelTypeIds = entry.channel.contentTypeIds;
+    const timeline = buildInheritanceTimeline(entry.channel.contentTypeRules);
 
     /*
-     * The channel's own answer, resolved once and SHARED by every Short that
-     * does not deviate from it.
+     * One resolution per SEGMENT of the channel's history, shared by every Short
+     * in it that does not deviate.
      *
-     * That is the overwhelming majority of rows — the whole point of storing
-     * nothing per Short — so giving each of them a private copy of the same two
-     * arrays would allocate a few thousand identical objects per payload for
-     * nothing. Shared identity also means a consumer comparing resolutions by
-     * reference gets a true answer cheaply.
+     * The sharing is the same trick as before and it matters for the same
+     * reason: non-deviating Shorts are the overwhelming majority of rows — the
+     * whole point of storing nothing per Short — so a private copy of the same
+     * two arrays each would allocate a few thousand identical objects per
+     * payload for nothing, and would defeat every downstream memo that compares
+     * resolutions by reference.
+     *
+     * What changed is only the KEY. It used to be "this channel"; it is now
+     * "this stretch of this channel's history", of which a typical channel has
+     * exactly one. Keyed on the inherited array's identity rather than on a
+     * date, because the timeline already guarantees one array per segment —
+     * which makes this a cache with no invalidation rule to get wrong.
      */
-    const inheritedOnly =
-      channelTypeIds.length === 0
-        ? EMPTY_RESOLUTION
-        : resolveContentTypes({
-            channelTypeIds,
-            manualIds: NO_IDS,
-            excludedIds: NO_IDS,
-          });
+    const bySegment = new Map<readonly string[], ContentTypeResolution>();
 
     for (const video of entry.videos) {
+      const inheritedIds = timeline.at(video.publishedAt);
+
       const deviates =
         video.manualContentTypeIds.length > 0 || video.excludedContentTypeIds.length > 0;
 
-      const resolution = deviates
-        ? resolveContentTypes({
-            channelTypeIds,
-            manualIds: video.manualContentTypeIds,
-            excludedIds: video.excludedContentTypeIds,
-          })
-        : inheritedOnly;
+      let resolution: ContentTypeResolution;
+      if (deviates) {
+        resolution = resolveContentTypes({
+          inheritedIds,
+          manualIds: video.manualContentTypeIds,
+          excludedIds: video.excludedContentTypeIds,
+        });
+      } else {
+        const shared = bySegment.get(inheritedIds);
+        if (shared) {
+          resolution = shared;
+        } else {
+          resolution =
+            inheritedIds.length === 0
+              ? EMPTY_RESOLUTION
+              : resolveContentTypes({
+                  inheritedIds,
+                  manualIds: NO_IDS,
+                  excludedIds: NO_IDS,
+                });
+          bySegment.set(inheritedIds, resolution);
+        }
+      }
 
       // A genuinely tagless Short still misses the map, exactly as before —
       // `EMPTY_RESOLUTION` is what a miss means, so storing it would be storing
-      // the default. What changed is that "tagless" is now a fact about the
-      // channel too, not just about the Short.
+      // the default. What changed is that "tagless" is now a fact about this
+      // Short's PLACE in its channel's history: an upload from before the rule
+      // began, or from after it retired, is untagged on a channel that is not.
       if (resolution !== EMPTY_RESOLUTION) index.set(video.id, resolution);
     }
   }
@@ -483,6 +683,49 @@ export function useVideoContentTypeResolutions(): ReadonlyMap<
 > {
   const { data } = useDataset();
   return data ? indexFor(data) : EMPTY_INDEX;
+}
+
+/**
+ * videoId -> the channel that published it, built once per dataset payload.
+ *
+ * WHY A LOOKUP RATHER THAN A PROP. "Apply to this channel" is offered from the
+ * tag picker, which renders on four surfaces — the Shorts table, Winners,
+ * Outliers, Saved — none of which currently passes a channel down to it, and
+ * two of which are flat lists of Shorts drawn from every channel at once.
+ * Threading a `channelId` through four component trees to reach a popover would
+ * be four chances to pass the wrong one; the dataset already knows which channel
+ * a Short belongs to, and it is the same object the picker will patch.
+ *
+ * A WeakMap on the payload, exactly like the resolution index above and for the
+ * same reasons: derived when the payload changes, shared by every caller, and
+ * collected with it.
+ */
+const CHANNEL_BY_VIDEO = new WeakMap<DatasetDTO, Map<string, ChannelDTO>>();
+
+function channelIndexFor(dataset: DatasetDTO): ReadonlyMap<string, ChannelDTO> {
+  const cached = CHANNEL_BY_VIDEO.get(dataset);
+  if (cached) return cached;
+
+  const index = new Map<string, ChannelDTO>();
+  for (const entry of dataset.channels) {
+    for (const video of entry.videos) index.set(video.id, entry.channel);
+  }
+
+  CHANNEL_BY_VIDEO.set(dataset, index);
+  return index;
+}
+
+/**
+ * The channel that published this Short, or `null`.
+ *
+ * `null` is a real answer rather than a loading state: the dataset may not have
+ * arrived, or the Short may sit outside this viewer's niche scope. Callers offer
+ * no channel-level action in either case, which is right — the second is a
+ * channel they are not entitled to change.
+ */
+export function useChannelForVideo(videoId: string): ChannelDTO | null {
+  const { data } = useDataset();
+  return data ? (channelIndexFor(data).get(videoId) ?? null) : null;
 }
 
 /** The whole catalogue as the dataset ships it — archived types included. */
@@ -596,6 +839,45 @@ function patchCatalogue(
 }
 
 /**
+ * Replaces one channel's rules in the cached dataset.
+ *
+ * A NARROW PATCH ON PURPOSE, even though the server hands back a whole
+ * `ChannelDTO`. That object is a snapshot taken to answer one question, and
+ * spreading it over the cached channel would silently roll back anything else
+ * that has moved in the meantime — an ownership flip in another tab, a rename
+ * still settling. One field changed, one field written.
+ *
+ * Nothing downstream needs telling. Every consumer resolves each Short against
+ * this array on render, so replacing it relabels the whole channel's library at
+ * once — which is exactly the property that made rules worth having, working in
+ * the browser rather than only in the database.
+ */
+function patchChannelRules(
+  queryClient: QueryClient,
+  channelId: string,
+  next: (
+    current: readonly ChannelContentTypeRuleDTO[],
+  ) => readonly ChannelContentTypeRuleDTO[],
+): void {
+  queryClient.setQueryData<DatasetDTO>(DATASET_KEY, (current) => {
+    if (!current) return current;
+
+    let changed = false;
+    const channels = current.channels.map((entry) => {
+      if (entry.channel.id !== channelId) return entry;
+      const rules = next(entry.channel.contentTypeRules);
+      if (rules === entry.channel.contentTypeRules) return entry;
+      changed = true;
+      return { ...entry, channel: { ...entry.channel, contentTypeRules: rules } };
+    });
+
+    // Identity preserved when the channel is not in this viewer's scope, so an
+    // edit to a channel they cannot see does not invalidate every memo they can.
+    return changed ? { ...current, channels } : current;
+  });
+}
+
+/**
  * Applies the rows a per-Short route says it stored, verbatim.
  *
  * Nothing is re-planned here, and that is the point: the server has already
@@ -649,9 +931,11 @@ function patchStoredDeviations(
  * actually got written. A patch that only tracked the first number would drift
  * the moment anybody used the feature as designed.
  *
- * `channelCount` is not touched by any write in this file — the channel path
- * invalidates instead of patching, so the fresh count arrives with the refetch
- * rather than being guessed at here.
+ * `channelRuleCount` is not touched here — no write in this walk creates or
+ * closes a rule. The rule paths invalidate the management screen's own read
+ * instead, so the fresh count arrives with a refetch of the one query that shows
+ * it rather than being guessed at from a dataset a niche-scoped member can only
+ * see part of.
  *
  * Object identity is preserved for every channel, video and type that did not
  * move, so the analytics memos downstream re-run over the same arrays.
@@ -659,7 +943,7 @@ function patchStoredDeviations(
 function applyVideoDeviations(
   dataset: DatasetDTO,
   videoIds: ReadonlySet<string>,
-  planFor: (video: VideoDTO, channelTypeIds: readonly string[]) => DeviationPlan,
+  planFor: (video: VideoDTO, inheritedIds: readonly string[]) => DeviationPlan,
 ): DatasetDTO {
   if (videoIds.size === 0) return dataset;
 
@@ -669,7 +953,10 @@ function applyVideoDeviations(
 
   const channels = dataset.channels.map((entry) => {
     let changed = false;
-    const channelTypeIds = entry.channel.contentTypeIds;
+    // Built per channel even when nothing in it is a target: it is a sort of a
+    // handful of numbers, and hoisting the check would mean two walks over the
+    // videos to save it.
+    let timeline: InheritanceTimeline | null = null;
 
     const videos = entry.videos.map((video) => {
       if (!videoIds.has(video.id)) return video;
@@ -677,7 +964,8 @@ function applyVideoDeviations(
       const beforeManual = video.manualContentTypeIds;
       const beforeExcluded = video.excludedContentTypeIds;
 
-      const plan = planFor(video, channelTypeIds);
+      timeline ??= buildInheritanceTimeline(entry.channel.contentTypeRules);
+      const plan = planFor(video, timeline.at(video.publishedAt));
 
       if (sameIds(beforeManual, plan.manualIds) && sameIds(beforeExcluded, plan.excludedIds)) {
         return video;

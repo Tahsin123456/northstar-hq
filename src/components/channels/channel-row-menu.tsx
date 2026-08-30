@@ -8,7 +8,6 @@ import {
   LineChart,
   Pencil,
   RefreshCw,
-  Shapes,
   Trash2,
   UserCheck,
   UserMinus,
@@ -17,7 +16,6 @@ import { toast } from "sonner";
 import type { ChannelDTO } from "@/lib/dto";
 import { useRefreshChannel } from "@/hooks/use-dataset";
 import { useSetChannelOwnership } from "@/hooks/use-niches";
-import { AssignContentTypesDialog } from "./assign-content-types-dialog";
 import { AssignNichesDialog } from "./assign-niches-dialog";
 import {
   DropdownMenu,
@@ -48,7 +46,6 @@ export function ChannelRowMenu({
   const [renameOpen, setRenameOpen] = React.useState(false);
   const [removeOpen, setRemoveOpen] = React.useState(false);
   const [nichesOpen, setNichesOpen] = React.useState(false);
-  const [contentTypesOpen, setContentTypesOpen] = React.useState(false);
   const ownership = useSetChannelOwnership();
 
   const handleToggleOwnership = () => {
@@ -119,16 +116,22 @@ export function ChannelRowMenu({
             {channel.niches.length > 0 ? "Change niches" : "Assign niche"}
           </DropdownMenuItem>
 
-          {/* Beside the niches rather than folded into them: they answer two
-              different questions about the same channel — which slice of the
-              operation it belongs to, and what it makes. */}
-          <DropdownMenuItem onSelect={() => setContentTypesOpen(true)}>
-            <Shapes />
-            {channel.contentTypeIds.length > 0
-              ? "Change content types"
-              : "Tag content types"}
-          </DropdownMenuItem>
+          {/*
+            THERE IS NO "TAG CONTENT TYPES" ITEM HERE ANY MORE, and its absence
+            is deliberate rather than an oversight.
 
+            It used to open a dialog that set the channel's complete tag list —
+            an edit made from a row in a list, about a channel whose Shorts the
+            person may never have seen. A rule is a claim about a stretch of a
+            channel's OUTPUT, and the only place somebody is holding the evidence
+            for one is in front of a Short: the picker there offers "Apply to
+            this channel", which is the same intent with the date it needs to be
+            true. The channel page shows the rules that result, and is where they
+            are stopped and re-opened.
+
+            Niches stay, one item up, because a niche genuinely is a property of
+            the channel and answerable from the row.
+          */}
           <DropdownMenuItem onSelect={handleToggleOwnership} disabled={ownership.isPending}>
             {channel.ownershipType === "own" ? <UserMinus /> : <UserCheck />}
             {channel.ownershipType === "own"
@@ -164,11 +167,6 @@ export function ChannelRowMenu({
         channel={channel}
         open={nichesOpen}
         onOpenChange={setNichesOpen}
-      />
-      <AssignContentTypesDialog
-        channel={channel}
-        open={contentTypesOpen}
-        onOpenChange={setContentTypesOpen}
       />
     </>
   );

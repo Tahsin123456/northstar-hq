@@ -53,11 +53,12 @@ export default async function AdminLayout({
     "users.manage",
     "audit.view",
     "youtube.manage",
-    // `payroll.view` unlocks the Payroll tab. In practice only the Admin role
-    // holds it, and an admin already clears the list above — but the rule this
-    // block states is "any capability this section exposes", and leaving a tab
-    // out of it is exactly how `youtube.manage` became a grant that led nowhere.
-    "payroll.view",
+    // `payroll.view` is NOT on this list any more, and its absence is the whole
+    // point: Payroll moved to /finance/payroll. Somebody granted payroll and
+    // nothing else has no tab in this section, so admitting them here would land
+    // them on an Overview with nothing on it. Their door is in Finance, and the
+    // sidebar sends them there.
+    //
     // `settings.manage` unlocks the Niches tab, where hit rate thresholds are
     // configured. Same rule, same reason: it is individually grantable, so an
     // admin can hand somebody the ability to set thresholds without making them

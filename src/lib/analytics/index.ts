@@ -23,5 +23,9 @@ export * from "./content-type-performance";
 export * from "./series";
 export * from "./outliers";
 export * from "./market";
+// Who is IN the comparison, kept beside the maths that compares them. One
+// definition of "counts toward how we are doing" — `isStudioChannel` — read
+// here as well as by the portfolio summary and the report.
+export * from "./market-scope";
 export * from "./market-share";
 export * from "./trends";

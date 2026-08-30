@@ -62,6 +62,11 @@ import {
   type VisibleNiches,
 } from "@/server/auth/niche-scope";
 import { AUTHOR_ME, GENERAL_NOTE_LABEL } from "@/lib/dto";
+// The one mapper for a niche chip. These three call sites used to inline the
+// same three fields; `kind` is a fourth now, and hand-copying it in three
+// places is three chances for a chip here to disagree with the same niche
+// everywhere else.
+import { toNicheRefDTO } from "@/server/mappers";
 import {
   canonicalShortUrl,
   parseYouTubeVideoId,
@@ -1179,11 +1184,7 @@ function toSavedShortDTO(row: SavedRow): SavedShortDTO {
     channelAvatarUrl: row.video.channel.avatarUrl,
     ownershipType:
       tracking?.ownershipType === "own" ? "own" : "competitor",
-    niches: (tracking?.niches ?? []).map((a) => ({
-      id: a.niche.id,
-      name: a.niche.name,
-      colorIndex: a.niche.colorIndex,
-    })),
+    niches: (tracking?.niches ?? []).map((a) => toNicheRefDTO(a.niche)),
 
     viewsAtSave: Number(row.viewsAtSave),
     currentViews: Number(row.video.viewCount),
@@ -1481,9 +1482,7 @@ export async function listAllNotes(
         channelId: null,
         channelName: null,
         channelAvatarUrl: null,
-        niches: [
-          { id: row.niche.id, name: row.niche.name, colorIndex: row.niche.colorIndex },
-        ],
+        niches: [toNicheRefDTO(row.niche)],
         videoId: null,
         youtubeVideoId: null,
       };
@@ -1500,11 +1499,7 @@ export async function listAllNotes(
         channelId: channel.id,
         channelName: tracking?.label ?? channel.title,
         channelAvatarUrl: channel.avatarUrl,
-        niches: (tracking?.niches ?? []).map((a) => ({
-          id: a.niche.id,
-          name: a.niche.name,
-          colorIndex: a.niche.colorIndex,
-        })),
+        niches: (tracking?.niches ?? []).map((a) => toNicheRefDTO(a.niche)),
         videoId: row.video.id,
         youtubeVideoId: row.video.youtubeVideoId,
       };
@@ -1519,11 +1514,7 @@ export async function listAllNotes(
         channelId: row.channel.id,
         channelName: tracking?.label ?? row.channel.title,
         channelAvatarUrl: row.channel.avatarUrl,
-        niches: (tracking?.niches ?? []).map((a) => ({
-          id: a.niche.id,
-          name: a.niche.name,
-          colorIndex: a.niche.colorIndex,
-        })),
+        niches: (tracking?.niches ?? []).map((a) => toNicheRefDTO(a.niche)),
         videoId: null,
         youtubeVideoId: null,
       };

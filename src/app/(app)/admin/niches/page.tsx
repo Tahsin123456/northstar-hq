@@ -9,11 +9,18 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import { nicheColor } from "@/components/niches/niche-chip";
 import {
   NicheThresholdDialog,
   useCanConfigureThreshold,
+  useHitPaymentCurrency,
 } from "@/components/niches/niche-threshold-dialog";
+import {
+  NICHE_KIND_DESCRIPTION,
+  NICHE_KIND_LABEL,
+} from "@/lib/niches/niche-kind";
+import { formatMoneyTrimmed } from "@/lib/finance/money";
 import {
   NeedsRuleBadge,
   NicheByline,
@@ -50,6 +57,10 @@ import { cn } from "@/lib/utils";
 export default function AdminNichesPage() {
   const { data, isLoading, error, refetch } = useNicheList();
   const canConfigure = useCanConfigureThreshold();
+  // A hit payment is money, and money needs a currency. The organization's base
+  // currency is the only defensible one: `Niche.hitPaymentMinor` has no
+  // currency column, because one organization pays in one currency.
+  const currency = useHitPaymentCurrency();
 
   const niches = React.useMemo(
     () => unconfiguredFirst(data?.niches ?? []),
@@ -57,12 +68,27 @@ export default function AdminNichesPage() {
   );
 
   const unconfigured = niches.filter(needsRuleConfiguration);
+  /*
+   * Niches that CAN score and CANNOT pay.
+   *
+   * A separate queue from the one above, deliberately. A niche with half a rule
+   * reports nothing anywhere and is visible on every chart; one with a complete
+   * rule and no price looks perfectly healthy and quietly pays nobody, which is
+   * only discovered on a payroll run. Production only — a watchlist niche has
+   * no reason to carry a price and is not somebody's outstanding task.
+   */
+  const unpriced = niches.filter(
+    (niche) =>
+      niche.kind === "production" &&
+      !needsRuleConfiguration(niche) &&
+      niche.hitPaymentMinor === null,
+  );
 
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
         title="Niches"
-        description="Every niche in the organization and what counts as a hit in it: a view threshold AND the window a Short has to reach it in. A niche missing either half reports no hit rate anywhere in the app until both are set here."
+        description="Every niche in the organization, what kind it is, and what counts as a hit in it: a view threshold, the window a Short has to reach it in, and what one hit pays. A niche missing either half of the rule reports no hit rate anywhere in the app; one missing only the payment scores normally and pays nothing. Watchlist niches are followed rather than published into — they are left out of the portfolio hit rate and pay no bonus."
         actions={
           <Button variant="secondary" size="sm" asChild>
             <Link href="/niches">
@@ -108,6 +134,24 @@ export default function AdminNichesPage() {
             </div>
           ) : null}
 
+          {unpriced.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/40 bg-warning-subtle/40 px-3 py-2">
+              <Target className="size-3.5 shrink-0 text-warning" aria-hidden />
+              <p className="text-[12px] text-foreground">
+                {formatNumber(unpriced.length)}{" "}
+                {pluralize(unpriced.length, "niche", "niches")}{" "}
+                {unpriced.length === 1 ? "scores hits but pays" : "score hits but pay"}{" "}
+                nothing
+                <span className="text-muted-foreground">
+                  {" "}
+                  — {unpriced.map((niche) => niche.name).join(", ")}. The hit rate is
+                  reported normally; the bonus is not, and the payroll run names them
+                  before a month can be finalized.
+                </span>
+              </p>
+            </div>
+          ) : null}
+
           <Card className="overflow-hidden">
             <div className="overflow-x-auto">
               <div
@@ -122,7 +166,15 @@ export default function AdminNichesPage() {
                     role="row"
                   >
                     <div role="columnheader">Niche</div>
+                    <div role="columnheader">Kind</div>
                     <div role="columnheader">Hit rule</div>
+                    {/* The third number, beside the two it belongs with. A
+                        complete rule and no price scores perfectly and pays
+                        nobody, which is invisible until a payroll run — so it
+                        gets a column here rather than only a warning there. */}
+                    <div role="columnheader" className="text-right">
+                      Per hit
+                    </div>
                     <div role="columnheader">Created by</div>
                     <div role="columnheader" className="text-right">
                       Channels
@@ -139,6 +191,7 @@ export default function AdminNichesPage() {
                       key={niche.id}
                       niche={niche}
                       canConfigure={canConfigure}
+                      currency={currency}
                     />
                   ))}
                 </div>
@@ -151,14 +204,18 @@ export default function AdminNichesPage() {
   );
 }
 
-const GRID = "minmax(160px,1.4fr) minmax(150px,1fr) minmax(120px,1fr) 80px 120px";
+const GRID =
+  "minmax(150px,1.3fr) 92px minmax(150px,1fr) minmax(96px,0.7fr) minmax(110px,1fr) 76px 116px";
 
 function NicheRow({
   niche,
   canConfigure,
+  currency,
 }: {
   niche: NicheDTO;
   canConfigure: boolean;
+  /** The organization's base currency, which is what a hit payment is in. */
+  currency: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const needsThreshold = needsRuleConfiguration(niche);
@@ -186,6 +243,21 @@ function NicheRow({
           </span>
         </div>
 
+        {/* Named with the owner's own word. A watchlist niche is left out of
+            the portfolio hit rate and pays nothing, so an admin reading this
+            list needs to know which kind a row is before its other columns
+            mean anything. */}
+        <div role="cell" className="min-w-0">
+          <Badge
+            variant={niche.kind === "watchlist" ? "neutral" : "near"}
+            size="sm"
+            className="normal-case tracking-normal"
+            title={NICHE_KIND_DESCRIPTION[niche.kind]}
+          >
+            {NICHE_KIND_LABEL[niche.kind]}
+          </Badge>
+        </div>
+
         <div role="cell" className="min-w-0">
           {needsThreshold ? (
             <NeedsRuleBadge niche={niche} />
@@ -201,6 +273,28 @@ function NicheRow({
                 {" "}
                 within {formatHitWindow(niche.hitWindowHours as number)}
               </span>
+            </span>
+          )}
+        </div>
+
+        {/*
+          THE PRICE, WITH ITS OWN "not set" STATE.
+
+          Blank would read as zero and zero would read as "a hit here is worth
+          nothing", which is the reading that turns a configuration gap into a
+          decision somebody thinks was made. A watchlist niche says something
+          different again: there is nothing to set, because nobody is paid.
+        */}
+        <div role="cell" className="tnum text-right text-[13px]">
+          {niche.kind === "watchlist" ? (
+            <span className="text-subtle-foreground" title="Watchlist niches pay no hit bonus.">
+              Not paid
+            </span>
+          ) : niche.hitPaymentMinor === null ? (
+            <span className="text-warning">Not set</span>
+          ) : (
+            <span className="text-foreground">
+              {formatMoneyTrimmed(niche.hitPaymentMinor, currency)}
             </span>
           )}
         </div>

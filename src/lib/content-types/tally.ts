@@ -1,4 +1,8 @@
-import { resolveContentTypes } from "./resolve";
+import {
+  buildInheritanceTimeline,
+  resolveContentTypes,
+  type ChannelContentTypeRuleWindow,
+} from "./resolve";
 
 /**
  * ==========================================================================
@@ -34,13 +38,22 @@ import { resolveContentTypes } from "./resolve";
 /** The fields this tally reads. Structural, so `VideoDTO` satisfies it. */
 export interface TallyVideo {
   readonly isShort: boolean;
+  /**
+   * Epoch ms — and now load-bearing rather than incidental.
+   *
+   * What a Short inherits depends on WHEN it was published, so two Shorts on one
+   * channel can legitimately carry different tags with no deviation rows between
+   * them. A tally that ignored this would count a whole library under whatever
+   * the channel's newest rule happens to say.
+   */
+  readonly publishedAt: number;
   readonly manualContentTypeIds: readonly string[];
   readonly excludedContentTypeIds: readonly string[];
 }
 
-/** One channel's Shorts, with the tags they inherit from it. */
+/** One channel's Shorts, with the rules that decide what each of them inherits. */
 export interface TallyGroup {
-  readonly channelTypeIds: readonly string[];
+  readonly rules: readonly ChannelContentTypeRuleWindow[];
   readonly videos: readonly TallyVideo[];
 }
 
@@ -73,9 +86,11 @@ const EMPTY_TALLY: EffectiveShortsTally = {
  * product counts Shorts, and a tally that quietly included the channel's
  * uploads would disagree with the feed it labels.
  *
- * Single pass, resolving once per video. The resolution for a Short that does
- * not deviate is the channel's, so the common case is hoisted out of the inner
- * loop and the whole thing stays one walk over the library.
+ * Single pass. What a Short inherits now depends on WHEN it was published, so
+ * the answer can no longer be computed once per channel — but it changes only at
+ * the channel's own rule boundaries, so the segments are built once per channel
+ * and a Short that does not deviate simply IS its segment's array. The whole
+ * thing stays one walk over the library.
  */
 export function tallyEffectiveShorts(
   groups: readonly TallyGroup[],
@@ -87,35 +102,38 @@ export function tallyEffectiveShorts(
   let total = 0;
 
   for (const group of groups) {
-    const { channelTypeIds } = group;
-
-    // What a Short on this channel carries when it says nothing of its own —
-    // which is almost all of them. Resolved once per channel rather than once
-    // per video, since nothing about it varies inside the loop.
-    const inherited =
-      channelTypeIds.length === 0
-        ? null
-        : resolveContentTypes({
-            channelTypeIds,
-            manualIds: EMPTY_IDS,
-            excludedIds: EMPTY_IDS,
-          }).effectiveIds;
+    /*
+     * The channel's rules, cut into segments once.
+     *
+     * The hoist that used to lift ONE resolve out of the inner loop is now this:
+     * what a Short inherits varies with its publish date, so the answer cannot
+     * be computed once per channel — but the number of DISTINCT answers is the
+     * number of times the channel changed its mind, which is small. Every Short
+     * inside one segment gets the identical shared array, so the common channel
+     * (one open-ended rule, or none) costs exactly what it did before.
+     */
+    const timeline = buildInheritanceTimeline(group.rules);
 
     for (const video of group.videos) {
       if (!video.isShort) continue;
       total += 1;
 
+      const inheritedIds = timeline.at(video.publishedAt);
+
       const deviates =
         video.manualContentTypeIds.length > 0 ||
         video.excludedContentTypeIds.length > 0;
 
+      // The overwhelmingly common Short says nothing of its own, so its
+      // effective tags are exactly what it inherits — already an array, already
+      // shared with everything else in its segment.
       const effectiveIds = deviates
         ? resolveContentTypes({
-            channelTypeIds,
+            inheritedIds,
             manualIds: video.manualContentTypeIds,
             excludedIds: video.excludedContentTypeIds,
           }).effectiveIds
-        : (inherited ?? EMPTY_IDS);
+        : inheritedIds;
 
       if (effectiveIds.length === 0) {
         untagged += 1;
@@ -130,6 +148,3 @@ export function tallyEffectiveShorts(
 
   return { byType, untagged, total };
 }
-
-/** Stable empty input for the resolver, so the hoisted call allocates nothing. */
-const EMPTY_IDS: readonly string[] = [];

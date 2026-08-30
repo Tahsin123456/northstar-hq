@@ -4,6 +4,7 @@ import * as React from "react";
 import { FilterX, SearchX, Sparkles } from "lucide-react";
 import { PageContainer, PageHeader } from "@/components/layout/app-shell";
 import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
+import { ConnectYouTubePanel } from "@/components/youtube/connect-youtube-panel";
 import { ChannelTable } from "@/components/dashboard/channel-table";
 import { DataFreshness } from "@/components/dashboard/data-freshness";
 import { PeriodSelector } from "@/components/dashboard/period-selector";
@@ -14,6 +15,7 @@ import { ApiKeyNotice, ErrorState } from "@/components/common/error-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import {
+  channelCountsByContentType,
   untaggedChannelCount,
   useContentTypePerformance,
   usePortfolioSummary,
@@ -39,6 +41,7 @@ import {
   HIT_RATE_DEFINITION,
   UNCONFIGURED_RULE_LABEL,
 } from "@/lib/analytics/constants";
+import { asksAboutOneNiche, isStudioChannel } from "@/lib/niches/niche-kind";
 import { BRAND } from "@/lib/brand";
 
 /**
@@ -85,10 +88,28 @@ export default function OverviewPage() {
     ownFirst,
     contentType,
   );
-  const summary = usePortfolioSummary(scopedRows);
+  /*
+   * WHICH CHANNELS THE HEADLINE RATE IS OVER.
+   *
+   * With no niche selected this is the studio's own scorecard, so watchlist
+   * channels are counted as volume and left out of the rate — averaging in
+   * channels nobody at Northstar is trying to be produces a number describing
+   * work the studio does not do. Pick one niche and the question changes: the
+   * viewer is asking about THAT niche, watchlist or not, and refusing to answer
+   * would be excluding a watchlist niche from the product rather than from the
+   * average. "Unassigned" stays on the scorecard rule, since a channel nobody
+   * has filed is not a channel somebody filed as a watchlist.
+   */
+  const oneNicheSelected = asksAboutOneNiche(niche);
+  const summary = usePortfolioSummary(scopedRows, {
+    includeWatchlist: oneNicheSelected,
+  });
   // The same portfolio metrics over the immediately preceding window, so every
   // KPI can show movement rather than a bare number.
-  const previousSummary = usePortfolioSummary(scopedRows, previousRange(range));
+  const previousSummary = usePortfolioSummary(scopedRows, {
+    overrideRange: previousRange(range),
+    includeWatchlist: oneNicheSelected,
+  });
 
   const niches = data?.niches ?? [];
   const contentTypes = data?.contentTypes ?? [];
@@ -113,6 +134,12 @@ export default function OverviewPage() {
     () => untaggedChannelCount(nicheScopedRows),
     [nicheScopedRows],
   );
+  // The per-type badges beside it, from the same rows. Both readings of one
+  // derivation, so the menu cannot offer a number the list will not deliver.
+  const typeChannelCounts = React.useMemo(
+    () => channelCountsByContentType(nicheScopedRows),
+    [nicheScopedRows],
+  );
 
   /*
    * "Performance by content type", over the NICHE-AND-OWNERSHIP scope — not the
@@ -125,9 +152,23 @@ export default function OverviewPage() {
    * exists to make. The table's whole job is to rank the types against each
    * other, so it reads the scope the comparison is *within* — niche, ownership,
    * period, threshold — and not the selection made among its own rows.
+   *
+   * IT DOES READ THE SCORECARD SCOPE, THOUGH, and that is the second aggregate
+   * on this page that pools every niche. "Rankings: 34%" is a hit rate, and a
+   * hit rate over channels nobody at Northstar is trying to be describes work
+   * the studio does not do — exactly the number the headline above it stopped
+   * reporting. Same rule, same exception: pick one niche and the question is
+   * about that niche, watchlist or not.
    */
+  const scorecardRows = React.useMemo(
+    () =>
+      oneNicheSelected
+        ? nicheScopedRows
+        : nicheScopedRows.filter((row) => isStudioChannel(row.channel.niches)),
+    [nicheScopedRows, oneNicheSelected],
+  );
   const contentTypePerformance = useContentTypePerformance(
-    nicheScopedRows,
+    scorecardRows,
     contentTypes,
   );
   const ownCount = React.useMemo(
@@ -197,6 +238,7 @@ export default function OverviewPage() {
               <ContentTypeFilterControl
                 contentTypes={contentTypes}
                 unassignedCount={untypedCount}
+                channelCounts={typeChannelCounts}
               />
               <OwnershipFilterControl
                 ownCount={ownCount}
@@ -315,7 +357,18 @@ export default function OverviewPage() {
  */
 function EmptyTracker() {
   return (
-    <div className="rounded-lg border border-border bg-surface">
+    <div className="flex flex-col gap-5">
+      {/*
+        Connecting comes FIRST on an empty tracker, above "add a channel".
+        For the person setting this up, their own channels are the point and the
+        connected account can add them without a single paste — so offering the
+        manual path first would send an owner to type an id for a channel the
+        app could have listed for them. Non-admins never see this panel and land
+        straight on the Add Channel flow below, which is right for them.
+      */}
+      <ConnectYouTubePanel variant="full" />
+
+      <div className="rounded-lg border border-border bg-surface">
       <EmptyState
         icon={<Sparkles />}
         title={`Track the Shorts channels that matter to ${BRAND.company}.`}
@@ -360,6 +413,7 @@ function EmptyTracker() {
             </p>
           </div>
         ))}
+      </div>
       </div>
     </div>
   );

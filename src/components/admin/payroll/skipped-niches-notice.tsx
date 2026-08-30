@@ -8,20 +8,19 @@ import { SetNicheThresholdButton } from "@/components/niches/niche-threshold-dia
 import { useNicheList } from "@/hooks/use-niches";
 import { formatNumber, pluralize } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import type { MissingHitRuleHalf } from "@/lib/analytics/hit-rate";
+import { describeNicheGap } from "@/lib/payroll/payroll-engine";
 import type { PayrollSkippedNicheDTO } from "@/server/services/payroll-service";
 
-/**
- * Which field to go and fill in.
+/*
+ * WHICH FIELD TO GO AND FILL IN — named by the engine, not by this file.
  *
- * The half is named rather than described, because the point of this notice is
- * that somebody can close the gap without asking anybody what it means.
+ * There used to be a private `missingHalfLabel` here, and identical copies in
+ * the payroll service's audit summary and its finalize path. `describeNicheGap`
+ * is the one composition now, exported from the engine that decides what a gap
+ * IS. Three copies of a sentence about which field is missing is three chances
+ * for the screen an admin is looking at and the log entry about the same run to
+ * send them to different places.
  */
-function missingHalfLabel(missing: MissingHitRuleHalf): string {
-  if (missing === "threshold") return "hit threshold";
-  if (missing === "window") return "hit window";
-  return "hit threshold or window";
-}
 
 /**
  * "These Shorts were not counted, and here is the setting that would count
@@ -38,14 +37,23 @@ function missingHalfLabel(missing: MissingHitRuleHalf): string {
  * explanation is indistinguishable from a bug — the person losing it cannot
  * tell, and neither can the admin approving the run.
  *
- * A RULE NOW HAS TWO HALVES, AND THIS NAMES THE MISSING ONE
- * A hit is a threshold reached inside a window. A niche with a threshold and no
- * window is exactly as unscoreable as one with neither — judging it on lifetime
- * views is the age-biased comparison the whole change removes — but it does not
- * LOOK unconfigured on the niches screen, which is precisely why it has to be
- * named here. "Set a threshold" and "set a window" are two different fields,
+ * THREE WAYS TO BE HALF-CONFIGURED, AND THIS NAMES THE MISSING ONE
+ * A hit is a threshold reached inside a window, and — since the rate moved off
+ * the employee onto the niche — worth whatever that niche says it is worth. A
+ * niche with a threshold and no window is exactly as unscoreable as one with
+ * neither (judging it on lifetime views is the age-biased comparison the whole
+ * change removes), and a niche with a complete rule and no payment scores
+ * perfectly on every chart and pays nobody. None of the three LOOKS wrong on
+ * the niches screen, which is precisely why they have to be named here. "Set a
+ * threshold", "set a window" and "set a payment" are three different fields,
  * and an admin told only that something is unconfigured has to go and find out
  * which.
+ *
+ * THE PAYMENT GAP JOINED THIS NOTICE RATHER THAN GETTING ONE OF ITS OWN. It is
+ * the same question — why is this bonus smaller than it looks? — and a second
+ * banner would be a second place to look for one answer. What differs is the
+ * count behind it: a rule gap means the Shorts were never judged, a payment gap
+ * means they were judged, they WON, and there was no number to multiply by.
  *
  * So this sits at the top of the page body, above the table: the earliest
  * point on the last screen where the fix is still cheap, since after
@@ -119,15 +127,16 @@ function SkippedNichesPanel({
         <Target className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
         <div className="min-w-0">
           <p className="text-[13px] font-medium text-foreground">
-            {formatNumber(shortCount)} {pluralize(shortCount, "Short")} could not be
-            counted for hit bonuses
+            {formatNumber(shortCount)} {pluralize(shortCount, "Short")} earned no hit
+            bonus because of a niche setting
           </p>
           <p className="mt-1 max-w-prose text-[12px] leading-relaxed text-muted-foreground">
-            A hit is a view threshold reached within a set window of publishing.{" "}
+            A hit bonus needs three things from a niche: a view threshold, a window
+            to reach it in, and what one hit is worth.{" "}
             {skippedNiches.length === 1 ? "This niche is" : "These niches are"}{" "}
-            missing half of that rule or all of it, so there is no definition of a
-            hit to judge their Shorts against and no bonus can be paid for them.
-            Nobody&rsquo;s salary is affected — only the hit bonus.
+            missing at least one of them, so either there is no definition of a hit
+            to judge their Shorts against or there is no rate to pay for the ones
+            that cleared it. Nobody&rsquo;s salary is affected — only the hit bonus.
           </p>
         </div>
       </div>
@@ -145,9 +154,13 @@ function SkippedNichesPanel({
                 <span className="font-medium">{niche.nicheName}</span>
                 <span className="text-muted-foreground">
                   {" "}
-                  — no {missingHalfLabel(niche.missing)} ·{" "}
+                  — no {describeNicheGap(niche.missing)} ·{" "}
                   {formatNumber(niche.shortCount)}{" "}
-                  {pluralize(niche.shortCount, "Short")} not considered
+                  {/* Two different losses, two different words. A rule gap left
+                      the Shorts unjudged; a payment gap judged them, found hits,
+                      and had no rate to pay them at. */}
+                  {pluralize(niche.shortCount, "Short")}{" "}
+                  {niche.missing.rule === null ? "hit, unpaid" : "not considered"}
                 </span>
               </span>
 
@@ -216,21 +229,29 @@ export function SkippedNichesSummary({
           {pluralize(skippedNiches.length, "niche")} will be recorded as
           earning no hit bonus, because{" "}
           {skippedNiches.length === 1 ? "that niche is" : "those niches are"}{" "}
-          missing part of the rule that decides a hit.
+          missing part of what a hit bonus needs — a view threshold, a window to
+          reach it in, and what one hit is worth.
         </p>
         <ul className="flex flex-col gap-0.5 text-[12px] text-muted-foreground">
           {skippedNiches.map((niche) => (
             <li key={niche.nicheId}>
               <span className="text-foreground">{niche.nicheName}</span> — no{" "}
-              {missingHalfLabel(niche.missing)} · {formatNumber(niche.shortCount)}{" "}
-              {pluralize(niche.shortCount, "Short")}
+              {describeNicheGap(niche.missing)} · {formatNumber(niche.shortCount)}{" "}
+              {pluralize(niche.shortCount, "Short")}{" "}
+              {/* The same two words the notice upstairs uses for the same two
+                  counts. A number labelled only "Short" means one thing under a
+                  rule gap and the opposite under a payment gap, and this dialog
+                  is the last screen before the figures become a document — the
+                  worst place for the two surfaces to describe one niche
+                  differently. */}
+              {niche.missing.rule === null ? "hit, unpaid" : "not considered"}
             </li>
           ))}
         </ul>
         <p className="text-[12px] leading-relaxed text-muted-foreground">
           Freezing the month records that as the answer. Cancel and complete
-          those rules first if those Shorts should have paid a bonus — once this
-          period is finalized, setting them changes nothing about it.
+          those settings first if those Shorts should have paid a bonus — once
+          this period is finalized, setting them changes nothing about it.
         </p>
       </div>
     </div>

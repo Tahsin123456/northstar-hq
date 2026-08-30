@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { Menu, X } from "lucide-react";
-import { BrandMark, SidebarNav, ThemeToggle } from "./sidebar";
+import { BrandMark, SidebarFooterNav, SidebarNav, ThemeToggle } from "./sidebar";
 import { Button } from "@/components/ui/button";
 import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
 import { cn } from "@/lib/utils";
@@ -49,7 +49,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               />
             </div>
           </div>
+          {/* The footer: the two controls that change the tool rather than the
+              data. Settings sits above the theme toggle because it is the one
+              with a page behind it. */}
           <div className="flex flex-col gap-0.5">
+            <SidebarFooterNav />
             <ThemeToggle />
           </div>
         </div>
@@ -103,7 +107,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 />
               </div>
             </div>
-            <ThemeToggle />
+            <div className="flex flex-col gap-0.5">
+              <SidebarFooterNav onNavigate={() => setMobileOpen(false)} />
+              <ThemeToggle />
+            </div>
           </div>
         </aside>
       </div>

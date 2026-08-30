@@ -70,6 +70,17 @@ vi.mock("@/server/auth/dal", () => ({
     organizationId: ORG_ID,
     permissions: mocks.permissions,
   }),
+  /*
+   * Answered from the same permission set the actor carries, rather than
+   * stubbed to a constant.
+   *
+   * `listNiches` and `updateNiche` now ask this before deciding whether the DTO
+   * may carry the per-hit rate. A stub returning true would make every case in
+   * this file run as somebody who may read pay, which is the opposite of what a
+   * permission file should assume — and the threshold cases below deliberately
+   * run as somebody who may not.
+   */
+  actorCan: async (permission: string) => mocks.permissions.has(permission),
 }));
 
 vi.mock("../user-service", () => ({

@@ -71,7 +71,7 @@ const EDITOR = {
   email: "sam@example.com",
   role: "short_form_editor",
   salaryMinor: 300_000,
-  hitPaymentMinor: 1_000,
+  // No per-employee rate: the price of a hit is on the niche now.
   currency: "USD",
   nicheIds: ["niche_gta"],
   joinedOnMs: Date.UTC(2020, 0, 1),
@@ -84,6 +84,9 @@ const EDITOR = {
 const GTA = {
   id: "niche_gta",
   name: "GTA",
+  kind: "production" as const,
+  // What one GTA hit pays. The rate lives here rather than on the employee.
+  hitPaymentMinor: 1_000,
   hitThreshold: 1_000_000,
   hitWindowHours: SEVEN_DAYS,
 };
@@ -167,8 +170,70 @@ describe("a hit is paid in the period it resolves", () => {
 
     expect(period.records[0]?.hitCount).toBe(0);
     expect(period.skippedNiches).toEqual([
-      { nicheId: "niche_gta", nicheName: "GTA", missing: "window", shortCount: 1 },
+      { nicheId: "niche_gta", nicheName: "GTA", missing: { rule: "window", payment: false }, shortCount: 1 },
     ]);
+  });
+
+  it("reports a niche with a complete rule and no payment, before anybody finalizes", async () => {
+    // THE THIRD WAY TO BE HALF-CONFIGURED, through the same channel as the
+    // other two. This niche scores perfectly — the Short IS a hit — and pays
+    // nothing, which is invisible everywhere except a payroll run. The draft
+    // names it while the fix is still cheap; once the month is frozen, setting
+    // the rate changes nothing about it.
+    mocks.loadPayrollInputs.mockResolvedValue({
+      employees: [EDITOR],
+      shorts: [shortResolving(Date.UTC(2026, 0, 5))],
+      niches: [{ ...GTA, hitPaymentMinor: null }],
+    });
+
+    const period = await getPeriodForOrganization(ORG_ID, JANUARY);
+
+    // Not credited, and not written as a zero-value hit either — a stored
+    // credit would enter the paid ledger and make the Short unpayable forever.
+    expect(period.records[0]?.hitCount).toBe(0);
+    expect(period.records[0]?.hitBonusMinor).toBe(0);
+    expect(period.skippedNiches).toEqual([
+      {
+        nicheId: "niche_gta",
+        nicheName: "GTA",
+        missing: { rule: null, payment: true },
+        shortCount: 1,
+      },
+    ]);
+  });
+
+  it("pays a watchlist niche's hits nothing, and reports no gap for it", async () => {
+    // Nobody is paid for a niche Northstar follows rather than publishes into.
+    // The distinction from the test above is the point: both are a zero, and
+    // only one of them is somebody's job to fix.
+    mocks.loadPayrollInputs.mockResolvedValue({
+      employees: [EDITOR],
+      shorts: [shortResolving(Date.UTC(2026, 0, 5))],
+      niches: [{ ...GTA, kind: "watchlist" as const }],
+    });
+
+    const period = await getPeriodForOrganization(ORG_ID, JANUARY);
+
+    expect(period.records[0]?.hitCount).toBe(0);
+    expect(period.records[0]?.hitBonusMinor).toBe(0);
+    expect(period.skippedNiches).toEqual([]);
+  });
+
+  it("pays the niche's own rate on the draft's per-niche line", async () => {
+    mocks.loadPayrollInputs.mockResolvedValue({
+      employees: [EDITOR],
+      shorts: [shortResolving(Date.UTC(2026, 0, 5))],
+      niches: [{ ...GTA, hitPaymentMinor: 2_500 }],
+    });
+
+    const period = await getPeriodForOrganization(ORG_ID, JANUARY);
+    const line = period.records[0]?.byNiche[0];
+
+    // "1 hit × $25 = $25" — the $25 comes from the niche, and the employee's
+    // own historical rate plays no part in it.
+    expect(line?.hitPaymentMinor).toBe(2_500);
+    expect(line?.bonusMinor).toBe(2_500);
+    expect(period.records[0]?.hitBonusMinor).toBe(2_500);
   });
 });
 

@@ -28,6 +28,15 @@ import type { ChannelMetrics, DateRange, JudgedVideo } from "./types";
  * Shorts are `unscoreable`, drop out of both halves, and are reported in the
  * exclusions rather than counted as failures.
  *
+ * WHICH CHANNELS REACH THE TWO POOLS IS DECIDED NEXT DOOR, in `market-scope`.
+ * This function compares whatever it is handed and knows nothing about which
+ * niches Northstar publishes into — but the paragraph above is the contract
+ * that decision has to keep, so it is worth reading the two together. Both
+ * pools are scoped by one predicate for exactly this reason: scoping only the
+ * "ours" side would leave the two halves judged by the same rule over
+ * differently-shaped populations, which is the one way to break a comparison
+ * that still looks like one on screen.
+ *
  * DIRECTIONALITY
  * Every metric declares whether higher is better — and upload frequency
  * declares that it is neither. Posting more is a strategy, not an achievement:

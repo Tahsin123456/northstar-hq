@@ -29,8 +29,8 @@ const john: PayrollMessageEmployee = {
   totalMinor: 600_000, // $6,000.00
   currency: "USD",
   byNiche: [
-    { nicheName: "GTA", hitCount: 120, bonusMinor: 120_000 },
-    { nicheName: "RDR", hitCount: 80, bonusMinor: 80_000 },
+    { nicheName: "GTA", hitCount: 120, hitPaymentMinor: 1_000, bonusMinor: 120_000 },
+    { nicheName: "RDR", hitCount: 80, hitPaymentMinor: 1_000, bonusMinor: 80_000 },
   ],
 };
 
@@ -43,7 +43,7 @@ const mia: PayrollMessageEmployee = {
   adjustmentReason: null,
   totalMinor: 270_000, // $2,700.00
   currency: "USD",
-  byNiche: [{ nicheName: "GTA", hitCount: 20, bonusMinor: 20_000 }],
+  byNiche: [{ nicheName: "GTA", hitCount: 20, hitPaymentMinor: 1_000, bonusMinor: 20_000 }],
 };
 
 const run = (overrides: Partial<PayrollMessageInput> = {}): PayrollMessageInput => ({
@@ -171,9 +171,9 @@ describe("buildPayrollMessage", () => {
       ...john,
       name: `Employee Number ${index + 1}`,
       byNiche: [
-        { nicheName: "Grand Theft Auto", hitCount: 12, bonusMinor: 12_000 },
-        { nicheName: "Red Dead Redemption", hitCount: 8, bonusMinor: 8_000 },
-        { nicheName: "The Last of Us", hitCount: 4, bonusMinor: 4_000 },
+        { nicheName: "Grand Theft Auto", hitCount: 12, hitPaymentMinor: 1_000, bonusMinor: 12_000 },
+        { nicheName: "Red Dead Redemption", hitCount: 8, hitPaymentMinor: 1_000, bonusMinor: 8_000 },
+        { nicheName: "The Last of Us", hitCount: 4, hitPaymentMinor: 1_000, bonusMinor: 4_000 },
       ],
     }));
 
@@ -227,6 +227,7 @@ describe("buildPayrollMessage", () => {
       byNiche: Array.from({ length: 500 }, (_, index) => ({
         nicheName: `Niche ${index + 1}`,
         hitCount: 3,
+        hitPaymentMinor: 1_000,
         bonusMinor: 3_000,
       })),
     };

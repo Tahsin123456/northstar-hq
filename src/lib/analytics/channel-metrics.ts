@@ -136,15 +136,62 @@ function findExtremes(shorts: readonly EvaluatedShort[]): {
  * ratio of two sums taken from different populations. Tallies add — that is
  * what `addTallies` is for — so the portfolio's exclusions are the sum of the
  * channels' exclusions and the bounds widen honestly as unknowns accumulate.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO POPULATIONS IN ONE OBJECT, AND THE SPLIT IS THE POINT
+ * ---------------------------------------------------------------------------
+ * Not every field here is over the same set of channels, and pretending
+ * otherwise is what produced the number this split exists to fix.
+ *
+ *   VOLUME — `channelCount`, `totalShorts`, `totalViews` — is over EVERY entry.
+ *     These describe the tracker, not the studio. "48 tracked channels" has to
+ *     mean the 48 rows in the table underneath it, or the header is lying about
+ *     the page it sits on.
+ *
+ *   THE SCORECARD — `pooled`, `averageHitRate`, `medianHitRate`,
+ *     `channelsWithData`, `topChannel` — is over entries flagged
+ *     `countsTowardHitRate`. A watchlist niche is full of channels nobody at
+ *     Northstar is trying to be, so averaging them into "our hit rate" produces
+ *     a number describing work the studio does not do: arithmetic that is
+ *     perfectly correct over a population nobody chose. The caller decides which
+ *     entries belong — see `isStudioChannel` — because only the caller knows
+ *     whether the viewer asked about the studio or about one particular niche.
+ *
+ * The flag is REQUIRED rather than defaulted. A default would let a new call
+ * site pool watchlist channels back into the headline by omission, which is the
+ * single failure mode this whole field exists to prevent; making it a compile
+ * error is what forces the decision to be made once, out loud, per surface.
  */
+export interface PortfolioEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly metrics: ChannelMetrics;
+  /**
+   * Whether this channel belongs in the studio's own scorecard.
+   *
+   * Volume counts it either way; the rate only counts it when this is true.
+   */
+  readonly countsTowardHitRate: boolean;
+}
+
 export interface PortfolioSummary {
+  /** Every channel in scope, whatever kind of niche it sits in. */
   readonly channelCount: number;
-  /** Channels with at least one judged Short — the ones `averageHitRate` is over. */
+  /**
+   * Channels the rate is ALLOWED to be measured over.
+   *
+   * Equal to `channelCount` on an ordinary view; smaller when watchlist
+   * channels are in scope. The gap between the two is what a caption has to
+   * say out loud — a rate over 30 of 48 tracked channels is a different claim
+   * from a rate over all of them, and only one of them is "how are WE doing".
+   */
+  readonly scorecardChannelCount: number;
+  /** Scorecard channels with at least one judged Short — what `averageHitRate` is over. */
   readonly channelsWithData: number;
   readonly totalShorts: number;
   readonly totalViews: number;
   /**
-   * Every channel's verdicts, added.
+   * The SCORECARD channels' verdicts, added.
    *
    * The portfolio-level exclusions live here and are the number the dashboard
    * has to show beside the headline: "18% across 214 judged Shorts, 374
@@ -152,24 +199,38 @@ export interface PortfolioSummary {
    * the claim this product exists not to make.
    */
   readonly pooled: HitRateSummary;
-  /** Mean of per-channel hit rates. `null` when no channel has a rate. */
+  /** Mean of per-channel hit rates. `null` when no scorecard channel has a rate. */
   readonly averageHitRate: number | null;
   readonly medianHitRate: number | null;
+  /**
+   * The strongest channel, ranked among SCORECARD channels only.
+   *
+   * Same population as the rate above it, deliberately. "Best performing" is
+   * read as "the strongest thing we have", and a watchlist channel winning it
+   * would put a channel nobody is trying to be at the top of the studio's own
+   * list. What the competition is doing is what Outliers and Winners are for.
+   */
   readonly topChannel: { id: string; name: string; hitRate: number } | null;
 }
 
 export function calculatePortfolioSummary(
-  entries: readonly { id: string; name: string; metrics: ChannelMetrics }[],
+  entries: readonly PortfolioEntry[],
 ): PortfolioSummary {
   let totalShorts = 0;
   let totalViews = 0;
+  let scorecardChannelCount = 0;
   let pooledTally: HitTally = EMPTY_HIT_TALLY;
   const rates: number[] = [];
   let topChannel: PortfolioSummary["topChannel"] = null;
 
   for (const entry of entries) {
+    // Volume first, over everything: these describe the tracker.
     totalShorts += entry.metrics.totalShorts;
     totalViews += entry.metrics.totalViews;
+
+    // And everything below describes the studio.
+    if (!entry.countsTowardHitRate) continue;
+    scorecardChannelCount += 1;
     pooledTally = addTallies(pooledTally, entry.metrics.hits.tally);
 
     const rate = entry.metrics.hits.rate;
@@ -196,6 +257,7 @@ export function calculatePortfolioSummary(
 
   return {
     channelCount: entries.length,
+    scorecardChannelCount,
     channelsWithData: rates.length,
     totalShorts,
     totalViews,

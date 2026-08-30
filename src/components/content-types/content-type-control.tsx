@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ContentTypeChips } from "./content-type-chip";
-import { ContentTypeMenu } from "./content-type-menu";
+import { ContentTypeMenu, useApplyToChannelAction } from "./content-type-menu";
 import { useCanAssignContentTypes } from "./permissions";
 import { cn } from "@/lib/utils";
 
@@ -155,6 +155,9 @@ export function ContentTypeControl({
 }) {
   const canAssign = useCanAssignContentTypes();
   const [open, setOpen] = React.useState(false);
+  // "…and while I'm here, the whole channel does this." Offered per tag in the
+  // menu below; see `useApplyToChannelAction`.
+  const applyToChannel = useApplyToChannelAction(videoId);
 
   const effectiveIds = resolution.effectiveIds;
   const assigned = useContentTypesByIds(effectiveIds);
@@ -297,7 +300,8 @@ export function ContentTypeControl({
           inheritedIds={inheritedIds}
           suppressedIds={resolution.suppressedIds}
           heading="Content type"
-          hint="Click to file it under one. Use + to add another."
+          hint="Click to file it under one. Use + to add another, or the dot to apply it to the whole channel."
+          applyToChannel={applyToChannel}
           /*
            * A CLICK SETS THIS SHORT'S OWN TAG. IT NEVER OVERRIDES THE CHANNEL'S.
            *

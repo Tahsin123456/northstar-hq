@@ -67,7 +67,7 @@ export const UNCONFIGURED_RULE_EXPLANATION =
 
 /** What an employee is told when they create a niche they cannot configure. */
 export const EMPLOYEE_HIT_RULE_NOTICE =
-  "The hit rule — the view threshold and the hit window — is set by an Admin. Your niche will be created without one, and nothing filed under it is scored until an Admin sets both.";
+  "The hit rule — the view threshold, the hit window, and what one hit pays — is set by an Admin. Your niche will be created without one, and nothing filed under it is scored or paid until an Admin fills them in.";
 
 /** The marker on an admin's list of niches that still need a decision. */
 export const NEEDS_RULE_LABEL = "Needs hit rule configuration";

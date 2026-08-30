@@ -19,6 +19,7 @@ import { calculateTrend, previousRange, type Trend } from "@/lib/analytics/trend
 import type { HitRateSummary } from "@/lib/analytics/hit-rate";
 import { baselineRangeFor } from "@/hooks/use-shorts-feed";
 import type { ChannelDTO, DatasetDTO, NicheDTO } from "@/lib/dto";
+import { asksAboutOneNiche, isStudioChannel } from "@/lib/niches/niche-kind";
 import { BRAND } from "@/lib/brand";
 
 /**
@@ -137,6 +138,29 @@ function scopeToNiche(
   return dataset.channels.filter((c) => c.channel.niches.some((n) => n.id === nicheId));
 }
 
+/**
+ * The channels the report's HIT RATE is measured over.
+ *
+ * The same split the dashboard makes, made here for the same reason and with
+ * the same exception. A report over "all niches" is the studio's scorecard, so
+ * watchlist channels are volume and not rate — pooling in channels nobody at
+ * Northstar is trying to be would put a number describing somebody else's work
+ * on a page headed with Northstar's name, in the one artefact that gets
+ * forwarded and quoted six months later with no screen around it to qualify it.
+ *
+ * A report scoped to ONE niche is a report about that niche, watchlist or not,
+ * and every channel in it counts. Same rule as the Overview's niche filter,
+ * because a PDF that disagreed with the screen it was generated from is the one
+ * failure this whole module is arranged to prevent.
+ */
+function scopeToScorecard(
+  scoped: DatasetDTO["channels"],
+  nicheId: string | null,
+): DatasetDTO["channels"] {
+  if (asksAboutOneNiche(nicheId)) return scoped;
+  return scoped.filter((c) => isStudioChannel(c.channel.niches));
+}
+
 export function buildReport(options: BuildReportOptions): ReportData {
   const { dataset, range, threshold, nicheId, periodLabel, now } = options;
 
@@ -148,10 +172,54 @@ export function buildReport(options: BuildReportOptions): ReportData {
 
   const allVideos = scoped.flatMap((c) => [...c.videos]);
 
+  /*
+   * THE COMPARISON IS DRAWN FROM THE SCORECARD, BOTH SIDES OF IT.
+   *
+   * `ours` and `competitors` above cover everything the report scopes to, which
+   * is right for volume — views, uploads, share of a market are facts about the
+   * whole picture. It is wrong for a RATE. With no niche selected, `ours`
+   * included channels sitting only in watchlist niches, so "our hit rate" in the
+   * PDF averaged in work the studio does not do — the exact measurement problem
+   * the production/watchlist split was introduced to end, surviving on the one
+   * artefact that gets emailed to people.
+   *
+   * Both halves are narrowed, not just ours. Comparing our production niches
+   * against a market drawn from a wider population would produce a number whose
+   * two sides describe different things, which is a subtler way to be wrong than
+   * the bug it replaced.
+   *
+   * When a niche IS selected, `scopeToScorecard` returns everything: the reader
+   * asked about that niche specifically, watchlist or not, and refusing them a
+   * comparison inside it would be answering a question they did not ask.
+   */
+  const scorecardChannels = scopeToScorecard(scoped, nicheId);
+  const scorecardVideos = scorecardChannels.flatMap((c) => [...c.videos]);
+  const scorecardOurs = scorecardChannels.filter((c) => c.channel.ownershipType === "own");
+  const scorecardCompetitors = scorecardChannels.filter(
+    (c) => c.channel.ownershipType !== "own",
+  );
+
   // --- Portfolio metrics, this period and the previous one ------------------
+  //
+  // TWO POOLS, ONE FOR VOLUME AND ONE FOR THE RATE, exactly as
+  // `PortfolioSummary` splits them. Views, uploads and medians describe
+  // everything the report covers; `hits` describes the work the studio is
+  // accountable for. Computing the whole thing over one pool would force a
+  // choice between a views total that omits half the tracker and a hit rate
+  // that includes niches nobody publishes into.
   const current = calculateChannelMetrics({ videos: allVideos, range, threshold });
   const previous = calculateChannelMetrics({
     videos: allVideos,
+    range: comparisonRange,
+    threshold,
+  });
+  const currentScorecard = calculateChannelMetrics({
+    videos: scorecardVideos,
+    range,
+    threshold,
+  });
+  const previousScorecard = calculateChannelMetrics({
+    videos: scorecardVideos,
     range: comparisonRange,
     threshold,
   });
@@ -168,8 +236,8 @@ export function buildReport(options: BuildReportOptions): ReportData {
   );
 
   const comparison = compareToMarket(
-    ours.map((c) => ({ videos: c.videos })),
-    competitors.map((c) => ({ videos: c.videos })),
+    scorecardOurs.map((c) => ({ videos: c.videos })),
+    scorecardCompetitors.map((c) => ({ videos: c.videos })),
     range,
     threshold,
   );
@@ -188,14 +256,18 @@ export function buildReport(options: BuildReportOptions): ReportData {
     {
       key: "hitRate",
       label: "Hit rate",
-      value: current.hits.rate,
+      value: currentScorecard.hits.rate,
       format: "percent",
       // Both sides of the comparison are windowed rates over decided Shorts, so
       // the movement is finally a statement about the work. Under the old rule
       // the previous period was systematically flattered — its Shorts had had a
       // full extra period to accumulate views — and this pill reported a
       // decline on every healthy channel.
-      trend: calculateTrend(current.hits.rate, previous.hits.rate, {
+      //
+      // Both sides are also over the same SCORECARD pool. A trend between a
+      // rate that included watchlist channels and one that did not would move
+      // when nothing about the work had.
+      trend: calculateTrend(currentScorecard.hits.rate, previousScorecard.hits.rate, {
         direction: "higherIsBetter",
         unit: "percentagePoints",
       }),
@@ -321,7 +393,10 @@ export function buildReport(options: BuildReportOptions): ReportData {
     nicheName,
     threshold,
     thresholdSource: options.thresholdSource ?? "account",
-    hits: current.hits,
+    // The scorecard's verdicts, not the whole tracker's — the same population
+    // the `hitRate` summary metric above is over, so the rate on the cover and
+    // the exclusions printed beside it describe one set of Shorts.
+    hits: currentScorecard.hits,
     summary,
     marketShare,
     marketShareTrend,
@@ -336,8 +411,11 @@ export function buildReport(options: BuildReportOptions): ReportData {
     topWinners,
     topOutliers,
     insights: buildInsights({
-      current,
-      previous,
+      // The narrative reads the SCORECARD pool, because every sentence it
+      // writes about a hit rate is a sentence about how the studio did. The
+      // volume figures it does not touch.
+      current: currentScorecard,
+      previous: previousScorecard,
       marketShare,
       previousShare,
       comparison,

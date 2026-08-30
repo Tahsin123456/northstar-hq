@@ -12,7 +12,6 @@ import {
   Lock,
   Plug,
   RefreshCw,
-  ShieldCheck,
   X,
   Youtube,
 } from "lucide-react";
@@ -35,6 +34,8 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useSession } from "@/components/providers/session-provider";
+import { ConnectScopeFacts } from "@/components/youtube/connect-scope-facts";
+import { youTubeSetupState } from "@/lib/youtube/connection-state";
 import { useNow } from "@/hooks/use-now";
 import {
   useDisconnectYouTube,
@@ -123,11 +124,18 @@ function YouTubeAdminScreen() {
           <Skeleton className="h-4 w-2/3 rounded" />
           <Skeleton className="h-[132px] w-full rounded-lg" />
         </div>
-      ) : google && !google.configured ? (
+      ) : !google ? (
+        // Unreachable in practice — `error` and `isLoading` are handled above,
+        // so a defined `data` is the only way here — but the panel below now
+        // needs the real status object rather than a boolean, and inventing a
+        // "configured: true" placeholder to satisfy the type would make the
+        // screen assert something it has not been told.
+        null
+      ) : !google.configured ? (
         <SetupCard google={google} />
       ) : (
         <>
-          <ConnectPanel hasConnections={connections.length > 0} />
+          <ConnectPanel google={google} connections={connections} />
 
           {connections.length > 0 ? (
             <div className="flex flex-col gap-3">
@@ -196,80 +204,51 @@ function ConnectButton({
  * account is the normal case for a studio with several channels, and the person
  * doing it is entitled to read the same three sentences.
  */
-function ConnectPanel({ hasConnections }: { hasConnections: boolean }) {
+function ConnectPanel({
+  google,
+  connections,
+}: {
+  google: GoogleOAuthStatusDTO;
+  connections: readonly YouTubeConnectionDTO[];
+}) {
+  /**
+   * The workspace-level headline, from the SHARED derivation.
+   *
+   * This used to be a local ternary on "are there any connections?", which
+   * answered two of the owner's five states and silently rendered the other
+   * three as though everything were fine — a workspace whose only grant had
+   * expired read "Connect another YouTube channel". `youTubeSetupState` resolves
+   * all six in urgency order and is the same function the channels screen and
+   * the dashboard's empty state call, so the three surfaces cannot come to
+   * different conclusions about the same workspace or describe the same
+   * situation in different words.
+   */
+  const state = youTubeSetupState({ configured: google.configured, connections });
+
   return (
     <Card className="flex flex-col gap-5 p-5 lg:flex-row lg:items-center lg:justify-between lg:gap-8">
       <div className="flex min-w-0 flex-col gap-3">
         <div>
-          <h2 className="text-[15px] font-medium text-foreground">
-            {hasConnections
-              ? "Connect another YouTube channel"
-              : "No YouTube channel is connected yet"}
-          </h2>
+          <h2 className="text-[15px] font-medium text-foreground">{state.title}</h2>
           <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
-            {hasConnections
-              ? "Each Google account you connect adds the channels it owns, read with their own private figures rather than the ones YouTube shows the public."
-              : "Connect the Google account that owns your channels. Until then, every figure in the app is the public one anybody can see, and there is no revenue to import."}
+            {state.body}
           </p>
         </div>
 
-        <ul className="flex flex-col gap-2">
-          <PanelPoint icon={<ShieldCheck className="text-success" />}>
-            Northstar HQ requests <strong className="text-foreground">read-only</strong>{" "}
-            access and <strong className="text-foreground">can never modify a channel</strong>
-            . It can read your channels, videos, their statistics and the revenue YouTube
-            estimates for them; it cannot upload, edit, comment, delete or change anything.
-            No write permission is ever requested, so the ability to do so does not exist.
-          </PanelPoint>
-
-          <PanelPoint icon={<Coins className="text-subtle-foreground" />}>
-            Revenue needs a{" "}
-            <strong className="text-foreground">separate YouTube Analytics permission</strong>{" "}
-            — a distinct tick on Google&rsquo;s consent screen. Leave every permission
-            ticked to import earnings. Declining it still connects the account and still
-            syncs channels and videos; only the money is left out.
-          </PanelPoint>
-
-          <PanelPoint icon={<AlertTriangle className="text-warning" />}>
-            Every figure YouTube reports is an{" "}
-            <strong className="text-foreground">estimate</strong>, and YouTube revises it —
-            usually at month end, sometimes weeks later. Imported amounts are marked as
-            estimates in{" "}
-            <Link
-              href="/finance/entries"
-              className="text-accent underline-offset-2 hover:underline"
-            >
-              Finance &rarr; Entries
-            </Link>{" "}
-            and must not be treated as settled cash.
-          </PanelPoint>
-        </ul>
+        {/* The same three paragraphs the other surfaces show, from one file —
+            see `ConnectScopeFacts`. The read-only promise in particular must not
+            exist in two hand-maintained copies. */}
+        <ConnectScopeFacts />
       </div>
 
       <ConnectButton
-        label="Connect YouTube Channel"
+        label={state.offerConnect ? state.connectLabel : "Connect another channel"}
+        variant={state.offerConnect ? "primary" : "secondary"}
         size="lg"
-        icon={<Youtube />}
+        icon={state.id === "needs_reauth" ? <RefreshCw /> : <Youtube />}
         className="shrink-0 self-start lg:self-center"
       />
     </Card>
-  );
-}
-
-function PanelPoint({
-  icon,
-  children,
-}: {
-  icon: React.ReactNode;
-  children: React.ReactNode;
-}) {
-  return (
-    <li className="flex items-start gap-2.5">
-      <span className="mt-0.5 shrink-0 [&_svg]:size-3.5">{icon}</span>
-      <span className="min-w-0 text-[12px] leading-relaxed text-muted-foreground">
-        {children}
-      </span>
-    </li>
   );
 }
 
@@ -708,6 +687,19 @@ interface RevenueNoticeContent {
 
 /**
  * What to DO about this connection's revenue state.
+ *
+ * PER CONNECTION, which is why it is not `youTubeSetupState`. That function
+ * answers "what state is this WORKSPACE in" for the surfaces that show one
+ * summary and one button — the channels screen, the dashboard's empty state, and
+ * the panel at the top of this page. This one runs per card, where the reader is
+ * looking at one Google account and can act on it specifically, so it can say
+ * things the workspace-level answer cannot: the service's own composed message
+ * naming the dates that were read, and the distinction between an "ok" run that
+ * still had something to report and a clean one.
+ *
+ * The two must not drift on the FACTS even though they differ in detail — both
+ * are built from the same `revenueScopeGranted` / `revenueSyncStatus` pair, and
+ * neither is allowed to turn a refused report into a Partner Programme finding.
  *
  * EVERY state gets a sentence, including the working one, and every sentence
  * names the next step — even when that step is "nothing, and here is where the

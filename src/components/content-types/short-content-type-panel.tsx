@@ -13,7 +13,7 @@ import {
 } from "@/hooks/use-content-types";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ContentTypeChip, type ContentTypeChipRemoveProps } from "./content-type-chip";
-import { ContentTypeMenu } from "./content-type-menu";
+import { ContentTypeMenu, useApplyToChannelAction } from "./content-type-menu";
 import { useCanAssignContentTypes } from "./permissions";
 import { cn } from "@/lib/utils";
 
@@ -99,6 +99,17 @@ export function ShortContentTypePanel({
 }) {
   const canAssign = useCanAssignContentTypes();
   const [adding, setAdding] = React.useState(false);
+  /*
+   * "…and everything else this channel makes."
+   *
+   * Offered in the add list rather than beside the chips above, and the reason
+   * is what the two halves of this panel are for. The chips answer "what is this
+   * Short?" — a question about one video, where a channel-wide button would be a
+   * lever of enormous reach sitting inside a discussion of one row. The add list
+   * is where somebody is choosing a tag, which is the moment they might also
+   * mean "and this is what the channel does".
+   */
+  const applyToChannel = useApplyToChannelAction(videoId);
 
   const { inheritedIds, manualIds } = React.useMemo(() => {
     const inheritedIds: string[] = [];
@@ -302,7 +313,8 @@ export function ShortContentTypePanel({
               suppressedIds={resolution.suppressedIds}
               hiddenIds={resolution.effectiveIds}
               heading={null}
-              hint="What this Short already has is left out. Picking an excluded one puts it back."
+              hint="What this Short already has is left out. Picking an excluded one puts it back; the dot applies one to the whole channel."
+              applyToChannel={applyToChannel}
               showToggle={false}
               busy={busy}
               onSelect={(_id, contentType) => addTag(contentType)}

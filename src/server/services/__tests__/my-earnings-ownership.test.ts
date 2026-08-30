@@ -123,7 +123,7 @@ function inputsFor(userId: string, overrides: Record<string, unknown> = {}) {
         email: `${userId}@example.com`,
         role: "short_form_editor",
         salaryMinor: 300_000,
-        hitPaymentMinor: 1_000,
+        // No per-employee rate: the price of a hit is on the niche now.
         currency: "USD",
         nicheIds: ["niche_gta"],
         joinedOnMs: Date.UTC(2020, 0, 1),
@@ -162,6 +162,8 @@ function inputsFor(userId: string, overrides: Record<string, unknown> = {}) {
       {
         id: "niche_gta",
         name: "GTA",
+        kind: "production" as const,
+        hitPaymentMinor: 1_000,
         hitThreshold: 1_000_000,
         hitWindowHours: FIXTURE_WINDOW_HOURS,
       },
@@ -358,7 +360,16 @@ describe("the figure, and the reason behind it", () => {
     mocks.loadPayrollInputs.mockImplementation(async () => ({
       ...inputsFor(SAM),
       // Nobody has said what a hit means in this niche, so nothing in it is one.
-      niches: [{ id: "niche_gta", name: "GTA", hitThreshold: null, hitWindowHours: FIXTURE_WINDOW_HOURS }],
+      niches: [
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "production" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: null,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
     }));
 
     const earnings = await getMyEarnings({ period: { kind: "current" } });
@@ -378,7 +389,16 @@ describe("the figure, and the reason behind it", () => {
   it("tells the employee a zero bonus is a missing setting, not their work", async () => {
     mocks.loadPayrollInputs.mockImplementation(async () => ({
       ...inputsFor(SAM),
-      niches: [{ id: "niche_gta", name: "GTA", hitThreshold: null, hitWindowHours: FIXTURE_WINDOW_HOURS }],
+      niches: [
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "production" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: null,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
     }));
 
     const earnings = await getMyEarnings({ period: { kind: "current" } });
@@ -390,7 +410,7 @@ describe("the figure, and the reason behind it", () => {
     // for having no window as easily as for having no bar, and "unconfigured"
     // on its own would send them to the wrong field.
     expect(earnings.skippedNiches).toEqual([
-      { nicheId: "niche_gta", nicheName: "GTA", missing: "threshold", shortCount: 1 },
+      { nicheId: "niche_gta", nicheName: "GTA", missing: { rule: "threshold", payment: false }, shortCount: 1 },
     ]);
 
     const notices = earnings.notices.join(" ");
@@ -425,15 +445,190 @@ describe("the figure, and the reason behind it", () => {
     expect(earnings.notices.join(" ")).toMatch(/not assigned to any niches/i);
   });
 
-  it("explains a zero caused by an unset per-hit rate", async () => {
-    mocks.loadPayrollInputs.mockImplementation(async () =>
-      inputsFor(SAM, { hitPaymentMinor: 0 }),
-    );
+  it("explains a zero caused by a niche with no hit payment set", async () => {
+    // The rate moved from the person to the niche, so this notice moved with
+    // it: "your per-hit rate is not set" described a column that no longer
+    // decides anything, and would have sent an employee to ask about the wrong
+    // field. The niche is named instead, because that is what somebody has to
+    // fix — and the Short WAS a hit, which is why the sentence says it earned
+    // nothing rather than that it could not be counted.
+    mocks.loadPayrollInputs.mockImplementation(async () => ({
+      ...inputsFor(SAM),
+      niches: [
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "production" as const,
+          hitPaymentMinor: null,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
+    }));
 
     const earnings = await getMyEarnings({ period: { kind: "current" } });
 
     expect(earnings.hitBonusMinor).toBe(0);
-    expect(earnings.notices.join(" ")).toMatch(/per-hit rate is not set/i);
+    expect(earnings.notices.join(" ")).toMatch(/GTA has no hit payment set/i);
+    expect(earnings.skippedNiches).toEqual([
+      {
+        nicheId: "niche_gta",
+        nicheName: "GTA",
+        missing: { rule: null, payment: true },
+        shortCount: 1,
+      },
+    ]);
+  });
+
+  it("says a watchlist niche is not paid, rather than calling it unconfigured", async () => {
+    // Two zeroes that look identical and call for opposite reactions. Nothing
+    // is missing here and nobody has to go and fix anything — a watchlist niche
+    // is one Northstar follows rather than publishes into.
+    mocks.loadPayrollInputs.mockImplementation(async () => ({
+      ...inputsFor(SAM),
+      niches: [
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "watchlist" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
+    }));
+
+    const earnings = await getMyEarnings({ period: { kind: "current" } });
+
+    const line = earnings.byNiche.find((entry) => entry.nicheId === "niche_gta");
+    expect(line?.thresholdSource).toBe("watchlist");
+    expect(line?.ruleMissing).toBeNull();
+    // No rate on the wire for a niche nobody is paid for.
+    expect(line?.hitPaymentMinor).toBeNull();
+
+    expect(earnings.hitBonusMinor).toBe(0);
+    // Nothing to chase: this is not a configuration gap.
+    expect(earnings.skippedNiches).toEqual([]);
+    expect(earnings.notices.join(" ")).toMatch(/watchlist niche/i);
+  });
+
+  /**
+   * `bonusMinor` moves in lockstep with the rate above it, which is what the
+   * DTO says and what the line used to break with a `?? 0`.
+   *
+   * A zero here is the claim "this niche earned nothing" — a verdict on work
+   * that was never going to be paid for, printed beside a rate of `null` that
+   * says there was nothing to multiply by. The two cannot both be true, and the
+   * one that is a product of nothing is the one that has to go.
+   */
+  it("ships a null bonus for a watchlist niche, not a zero", async () => {
+    mocks.loadPayrollInputs.mockImplementation(async () => ({
+      ...inputsFor(SAM),
+      niches: [
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "watchlist" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
+    }));
+
+    const earnings = await getMyEarnings({ period: { kind: "current" } });
+    const line = earnings.byNiche.find((entry) => entry.nicheId === "niche_gta");
+
+    expect(line?.hitPaymentMinor).toBeNull();
+    expect(line?.bonusMinor).toBeNull();
+    // The record's own total is still a real figure. Nobody earned anything
+    // here; what is unstated is the per-niche breakdown, not the sum.
+    expect(earnings.hitBonusMinor).toBe(0);
+  });
+
+  it("ships a null bonus for a niche with a rule and no price", async () => {
+    // Same lockstep, the other cause. These Shorts WERE judged and some of them
+    // won — a zero would say the niche produced nothing, when what it produced
+    // had no price on it.
+    mocks.loadPayrollInputs.mockImplementation(async () => ({
+      ...inputsFor(SAM),
+      niches: [
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "production" as const,
+          hitPaymentMinor: null,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
+    }));
+
+    const earnings = await getMyEarnings({ period: { kind: "current" } });
+    const line = earnings.byNiche.find((entry) => entry.nicheId === "niche_gta");
+
+    // The gap the earnings page has to name: the rule is complete, the price is
+    // not set, and `thresholdSource` alone cannot tell those apart.
+    expect(line?.ruleMissing).toEqual({ rule: null, payment: true });
+    expect(line?.thresholdSource).toBe("unconfigured");
+    expect(line?.thresholdApplied).toBe(1_000_000);
+    expect(line?.windowHoursApplied).toBe(FIXTURE_WINDOW_HOURS);
+
+    expect(line?.hitPaymentMinor).toBeNull();
+    expect(line?.bonusMinor).toBeNull();
+  });
+
+  it("keeps a real zero where the niche can pay and simply did not", async () => {
+    // The lockstep cuts one way only. A configured niche that earned nothing
+    // this month HAS a rate and HAS a product, and an em dash there would read
+    // as "we cannot break this down" about a month that breaks down fine.
+    mocks.loadPayrollInputs.mockImplementation(async () => ({
+      ...inputsFor(SAM),
+      shorts: [],
+    }));
+
+    const earnings = await getMyEarnings({ period: { kind: "current" } });
+    const line = earnings.byNiche.find((entry) => entry.nicheId === "niche_gta");
+
+    expect(line?.hitPaymentMinor).toBe(1_000);
+    expect(line?.bonusMinor).toBe(0);
+    expect(line?.hitCount).toBe(0);
+  });
+
+  it("sorts a niche with no stated bonus below one that earned nothing", async () => {
+    // `(b.bonusMinor ?? -1)` now meets real nulls. A bonus is never negative,
+    // so every line that has one outranks every line that has none — an unknown
+    // amount is not a small one, and a watchlist niche is not a niche that
+    // underperformed.
+    mocks.loadPayrollInputs.mockImplementation(async () => ({
+      ...inputsFor(SAM, { nicheIds: ["niche_gta", "niche_watch"] }),
+      shorts: [],
+      niches: [
+        {
+          id: "niche_watch",
+          // Alphabetically first, so name order alone cannot produce this.
+          name: "Aardvark",
+          kind: "watchlist" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "production" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+      ],
+    }));
+
+    const earnings = await getMyEarnings({ period: { kind: "current" } });
+
+    expect(earnings.byNiche.map((entry) => entry.nicheName)).toEqual(["GTA", "Aardvark"]);
+    expect(earnings.byNiche[0]?.bonusMinor).toBe(0);
+    expect(earnings.byNiche[1]?.bonusMinor).toBeNull();
   });
 
   it("lists an assigned niche that earned nothing, rather than omitting it", async () => {
@@ -441,8 +636,22 @@ describe("the figure, and the reason behind it", () => {
       ...inputsFor(SAM),
       shorts: [],
       niches: [
-        { id: "niche_gta", name: "GTA", hitThreshold: 1_000_000, hitWindowHours: FIXTURE_WINDOW_HOURS },
-        { id: "niche_rdr", name: "RDR", hitThreshold: 500_000, hitWindowHours: FIXTURE_WINDOW_HOURS },
+        {
+          id: "niche_gta",
+          name: "GTA",
+          kind: "production" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: 1_000_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
+        {
+          id: "niche_rdr",
+          name: "RDR",
+          kind: "production" as const,
+          hitPaymentMinor: 1_000,
+          hitThreshold: 500_000,
+          hitWindowHours: FIXTURE_WINDOW_HOURS,
+        },
       ],
     }));
 
