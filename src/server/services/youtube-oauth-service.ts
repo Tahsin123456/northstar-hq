@@ -6,7 +6,7 @@ import { prisma } from "@/server/db";
 import { AppError, errors, toAppError } from "@/server/errors";
 import { authEnv, resolveAppUrl } from "@/server/auth/auth-env";
 import { decryptSecret, encryptSecret } from "@/server/auth/crypto";
-import { requireGoogleOAuthConfig } from "@/server/auth/google-oauth-env";
+import { googleOAuthRedirectUri, requireGoogleOAuthConfig } from "@/server/auth/google-oauth-env";
 import type {
   ChannelDataSource,
   OwnChannelDTO,
@@ -360,6 +360,61 @@ function toTokenSet(body: GoogleTokenBody): GoogleTokenSet {
   };
 }
 
+/**
+ * What to tell an administrator when Google refuses the code exchange.
+ *
+ * Exported for tests: the mapping is the whole value of this function, and a
+ * wrong branch here is invisible until somebody is already stuck.
+ */
+export function explainTokenExchangeFailure(code: string | null): string {
+  switch (code) {
+    /*
+     * Client authentication failed — the id and secret are not a valid pair.
+     *
+     * Worth being emphatic that retrying cannot help, because everything the
+     * person just did looked like it worked: Google renders the consent screen
+     * from the client id alone, so a valid id with a stale secret produces a
+     * flawless approval flow and then fails on the exchange behind it. The
+     * natural reading of that is "I clicked something wrong", and the natural
+     * response is to do it all again.
+     */
+    case "invalid_client":
+      return (
+        "Google rejected this deployment's credentials, so connecting again will not help. " +
+        "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be a matching pair from the same " +
+        "OAuth client — a secret that was replaced in the Google console will fail here " +
+        "while the consent screen still works. Add a new secret to the OAuth client, update " +
+        "GOOGLE_CLIENT_SECRET, and redeploy."
+      );
+
+    /*
+     * The redirect URI sent with the exchange did not match the one the code was
+     * issued for. Both come from `googleOAuthRedirectUri()`, so they cannot
+     * disagree with each other — which means the registered URI is what differs,
+     * and the www/apex distinction is how that almost always happens.
+     */
+    case "redirect_uri_mismatch":
+      return (
+        `Google does not recognise this deployment's callback address. Register exactly ` +
+        `"${googleOAuthRedirectUri()}" as an authorised redirect URI on the OAuth client. ` +
+        "It is matched character for character, so www and non-www count as different addresses."
+      );
+
+    /*
+     * The one case where starting again IS the fix: the code is single-use and
+     * short-lived, so a refresh, a back button or a slow approval spends it.
+     */
+    case "invalid_grant":
+      return (
+        "That sign-in has already been used or has expired. Start the connection again, and " +
+        "complete Google's screens without reloading or going back."
+      );
+
+    default:
+      return "Google rejected the sign-in. Start the connection again.";
+  }
+}
+
 export async function exchangeCodeForTokens(
   code: string,
   redirectUri: string,
@@ -378,10 +433,22 @@ export async function exchangeCodeForTokens(
   });
 
   if (!result.ok) {
-    // Google's error code goes in the internal message, which is logged and
-    // never serialised: `error_description` can echo request material back.
-    throw new AppError("UPSTREAM_ERROR", "Google rejected the sign-in. Start the connection again.", {
-      internalMessage: `token exchange failed: ${result.body.error ?? `HTTP ${result.status}`}`,
+    const code = result.body.error ?? null;
+    // Google's own `error_description` is still withheld — it can echo request
+    // material back — but the error CODE is a fixed enum from Google's spec, and
+    // three of its values name a specific misconfiguration with a specific fix.
+    //
+    // Collapsing them all into "start the connection again" was actively
+    // harmful: `invalid_client` means the deployment's credentials are wrong, so
+    // starting again produces the identical failure forever, and the only
+    // remaining clue sat in a server log the person hitting the error cannot
+    // read. That is a loop with no exit from inside the product.
+    //
+    // Naming an environment variable is appropriate here in a way it would not
+    // be on a public screen: connecting an account requires `youtube.manage`,
+    // so the only person who can reach this message is the one who can fix it.
+    throw new AppError("UPSTREAM_ERROR", explainTokenExchangeFailure(code), {
+      internalMessage: `token exchange failed: ${code ?? `HTTP ${result.status}`}`,
     });
   }
 
