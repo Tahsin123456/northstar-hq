@@ -138,6 +138,38 @@ describe("describing the configured Google credentials", () => {
     expect(secret?.problems).toEqual([]);
   });
 
+  it("catches an encryption key that is the wrong size for AES-256", async () => {
+    const status = await statusWith({
+      GOOGLE_CLIENT_ID: REAL_ID,
+      GOOGLE_CLIENT_SECRET: REAL_SECRET,
+    });
+    // 16 bytes: a plausible-looking key that is silently half the required size.
+    process.env.APP_ENCRYPTION_KEY = Buffer.alloc(16, 5).toString("base64");
+    vi.resetModules();
+    const again = (await import("../google-oauth-env")).googleOAuthStatus();
+
+    const key = again.credentials.find((c) => c.name === "APP_ENCRYPTION_KEY");
+    expect(key?.problems.join(" ")).toMatch(/16 bytes.*exactly 32/i);
+    // The failure this warns about happens AFTER Google's consent, so the
+    // message has to say that or it reads as a harmless configuration note.
+    expect(key?.problems.join(" ")).toMatch(/all the way through Google/i);
+    void status;
+  });
+
+  it("passes a correctly sized encryption key without comment", async () => {
+    const status = await statusWith({
+      GOOGLE_CLIENT_ID: REAL_ID,
+      GOOGLE_CLIENT_SECRET: REAL_SECRET,
+    });
+
+    const key = status.credentials.find((c) => c.name === "APP_ENCRYPTION_KEY");
+    expect(key?.present).toBe(true);
+    expect(key?.problems).toEqual([]);
+    // Never described beyond its size: unlike a client secret it has no vendor
+    // prefix worth showing, and nothing about its content belongs on a screen.
+    expect(key?.prefix).toBe("");
+  });
+
   /**
    * THE LOAD-BEARING TEST. Everything above is convenience; this is the reason
    * shape reporting is safe to put on a screen at all. Serialise the whole

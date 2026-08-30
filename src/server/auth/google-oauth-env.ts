@@ -109,6 +109,7 @@ export function googleOAuthStatus(): GoogleOAuthStatusDTO {
     credentials: [
       describeCredential("GOOGLE_CLIENT_ID", "clientId"),
       describeCredential("GOOGLE_CLIENT_SECRET", "secret"),
+      describeEncryptionKey(),
     ],
   };
 }
@@ -176,6 +177,51 @@ function describeCredential(name: string, expectation: "clientId" | "secret"): C
     prefix: expectation === "clientId" ? trimmed : prefix,
     problems,
   };
+}
+
+/**
+ * Whether the AES key can actually encrypt, not merely whether it is set.
+ *
+ * `isGoogleOAuthConfigured()` asks only whether this variable is non-empty,
+ * while `requireEncryptionKey()` insists it decodes to exactly 32 bytes — and
+ * that second check runs at the END of the connect flow, after Google's consent
+ * and after a successful token exchange. So a key that is set but malformed
+ * reports as configured, survives the whole approval, and fails on the last
+ * write: the same shape of late failure as a stale client secret, arrived at by
+ * a different route.
+ *
+ * That is not hypothetical here. This deployment's key was rotated recently, and
+ * a rotation is exactly when a value gets truncated or pasted with padding lost.
+ *
+ * Byte length only. The key itself is never described beyond whether it is the
+ * right size — unlike a client secret it has no vendor prefix to show, and there
+ * is nothing about its content that a screen has any business reporting.
+ */
+function describeEncryptionKey(): CredentialShapeDTO {
+  const name = "APP_ENCRYPTION_KEY";
+  const rawValue = process.env[name];
+
+  if (!rawValue || rawValue.trim().length === 0) {
+    return { name, present: false, length: 0, prefix: "", problems: [] };
+  }
+
+  const trimmed = rawValue.trim();
+  const problems: string[] = [];
+
+  if (/^["']|["']$/.test(trimmed)) {
+    problems.push("Starts or ends with a quotation mark. Paste the value on its own, without quotes.");
+  }
+
+  const decodedBytes = Buffer.from(trimmed, "base64").length;
+  if (decodedBytes !== 32) {
+    problems.push(
+      `Decodes to ${decodedBytes} bytes, but AES-256 needs exactly 32. Connecting will get all the ` +
+        "way through Google's screens and then fail when it tries to store the account. Generate a " +
+        'replacement with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'base64\'))"',
+    );
+  }
+
+  return { name, present: true, length: trimmed.length, prefix: "", problems };
 }
 
 export interface GoogleOAuthConfig {
