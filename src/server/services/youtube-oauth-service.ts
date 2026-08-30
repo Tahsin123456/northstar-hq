@@ -7,7 +7,13 @@ import { AppError, errors, toAppError } from "@/server/errors";
 import { authEnv, resolveAppUrl } from "@/server/auth/auth-env";
 import { decryptSecret, encryptSecret } from "@/server/auth/crypto";
 import { requireGoogleOAuthConfig } from "@/server/auth/google-oauth-env";
-import type { ChannelDataSource, OwnChannelDTO, YouTubeConnectionDTO } from "@/lib/dto";
+import type {
+  ChannelDataSource,
+  OwnChannelDTO,
+  YouTubeConnectionChannelDTO,
+  YouTubeConnectionDTO,
+} from "@/lib/dto";
+import { youtubeChannelUrl } from "@/lib/format";
 import { upsertChannel, type ChannelCredential } from "./channel-sync";
 import { getCurrentOrgId } from "./user-service";
 import type { RawChannelItem, RawListResponse, RawThumbnails, YouTubeChannel } from "./youtube/types";
@@ -1052,6 +1058,22 @@ const CONNECTION_DTO_SELECT = {
   nextSyncAt: true,
   createdAt: true,
   connectedBy: { select: { name: true, email: true } },
+  /**
+   * Every channel this grant covers, not just the one the row is keyed on.
+   *
+   * Joined rather than fetched from Google. `listOwnChannels` asks Google live
+   * and is the right source for "what could be ADDED", but it answers only for
+   * connections that can still mint a token — so it says nothing at all about a
+   * `needs_reauth` account, which on this screen is the one whose coverage a
+   * reader most needs to see. It also spends one Data API call per connection
+   * per page load. These rows cost nothing and survive a broken grant.
+   */
+  coveredChannels: {
+    select: { youtubeChannelId: true, title: true, confirmedAt: true },
+    // Oldest confirmation first, so the list does not reshuffle between loads
+    // and a re-confirmed channel does not jump to the top of somebody's card.
+    orderBy: { confirmedAt: "asc" },
+  },
 } as const;
 
 interface ConnectionRow {
@@ -1074,11 +1096,162 @@ interface ConnectionRow {
   readonly nextSyncAt: Date | null;
   readonly createdAt: Date;
   readonly connectedBy: { name: string | null; email: string | null } | null;
+  readonly coveredChannels: readonly {
+    youtubeChannelId: string;
+    title: string | null;
+    confirmedAt: Date;
+  }[];
 }
 
-function toConnectionDTO(row: ConnectionRow): YouTubeConnectionDTO {
+/**
+ * The display facts a covered channel gets from the globally deduplicated
+ * `Channel` row, when one exists.
+ *
+ * The coverage table stores a title and nothing else, by design — it is a
+ * statement about a GRANT, not a copy of a channel. But `upsertChannel` runs in
+ * both paths that write coverage, so a `Channel` row keyed on the same YouTube
+ * id is there for every channel that got as far as being tracked, carrying the
+ * avatar and handle that let a reader recognise it. Optional throughout: a
+ * coverage row whose channel was never synced still has to render, with a name
+ * and nothing more.
+ *
+ * IDENTITY ONLY, AND THAT LIMIT IS THE POINT. `Channel.youtubeChannelId` is
+ * `@unique` globally rather than per organisation, so this single row is shared
+ * with every other workspace that tracks the same channel, and `upsertChannel`
+ * (channel-sync.ts) rewrites it from whichever workspace synced most recently —
+ * a workspace with no connection to this account included, running on the
+ * shared public API key (`options.credential ?? { source: "public" }`). Nothing
+ * on the row records which credential last wrote it.
+ *
+ * Name, handle and avatar survive that: they are the same strings whichever
+ * credential read them, and a stale one is a cosmetic wrong label on a row
+ * whose YouTube id — the identifier this card actually asserts — is read from
+ * the coverage table and cannot be touched by another workspace. A subscriber
+ * count does not survive it. It is a measurement, it differs by credential and
+ * by freshness, and putting it here would print another workspace's public-key
+ * number under this card's sentence about this account's own authorisation.
+ * `ChannelDTO` carries `dataSource` precisely so numbers are never shown
+ * without that provenance, and there is no honest `dataSource` to attach here:
+ * `channelDataSources` reports which credential THIS workspace's next sync
+ * would use, which for a covered channel is "connection" by construction — it
+ * would restate the assumption as a badge rather than check it. So the figures
+ * are not selected at all, and the row links to the channels screen, which owns
+ * that question and answers it with the label attached.
+ */
+interface CoveredChannelFacts {
+  readonly title: string;
+  readonly handle: string | null;
+  readonly avatarUrl: string | null;
+}
+
+/**
+ * The channels one connection covers, merged from the two places that know.
+ *
+ * TWO SOURCES, AND THEY OVERLAP BY CONSTRUCTION. The connection's own
+ * `youtubeChannelId` column and its first coverage row are written in
+ * consecutive statements by `linkConnectionToTrackedChannel`, so the primary
+ * channel is normally in both. The merge is keyed on the YouTube id for that
+ * reason: a naive concatenation renders the studio's main channel twice and
+ * makes one account look like two.
+ *
+ * The column is still read rather than trusting coverage alone, because a
+ * deployment whose backfill has not run — every local SQLite database, since
+ * `db push` applies the schema and never the migration SQL — has connections
+ * with no coverage rows at all. Dropping the column would blank those cards.
+ *
+ * Titles prefer the synced `Channel` row over the coverage row's captured
+ * title, so a renamed channel is not called one thing here and another on the
+ * channels screen. The connection's `channelTitle` is used ONLY for the primary
+ * channel: it names the channel the connection row is keyed on, so applying it
+ * to a second channel from the same account would name the wrong channel.
+ */
+function toCoveredChannelDTOs(
+  row: ConnectionRow,
+  facts: ReadonlyMap<string, CoveredChannelFacts>,
+): readonly YouTubeConnectionChannelDTO[] {
+  const build = (
+    youtubeChannelId: string,
+    coverageTitle: string | null,
+    confirmedAt: Date | null,
+  ): YouTubeConnectionChannelDTO => {
+    const known = facts.get(youtubeChannelId);
+    const isPrimary = youtubeChannelId === row.youtubeChannelId;
+    return {
+      youtubeChannelId,
+      title: known?.title ?? coverageTitle ?? (isPrimary ? row.channelTitle : null),
+      handle: known?.handle ?? null,
+      avatarUrl: known?.avatarUrl ?? null,
+      channelUrl: youtubeChannelUrl(known?.handle ?? null, youtubeChannelId),
+      isPrimary,
+      confirmedAt: confirmedAt?.getTime() ?? null,
+    };
+  };
+
+  const covered = row.coveredChannels.map((channel) =>
+    build(channel.youtubeChannelId, channel.title, channel.confirmedAt),
+  );
+
+  const keyed =
+    row.youtubeChannelId !== null &&
+    !covered.some((channel) => channel.youtubeChannelId === row.youtubeChannelId)
+      ? [build(row.youtubeChannelId, row.channelTitle, null)]
+      : [];
+
+  // Primary first. It is the channel the account was connected as and the one
+  // the owner is looking for; ordering by confirmation time alone would bury it
+  // under channels added later.
+  return [...keyed, ...covered].sort(
+    (a, b) => Number(b.isPrimary) - Number(a.isPrimary),
+  );
+}
+
+/**
+ * The `Channel` rows for every channel these connections cover, by YouTube id.
+ *
+ * One query for the whole page rather than one per connection. `Channel` is the
+ * globally deduplicated row shared with competitor tracking and so is not
+ * org-scoped — the scoping here is that every id fed to it came out of a
+ * connection row already filtered to one workspace, so no other workspace's
+ * connections can put an id into this query.
+ */
+async function coveredChannelFacts(
+  rows: readonly ConnectionRow[],
+): Promise<ReadonlyMap<string, CoveredChannelFacts>> {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (row.youtubeChannelId !== null) ids.add(row.youtubeChannelId);
+    for (const channel of row.coveredChannels) ids.add(channel.youtubeChannelId);
+  }
+  if (ids.size === 0) return new Map();
+
+  const channels = await prisma.channel.findMany({
+    where: { youtubeChannelId: { in: [...ids] } },
+    // Identity columns only. The counters are deliberately not selected — see
+    // `CoveredChannelFacts` for why a figure off this globally shared row would
+    // be unprovenanced on this particular card.
+    select: {
+      youtubeChannelId: true,
+      title: true,
+      handle: true,
+      avatarUrl: true,
+    },
+  });
+
+  return new Map(channels.map((channel) => [channel.youtubeChannelId, channel]));
+}
+
+function toConnectionDTO(
+  row: ConnectionRow,
+  /**
+   * Defaults to empty rather than to "look it up", following the house rule for
+   * an optional relation: a caller that has not joined the channels still gets
+   * a correct DTO — names only — instead of a silent extra query per row.
+   */
+  facts: ReadonlyMap<string, CoveredChannelFacts> = new Map(),
+): YouTubeConnectionDTO {
   return {
     id: row.id,
+    coveredChannels: toCoveredChannelDTOs(row, facts),
     googleAccountEmail: row.googleAccountEmail,
     channelTitle: row.channelTitle,
     youtubeChannelId: row.youtubeChannelId,
@@ -1112,7 +1285,7 @@ async function getConnectionDTO(
     select: CONNECTION_DTO_SELECT,
   });
   if (!row) throw errors.notFound("YouTube connection");
-  return toConnectionDTO(row);
+  return toConnectionDTO(row, await coveredChannelFacts([row]));
 }
 
 /**
@@ -1130,7 +1303,10 @@ export async function listConnections(
     orderBy: { createdAt: "asc" },
     select: CONNECTION_DTO_SELECT,
   });
-  return rows.map(toConnectionDTO);
+  // One lookup for the whole page. Passed explicitly rather than read inside
+  // the mapper so `rows.map` cannot turn into a query per connection.
+  const facts = await coveredChannelFacts(rows);
+  return rows.map((row) => toConnectionDTO(row, facts));
 }
 
 export interface DisconnectResult {

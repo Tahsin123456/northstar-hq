@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { YouTubeConnectionDTO } from "@/lib/dto";
 import {
+  coveredChannelsState,
   grantsRevenueScope,
   isHealthy,
   missingConfigSummary,
@@ -35,6 +36,20 @@ function connection(overrides: Partial<YouTubeConnectionDTO> = {}): YouTubeConne
     googleAccountEmail: "studio@northstar.test",
     channelTitle: "Northstar Shorts",
     youtubeChannelId: "UC_northstar",
+    // The one channel a freshly connected account has. Nothing in this file
+    // reads the list; it is here because the DTO is exact, and a fixture that
+    // drifts from the type is a test that stops compiling for the wrong reason.
+    coveredChannels: [
+      {
+        youtubeChannelId: "UC_northstar",
+        title: "Northstar Shorts",
+        handle: "@northstar",
+        avatarUrl: null,
+        channelUrl: "https://www.youtube.com/@northstar",
+        isPrimary: true,
+        confirmedAt: 1_700_000_000_000,
+      },
+    ],
     scope:
       "https://www.googleapis.com/auth/youtube.readonly " +
       "https://www.googleapis.com/auth/yt-analytics.readonly " +
@@ -383,6 +398,106 @@ describe("ownChannelPickerState", () => {
 
     expect(state.id).toBe("offering");
     expect(state.title).toMatch(/^1 channel /);
+  });
+});
+
+/**
+ * THE CONNECTION CARD'S CHANNEL LIST, AND ESPECIALLY ITS EMPTY CASE.
+ *
+ * The owner connected an account and could not see the channel on Admin →
+ * YouTube. Whatever else this list does, the sentence over an empty one has to
+ * distinguish three situations that need three different actions: this account
+ * genuinely owns no channel, this account's authorisation has died, and the
+ * screen has simply not been told. A bare "No channels" reads as the last one
+ * whichever is true, which is why the copy is decided here and tested.
+ */
+describe("coveredChannelsState", () => {
+  it("explains an empty list on a working connection instead of just saying none", () => {
+    const state = coveredChannelsState({ channelCount: 0, healthy: true });
+
+    expect(state.id).toBe("none_confirmed");
+    // States that the connection itself is fine, so nobody spends an afternoon
+    // reconnecting a healthy account looking for a fault that is not there.
+    expect(state.body).toMatch(/authorisation itself worked/i);
+    // And names the one action that would change the answer.
+    expect(state.body).toMatch(/reconnect the account/i);
+  });
+
+  it("gives a broken connection the different reason and the same action", () => {
+    const state = coveredChannelsState({ channelCount: 0, healthy: false });
+
+    expect(state.id).toBe("none_confirmed");
+    // NOT "the authorisation worked": here it demonstrably has not, and saying
+    // so would be the screen contradicting the red badge above it.
+    expect(state.body).not.toMatch(/authorisation itself worked/i);
+    expect(state.body).toMatch(/stopped working/i);
+    expect(state.body).toMatch(/reconnect it/i);
+  });
+
+  it("counts the channels, singular and plural", () => {
+    expect(coveredChannelsState({ channelCount: 1, healthy: true }).title).toBe(
+      "1 channel confirmed on this account",
+    );
+    expect(coveredChannelsState({ channelCount: 3, healthy: true }).title).toBe(
+      "3 channels confirmed on this account",
+    );
+  });
+
+  /**
+   * The count is a fact about the GRANT's confirmations, not about the account.
+   *
+   * Connecting records exactly one coverage row — the callback links
+   * `fetchOwnChannel`, i.e. `fetchOwnChannels(...)[0] ?? null` — so an account
+   * owning three channels sits at a count of one until the other two are added.
+   * "Channel on this account" would state that one as a fact about the account,
+   * which is the same confident quarter-truth the old singular "Channel" field
+   * was removed for; the hedge is what makes the heading true at a count of one.
+   */
+  it("hedges the count as confirmations rather than as what the account owns", () => {
+    for (const channelCount of [1, 2, 5]) {
+      for (const healthy of [true, false]) {
+        expect(coveredChannelsState({ channelCount, healthy }).title).toMatch(/confirmed/i);
+      }
+    }
+
+    // The same word the empty heading uses, so the two do not read as claims of
+    // different strengths about the same thing.
+    expect(coveredChannelsState({ channelCount: 0, healthy: true }).title).toMatch(/confirmed/i);
+  });
+
+  /**
+   * No figure is displayed on this card, so no copy on it may vouch for one.
+   *
+   * The channel names and avatars come from the globally shared `Channel` row,
+   * which another workspace's public-API-key sync can rewrite; the counts were
+   * dropped for exactly that reason. A sentence promising the reader that "these
+   * figures" are connection-sourced would re-create the claim the removal was
+   * meant to retire. The copy talks about what REACHES the channels — the grant
+   * — which is what these rows actually know.
+   */
+  it("makes its provenance claim about the grant, never about displayed figures", () => {
+    const healthy = coveredChannelsState({ channelCount: 2, healthy: true }).body;
+
+    expect(healthy).toMatch(/public API/i);
+    expect(healthy).not.toMatch(/figures/i);
+
+    // The broken card may still say the CHANNELS are frozen — that is a fact
+    // about syncing, not a claim about a number printed beside it.
+    expect(coveredChannelsState({ channelCount: 2, healthy: false }).body).not.toMatch(
+      /their figures/i,
+    );
+  });
+
+  it("only sends somebody to add a channel while the grant can still do it", () => {
+    // Adding an own channel asks Google what the account owns and refuses
+    // anything it will not confirm, so on a dead grant that instruction points
+    // at a button that cannot work. The broken card says reconnect instead.
+    expect(coveredChannelsState({ channelCount: 2, healthy: true }).body).toMatch(
+      /add them from the\s+Channels page/i,
+    );
+    expect(coveredChannelsState({ channelCount: 2, healthy: false }).body).not.toMatch(
+      /Channels page/i,
+    );
   });
 });
 

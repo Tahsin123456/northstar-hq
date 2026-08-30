@@ -352,6 +352,92 @@ export function ownChannelPickerState(input: {
   };
 }
 
+/** What the per-connection channel list should say above itself. */
+export type CoveredChannelsStateId = "covered" | "none_confirmed";
+
+export interface CoveredChannelsState {
+  readonly id: CoveredChannelsStateId;
+  /** The heading over the list, or over the space where it would be. */
+  readonly title: string;
+  /**
+   * The sentence underneath. Never null: every one of these four states has
+   * something true worth saying, and the state this was written for is the one
+   * where the list is empty and silence reads as a screen that failed to load.
+   */
+  readonly body: string;
+}
+
+/**
+ * The copy above a connection's channel list.
+ *
+ * WHY THE EMPTY CASE IS THE POINT OF THIS FUNCTION. Admin → YouTube used to
+ * name exactly one channel per connection — the one the row is keyed on — so an
+ * owner who had just connected an account and saw nothing had no way to tell
+ * apart "the connection is fine and this account genuinely owns no channel",
+ * "the channel is there and the screen only shows one", and "something is
+ * broken". Those need three different actions, and a bare "No channels" reads
+ * as the third whichever one is true.
+ *
+ * The healthy/broken split matters for the same reason. Advising somebody to
+ * add a channel from the Channels page is only sound advice while the grant can
+ * still mint a token: adding a channel asks Google what the account owns and
+ * refuses anything it does not confirm, so on a dead grant that instruction
+ * sends the owner to a button that cannot work. Reconnecting is the action
+ * there, and it is a different sentence.
+ *
+ * Pure, and here rather than in the component, for the reason
+ * `ownChannelPickerState` gives: it is a judgement about what is true rather
+ * than about layout, and this way it can be tested without rendering anything.
+ */
+export function coveredChannelsState(input: {
+  /** How many channels this connection is known to cover. */
+  readonly channelCount: number;
+  /** Whether the grant still works — `isHealthy(connection)`. */
+  readonly healthy: boolean;
+}): CoveredChannelsState {
+  const { channelCount, healthy } = input;
+
+  if (channelCount === 0) {
+    return {
+      id: "none_confirmed",
+      title: "No channel confirmed on this account",
+      body: healthy
+        ? "The authorisation itself worked — YouTube simply reported no channel for this Google " +
+          "account when it was connected, which is normal for an account that has only ever " +
+          "watched. If it does own a channel, or one has been created since, reconnect the " +
+          "account and the channel will be picked up."
+        : "This account's authorisation stopped working before any channel was confirmed, so " +
+          "there is nothing to list yet. Reconnect it to find out which channels it covers.",
+    };
+  }
+
+  return {
+    id: "covered",
+    /**
+     * "Confirmed", never a bare count, and for the reason this whole ticket
+     * exists. Connecting an account records ONE coverage row — the callback
+     * links `fetchOwnChannel`, which is `fetchOwnChannels(...)[0] ?? null` — so
+     * an account that owns three channels sits at a count of one until somebody
+     * adds the others. A heading reading "Channel on this account" would state
+     * that count as a fact about the ACCOUNT, which is the same confident
+     * quarter-truth the singular "Channel" field was removed for. What is
+     * actually known is how many have been confirmed, so that is what it says,
+     * in the vocabulary the empty heading below already uses.
+     */
+    title:
+      channelCount === 1
+        ? "1 channel confirmed on this account"
+        : `${channelCount} channels confirmed on this account`,
+    body: healthy
+      ? "This account's own authorisation is what reaches them — none of them falls back to the " +
+        "public API. Only channels confirmed against the grant are listed, so if the account owns " +
+        "others, add them from the Channels page and they will be reached the same way."
+      : "This is what was confirmed before the authorisation stopped working. These channels are " +
+        "frozen at their last successful sync rather than falling back to the public API; " +
+        "reconnect the account to start them again.",
+  };
+}
+
 /** Names the missing variables in the order the admin should set them. */
 export function missingConfigSummary(google: GoogleOAuthStatusDTO): string | null {
   if (google.configured || google.missing.length === 0) return null;

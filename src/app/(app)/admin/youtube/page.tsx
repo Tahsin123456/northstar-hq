@@ -33,9 +33,10 @@ import {
 } from "@/components/ui/dialog";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Avatar } from "@/components/ui/avatar";
 import { useSession } from "@/components/providers/session-provider";
 import { ConnectScopeFacts } from "@/components/youtube/connect-scope-facts";
-import { youTubeSetupState } from "@/lib/youtube/connection-state";
+import { coveredChannelsState, isHealthy, youTubeSetupState } from "@/lib/youtube/connection-state";
 import { useNow } from "@/hooks/use-now";
 import {
   useDisconnectYouTube,
@@ -43,7 +44,11 @@ import {
   useYouTubeConnections,
   YOUTUBE_CONNECT_PATH,
 } from "@/hooks/use-youtube-connections";
-import type { GoogleOAuthStatusDTO, YouTubeConnectionDTO } from "@/lib/dto";
+import type {
+  GoogleOAuthStatusDTO,
+  YouTubeConnectionChannelDTO,
+  YouTubeConnectionDTO,
+} from "@/lib/dto";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -459,25 +464,16 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
 
         <RevenueNotice connection={connection} />
 
-        <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border px-4 py-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="Channel">
-            {connection.youtubeChannelId ? (
-              <a
-                href={`https://www.youtube.com/channel/${connection.youtubeChannelId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-accent underline-offset-2 hover:underline"
-              >
-                <span className="truncate">{connection.channelTitle ?? "Open on YouTube"}</span>
-                <ExternalLink className="size-3 shrink-0" />
-              </a>
-            ) : (
-              // Never invented: an account can authorise access and own no
-              // channel at all, which is a real state rather than missing data.
-              <span className="text-subtle-foreground">This account owns no channel</span>
-            )}
-          </Field>
+        {/*
+          Which channels this account covers — the thing this card exists to
+          answer and did not. There is deliberately no "Channel" field in the
+          list below any more: it named the one channel the connection row is
+          keyed on, which for an account owning three is a quarter of the truth
+          stated with total confidence.
+        */}
+        <CoveredChannels connection={connection} />
 
+        <dl className="grid gap-x-6 gap-y-3 border-t border-border px-4 py-3 sm:grid-cols-2 lg:grid-cols-4">
           {/*
             "Last successful", and the adjective is load-bearing. This column is
             written by BOTH things that spend the grant — the channel sync and
@@ -608,6 +604,117 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
         onOpenChange={setConfirmOpen}
       />
     </>
+  );
+}
+
+/**
+ * Every channel one connection covers.
+ *
+ * THE BUG THIS REPAIRS. A connection row is keyed on a single channel, so this
+ * card named a single channel — but one Google account can own several, and the
+ * grant covers all of them. An owner who had just connected an account was
+ * therefore reading a card that could not tell them what they had connected.
+ *
+ * The list comes from the connection itself (`coveredChannels` on the DTO),
+ * merged server-side from the connection's own column and the coverage table.
+ * Deliberately NOT from /api/youtube/own-channels, which asks Google live: that
+ * endpoint answers only for connections that can still mint a token, so on this
+ * screen — the one place a broken connection is diagnosed — it would leave the
+ * cards that most need a channel list showing none, and it would spend one Data
+ * API call per connection on every load.
+ */
+function CoveredChannels({ connection }: { connection: YouTubeConnectionDTO }) {
+  const channels = connection.coveredChannels;
+  const state = coveredChannelsState({
+    channelCount: channels.length,
+    healthy: isHealthy(connection),
+  });
+
+  return (
+    <div className="mt-4 border-t border-border px-4 py-3">
+      {/*
+        A {title, body} pair out of `connection-state` gets this page's heading
+        treatment — 13px medium foreground over a muted paragraph, as in
+        `SetupCard` and `connect-youtube-panel`'s picker — not the 10px uppercase
+        micro-label used for field names like "Permissions granted". The empty
+        state is the reason it matters: "No channel confirmed on this account" is
+        the answer a confused owner came to this card for, and in the label style
+        it reads as a column header for a table that failed to load.
+      */}
+      <h3 className="text-[13px] font-medium text-foreground">{state.title}</h3>
+      <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">{state.body}</p>
+
+      {channels.length > 0 ? (
+        <ul className="mt-3 flex flex-col gap-2.5">
+          {channels.map((channel) => (
+            <CoveredChannelRow
+              key={channel.youtubeChannelId}
+              channel={channel}
+              // Only worth marking when there is something to distinguish it
+              // from: on a single-channel account the badge would label the
+              // only row on the card.
+              showPrimary={channels.length > 1}
+            />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function CoveredChannelRow({
+  channel,
+  showPrimary,
+}: {
+  channel: YouTubeConnectionChannelDTO;
+  showPrimary: boolean;
+}) {
+  return (
+    <li className="flex items-center gap-2.5">
+      {/* `title` can be null — a coverage row written without one, for a channel
+          that has never been synced — so the avatar's initials fall back to the
+          YouTube id rather than rendering blank. */}
+      <Avatar src={channel.avatarUrl} name={channel.title ?? channel.youtubeChannelId} size={28} />
+
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <a
+            href={channel.channelUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-w-0 items-center gap-1 text-[13px] text-accent underline-offset-2 hover:underline"
+          >
+            <span className="truncate">
+              {/* Stated, not invented. The link still works — it is built from
+                  the channel id — and clicking through is how somebody finds out
+                  which channel this is. */}
+              {channel.title ?? "Name not recorded yet"}
+            </span>
+            <ExternalLink className="size-3 shrink-0" />
+          </a>
+
+          {showPrimary && channel.isPrimary ? (
+            <Badge variant="neutral" size="sm" className="shrink-0 tracking-wider">
+              Main
+            </Badge>
+          ) : null}
+        </div>
+
+        {/*
+          Identity, not size. There is deliberately no subscriber count on this
+          row: the only place to read one from is the globally shared `Channel`
+          table, which any workspace tracking the same channel as a competitor
+          rewrites from the public API key, and printing that under a heading
+          about this account's own authorisation is exactly the thing this
+          feature must not do. Numbers with their provenance attached are the
+          channels screen's job, and this card's job is which channels the grant
+          covers.
+        */}
+        <div className="truncate text-[11px] text-subtle-foreground">
+          {channel.handle ?? channel.youtubeChannelId}
+        </div>
+      </div>
+    </li>
   );
 }
 

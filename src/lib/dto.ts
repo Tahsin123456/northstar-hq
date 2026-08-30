@@ -895,6 +895,62 @@ export interface NoteWithContextDTO extends NoteDTO {
 }
 
 /**
+ * One channel a connection's grant provably covers.
+ *
+ * WHY THIS IS A LIST AND NOT THE SINGLE `channelTitle` BELOW. A connection row
+ * is keyed on exactly one channel — the one Google scoped the consent to — but
+ * one Google account can own several, and `YouTubeConnectionChannel` is the
+ * record of which ones this grant was actually shown to own. The admin screen
+ * used to render the keyed channel alone, so an account covering three channels
+ * read as an account covering one, and the two extra channels were named
+ * nowhere on the screen that exists to say what a connection can reach.
+ *
+ * Read from stored rows rather than from Google, unlike `OwnChannelDTO`: this
+ * has to be answerable for a connection whose grant has stopped working, which
+ * is precisely the connection whose reader most needs to know which channels
+ * went dark with it.
+ *
+ * IDENTITY ONLY — NO FIGURES, DELIBERATELY. This carries what names a channel
+ * (title, handle, avatar, link) and nothing that measures one. Every other
+ * own-channel surface pairs its numbers with `ChannelDTO.dataSource`, because a
+ * `Channel` row is globally deduplicated (`youtubeChannelId @unique`, not
+ * org-scoped) and `upsertChannel` writes it from whichever workspace synced
+ * last — including a workspace with no connection, whose sync runs on the
+ * shared public API key. A subscriber count copied out of that row onto THIS
+ * card could therefore be a public-key figure sitting under a sentence about
+ * this account's own authorisation, which is the one thing this feature was
+ * told not to do. The card's question is "which channels does this grant
+ * cover", not "how big are they" — the channels screen answers the second one,
+ * with the provenance label attached.
+ */
+export interface YouTubeConnectionChannelDTO {
+  readonly youtubeChannelId: string;
+  /**
+   * Null when the coverage row was written without one and the channel has
+   * never been synced. Rendered as the stated absence it is rather than as an
+   * invented name.
+   */
+  readonly title: string | null;
+  readonly handle: string | null;
+  readonly avatarUrl: string | null;
+  readonly channelUrl: string;
+  /**
+   * True for the one channel the connection ROW is keyed on — the channel the
+   * account was connected as, and the only one a fresh connection has.
+   */
+  readonly isPrimary: boolean;
+  /**
+   * When Google last confirmed this grant covers this channel, epoch ms.
+   *
+   * Null for a channel known only from the connection's own column, which is
+   * the state of every connection a deployment made before the coverage table
+   * existed and the backfill did not reach. Null therefore means "not recorded",
+   * never "not confirmed".
+   */
+  readonly confirmedAt: number | null;
+}
+
+/**
  * A connected Google account, as the admin screen is allowed to see it.
  *
  * The absence of every token field is structural, not a filtering step:
@@ -906,8 +962,27 @@ export interface YouTubeConnectionDTO {
   readonly id: string;
   /** Which Google account granted access — whose authorisation a sync depends on. */
   readonly googleAccountEmail: string | null;
+  /**
+   * The ONE channel this connection row is keyed on. Kept because the unique
+   * key and every Analytics call are built on it — but it is not the answer to
+   * "which channels does this account cover", which is `coveredChannels`.
+   */
   readonly channelTitle: string | null;
   readonly youtubeChannelId: string | null;
+  /**
+   * Every channel this grant covers, primary first, then in the order Google
+   * confirmed them.
+   *
+   * Deduplicated on the YouTube id: the primary channel is normally BOTH the
+   * connection's own column and a coverage row, because
+   * `linkConnectionToTrackedChannel` writes the two in consecutive statements,
+   * and listing it twice would read as two channels.
+   *
+   * Empty is a real and honest state — an account can authorise access and own
+   * no channel — so the screen states that rather than showing a blank area
+   * under a green "connected" badge.
+   */
+  readonly coveredChannels: readonly YouTubeConnectionChannelDTO[];
   /**
    * Space-separated scopes Google actually granted. Surfaced so a downgraded
    * grant (the user unticking a box on the consent screen) is visible here
