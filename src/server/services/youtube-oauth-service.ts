@@ -361,6 +361,47 @@ function toTokenSet(body: GoogleTokenBody): GoogleTokenSet {
 }
 
 /**
+ * Asks Google whether this deployment's client id and secret are a valid pair,
+ * BEFORE sending anybody through the consent screens.
+ *
+ * WHY THIS IS WORTH A ROUND TRIP. A rejected client is indistinguishable from a
+ * working one until the very last step: Google renders consent from the client
+ * id alone, so a stale secret produces an unverified-app warning, an account
+ * chooser, a second warning, a permission list, and a Continue — and only then
+ * fails. Every single retry costs all of that. Checking first turns a five-screen
+ * dead end into one sentence on the page they are already looking at.
+ *
+ * HOW. It sends a deliberately invalid authorization code. Google validates the
+ * CLIENT before the code, so the error names which half is wrong:
+ *   `invalid_client` — the pair is bad, and consent cannot possibly succeed.
+ *   `invalid_grant`  — the pair is fine; only the fake code was refused.
+ * A fake code can grant nothing, so this consumes and changes nothing.
+ *
+ * FAILS OPEN, deliberately. Only an explicit `invalid_client` reports false.
+ * A timeout, an outage or an unrecognised error returns true and lets the real
+ * flow proceed: blocking a working connection because a probe could not reach
+ * Google would be a worse failure than the one this prevents, and the real
+ * exchange is still the authority.
+ */
+export async function clientCredentialsAccepted(): Promise<boolean> {
+  const { clientId, clientSecret } = requireGoogleOAuthConfig();
+
+  try {
+    const result = await postToTokenEndpoint({
+      code: "preflight-probe-not-a-real-code",
+      client_id: clientId,
+      client_secret: clientSecret,
+      redirect_uri: googleOAuthRedirectUri(),
+      grant_type: "authorization_code",
+    });
+
+    return result.body.error !== "invalid_client";
+  } catch {
+    return true;
+  }
+}
+
+/**
  * What to tell an administrator when Google refuses the code exchange.
  *
  * Exported for tests: the mapping is the whole value of this function, and a

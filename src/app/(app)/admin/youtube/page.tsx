@@ -1476,6 +1476,22 @@ function readOutcome(params: Pick<URLSearchParams, "get">): Outcome | null {
         title: "Google OAuth is not configured on this deployment",
         body: "The connect flow cannot start until the environment variables below are set and the server is restarted.",
       };
+    /*
+     * Raised BEFORE the consent screens rather than after them. The whole point
+     * is that this is the one message that arrives without costing five pages of
+     * Google, so it has to carry the fix rather than an apology.
+     */
+    case "credentials_rejected":
+      return {
+        tone: "danger",
+        title: "Google will not accept this deployment's credentials",
+        body:
+          "You were not sent to Google, because the sign-in could not have succeeded: the client ID " +
+          "and secret are not a valid pair. This usually means the secret was replaced in the Google " +
+          "console, or generated on a different OAuth client or a different Cloud project. Open the " +
+          "credentials detail below, check the Cloud project it names, and add a fresh secret to that " +
+          "exact client.",
+      };
     default:
       return {
         tone: "danger",
