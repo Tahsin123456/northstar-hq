@@ -1071,6 +1071,46 @@ export interface GoogleOAuthStatusDTO {
    * it cannot be derived, which is itself the thing the admin must fix.
    */
   readonly redirectUri: string | null;
+  /**
+   * Whether the configured credentials LOOK like Google credentials.
+   *
+   * "Configured" only ever meant "the variable is non-empty", which is a much
+   * weaker claim than it reads as: a secret pasted with its surrounding quotes,
+   * or with `GOOGLE_CLIENT_SECRET=` still attached, or a value replaced in the
+   * Google console months ago, all satisfy it. Every one of those then fails at
+   * the very END of the consent flow — Google builds the consent screen from
+   * the client id alone, so the approval looks perfect and only the exchange
+   * behind it is refused.
+   *
+   * That left no way to inspect what the deployment actually holds. This is
+   * that way. It reports shape only, never the value.
+   */
+  readonly credentials: readonly CredentialShapeDTO[];
+}
+
+/**
+ * A described-but-never-disclosed credential.
+ *
+ * Safe to serialise to an admin screen: the length of a secret and the fixed
+ * vendor prefix every Google secret shares (`GOCSPX-`) narrow nothing, and the
+ * problems listed are about punctuation the person accidentally included. The
+ * VALUE is never carried on this object, so no future consumer can render it by
+ * accident.
+ */
+export interface CredentialShapeDTO {
+  /** The environment variable, so the fix names the thing to edit. */
+  readonly name: string;
+  readonly present: boolean;
+  readonly length: number;
+  /**
+   * The leading characters, only ever from a fixed, non-secret vendor prefix
+   * (`GOCSPX-`) — and empty unless the value starts with one. A value that does
+   * NOT begin with a known prefix has nothing shown, because there the leading
+   * characters would be secret material rather than a vendor constant.
+   */
+  readonly prefix: string;
+  /** Plain-English problems detected in the shape. Empty means it looks right. */
+  readonly problems: readonly string[];
 }
 
 /**

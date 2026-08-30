@@ -289,13 +289,14 @@ describe("missingConfigSummary", () => {
         configured: false,
         missing: ["GOOGLE_CLIENT_ID", "APP_ENCRYPTION_KEY"],
         redirectUri: null,
+        credentials: [],
       }),
     ).toBe("GOOGLE_CLIENT_ID, APP_ENCRYPTION_KEY");
   });
 
   it("says nothing when the deployment is configured", () => {
     expect(
-      missingConfigSummary({ configured: true, missing: [], redirectUri: "https://x/y" }),
+      missingConfigSummary({ configured: true, missing: [], redirectUri: "https://x/y", credentials: [] }),
     ).toBeNull();
   });
 });

@@ -244,6 +244,8 @@ function ConnectPanel({
             see `ConnectScopeFacts`. The read-only promise in particular must not
             exist in two hand-maintained copies. */}
         <ConnectScopeFacts />
+
+        <CredentialShapes google={google} />
       </div>
 
       <ConnectButton
@@ -254,6 +256,73 @@ function ConnectPanel({
         className="shrink-0 self-start lg:self-center"
       />
     </Card>
+  );
+}
+
+/**
+ * What credentials this deployment is actually holding.
+ *
+ * WHY A SCREEN SHOWS THIS AT ALL. `configured` only ever meant "both variables
+ * are non-empty", and a stale client secret satisfies that completely. Google
+ * then builds its consent screen from the client ID alone — so the entire
+ * approval flow succeeds, warning screens and permission list and all, and the
+ * exchange behind it comes back `invalid_client`. From the admin's side the only
+ * visible difference between "wrong secret" and "wrong button" is nothing at
+ * all, and the natural response to a failure that looked like a success is to
+ * try again, forever.
+ *
+ * The client ID is shown whole because it is not a secret — it travels in the
+ * URL of every consent screen — and because seeing it is what makes the common
+ * cause visible: a secret generated on a DIFFERENT OAuth client than the ID
+ * belongs to. Comparing this string against the console settles that in seconds.
+ *
+ * The secret is described and never shown: length, and the `GOCSPX-` prefix that
+ * every Google secret shares. Neither narrows the value.
+ *
+ * Rendered only when something looks wrong or the flow has failed, so a working
+ * deployment is not made to look like a debugging session.
+ */
+function CredentialShapes({ google }: { google: GoogleOAuthStatusDTO }) {
+  const shapes = google.credentials.filter((c) => c.present);
+  if (shapes.length === 0) return null;
+
+  const anyProblem = shapes.some((c) => c.problems.length > 0);
+
+  return (
+    <details className="group rounded-lg border border-border bg-surface-sunken px-3 py-2">
+      <summary className="cursor-pointer list-none text-[11px] text-subtle-foreground marker:content-none">
+        <span className="underline decoration-dotted underline-offset-2">
+          {anyProblem
+            ? "Something looks wrong with this deployment's Google credentials"
+            : "Which Google credentials is this using?"}
+        </span>
+      </summary>
+
+      <div className="mt-2.5 flex flex-col gap-2.5">
+        {shapes.map((credential) => (
+          <div key={credential.name} className="flex flex-col gap-1">
+            <code className="text-[11px] font-medium text-foreground">{credential.name}</code>
+            <span className="break-all text-[11px] text-muted-foreground">
+              {credential.name === "GOOGLE_CLIENT_ID"
+                ? credential.prefix
+                : `${credential.length} characters${credential.prefix ? `, starts ${credential.prefix}` : ""} — value not shown`}
+            </span>
+            {credential.problems.map((problem) => (
+              <span key={problem} className="text-[11px] leading-relaxed text-warning">
+                {problem}
+              </span>
+            ))}
+          </div>
+        ))}
+
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          Both must come from the <em>same</em> OAuth client. If connecting fails with the
+          credentials rejected, open the client with the ID above in the Google console and add
+          a new secret there — a secret replaced in the console keeps working on the consent
+          screen and fails only at the end.
+        </p>
+      </div>
+    </details>
   );
 }
 

@@ -3,7 +3,7 @@ import "server-only";
 import { z } from "zod";
 import { AppError } from "@/server/errors";
 import { authEnv, resolveAppUrl } from "@/server/auth/auth-env";
-import type { GoogleOAuthStatusDTO } from "@/lib/dto";
+import type { CredentialShapeDTO, GoogleOAuthStatusDTO } from "@/lib/dto";
 
 /**
  * Google OAuth client credentials.
@@ -106,6 +106,75 @@ export function googleOAuthStatus(): GoogleOAuthStatusDTO {
     configured: isGoogleOAuthConfigured(),
     missing,
     redirectUri,
+    credentials: [
+      describeCredential("GOOGLE_CLIENT_ID", "clientId"),
+      describeCredential("GOOGLE_CLIENT_SECRET", "secret"),
+    ],
+  };
+}
+
+/**
+ * The fixed vendor prefixes. Constants Google puts on every credential of the
+ * type, so echoing one back reveals nothing about this particular value — and a
+ * value that lacks the expected one is almost always a paste that went wrong.
+ */
+const CREDENTIAL_PREFIXES = ["GOCSPX-"] as const;
+const CLIENT_ID_SUFFIX = ".apps.googleusercontent.com";
+
+/**
+ * Describes a credential without disclosing it.
+ *
+ * Reads the RAW `process.env` value rather than the parsed one on purpose: the
+ * schema trims, so by the time a value reaches `googleOAuthEnv` the leading
+ * newline that came with a copy-paste is gone and the evidence with it. Trimming
+ * is right for USING the value and wrong for explaining it, so this looks at
+ * what was actually set.
+ *
+ * Every branch reports punctuation the person included by accident. None of them
+ * can echo secret material: the prefix is shown only when it matches a known
+ * vendor constant, and the length of a secret constrains nothing.
+ */
+function describeCredential(name: string, expectation: "clientId" | "secret"): CredentialShapeDTO {
+  const rawValue = process.env[name];
+
+  if (!rawValue || rawValue.trim().length === 0) {
+    return { name, present: false, length: 0, prefix: "", problems: [] };
+  }
+
+  const trimmed = rawValue.trim();
+  const problems: string[] = [];
+
+  if (rawValue !== trimmed) {
+    problems.push("Has a space or line break around it, which is ignored — but it often means the value was pasted with something else attached.");
+  }
+  if (/^["']|["']$/.test(trimmed)) {
+    problems.push('Starts or ends with a quotation mark. Paste the value on its own, without quotes around it.');
+  }
+  if (trimmed.startsWith(`${name}=`)) {
+    problems.push(`Starts with "${name}=". Paste only the value, not the name as well.`);
+  }
+
+  if (expectation === "secret") {
+    if (!CREDENTIAL_PREFIXES.some((p) => trimmed.startsWith(p))) {
+      problems.push('Does not start with "GOCSPX-", which every Google client secret does. This is usually the name given to the secret rather than the secret itself, or a value from a different field.');
+    }
+  } else if (!trimmed.endsWith(CLIENT_ID_SUFFIX)) {
+    problems.push(`Does not end with "${CLIENT_ID_SUFFIX}", which every Google client ID does.`);
+  }
+
+  const prefix = CREDENTIAL_PREFIXES.find((p) => trimmed.startsWith(p)) ?? "";
+
+  return {
+    name,
+    present: true,
+    length: trimmed.length,
+    // A client ID is not secret — it is sent in the URL of every consent screen
+    // — so it is shown whole, which is what makes "these two are from different
+    // OAuth clients" visible at a glance. A SECRET only ever reports the vendor
+    // prefix, which is a constant shared by every Google secret and narrows
+    // nothing about this one.
+    prefix: expectation === "clientId" ? trimmed : prefix,
+    problems,
   };
 }
 
