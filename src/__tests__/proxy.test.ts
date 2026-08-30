@@ -56,8 +56,39 @@ describe("unauthenticated visitors", () => {
       "/forgot-password",
       "/reset-password/abc",
       "/invite/abc",
+      // The signed-out documents in src/app/(public). Google rejects an OAuth
+      // app whose homepage or privacy policy redirects a logged-out visitor to
+      // a sign-in screen, so a regression here is not cosmetic: it silently
+      // un-publishes the OAuth app the next time Google re-checks.
+      "/about",
+      "/privacy",
+      "/terms",
     ]) {
       expect(destinationOf(path)).toBeNull();
+    }
+  });
+
+  it("did not widen the allowlist when the public documents were added", () => {
+    // The allowlist matches an entry or anything beneath it, so the risk of
+    // adding to it is an entry that is an ancestor of something gated. These
+    // assert both halves: nothing under the app opened, and a path that merely
+    // begins with the same characters as a public one is not itself public.
+    for (const path of [
+      "/",
+      "/channels",
+      "/channels/abc",
+      "/finance",
+      "/finance/payroll",
+      "/admin",
+      "/admin/people",
+      "/admin/youtube",
+      "/settings",
+      "/earnings",
+      "/aboutus",
+      "/privacy-report",
+      "/termsheet",
+    ]) {
+      expect(destinationOf(path)).not.toBeNull();
     }
   });
 

@@ -34,13 +34,39 @@ import { SESSION_COOKIE_NAME, readSessionCookie } from "@/server/auth/tokens";
  * `export const runtime` here is also a build error.
  */
 
-/** Routes reachable without a session. Everything else requires one. */
+/**
+ * Routes reachable without a session. Everything else requires one.
+ *
+ * This is an allowlist, so the list is the whole of the exposure: a path that
+ * is not named here is redirected to /login. Two rules for adding to it.
+ *
+ * First, `isPublicPath` matches an entry OR anything beneath it, so an entry
+ * must never be an ancestor segment of a gated route. Adding "/admin" would
+ * open /admin/people. The entries below are all leaves with no gated
+ * descendants, which is what makes them safe.
+ *
+ * Second — and this is the part that is easy to get backwards — being on this
+ * list does not make a page public. It only stops the redirect. A page inside
+ * the `(app)` route group still renders through `(app)/layout.tsx`, which
+ * calls getActor() and redirects anyway; that is why "/" could never be listed
+ * here and why the public documents had to live in their own route group
+ * instead. This list stops a redirect; the layout and the DAL are what decide
+ * whether anybody is allowed to see anything.
+ *
+ * The last three are the signed-out documents in `src/app/(public)`. They are
+ * public because Google will not publish an OAuth app whose homepage or
+ * privacy policy sits behind a login, and because a privacy policy nobody can
+ * read is not a privacy policy.
+ */
 const PUBLIC_PATHS = [
   "/login",
   "/setup",
   "/forgot-password",
   "/reset-password",
   "/invite",
+  "/about",
+  "/privacy",
+  "/terms",
 ] as const;
 
 function isPublicPath(pathname: string): boolean {
