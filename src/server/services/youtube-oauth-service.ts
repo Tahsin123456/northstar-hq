@@ -955,6 +955,39 @@ export async function linkConnectionToTrackedChannel(
   // the same channel must not exist twice because one route to it was OAuth.
   const channelRow = await upsertChannel(resolved);
 
+  /*
+   * READABILITY BEFORE OWNERSHIP. These two writes come first, and the order
+   * is the point — `trackOwnChannel` documents the same ordering as
+   * load-bearing, and this path had it backwards.
+   *
+   * `ownershipType: "own"` is a promise that this channel's data comes from the
+   * authorised connection rather than the shared public key, and the sync
+   * enforces it: an own channel with no credential behind it is refused, not
+   * quietly downgraded. So flipping the flag before the grant can actually read
+   * the channel opens a window where a failure — a pool timeout, the function
+   * duration expiring — leaves a channel marked as the studio's own that
+   * nothing is able to sync, and no screen explains why.
+   *
+   * Reversed, the same interruption leaves a channel that is simply not marked
+   * own yet. That is a state the product already handles, and the next connect
+   * completes it.
+   */
+  await prisma.youTubeConnection.update({
+    where: { id: connection.id },
+    data: { youtubeChannelId: resolved.channelId, channelTitle: resolved.title },
+    select: { id: true },
+  });
+
+  // The coverage table is what the credential lookup actually reads. The
+  // connection column above keys the row; this is what makes the channel
+  // READABLE through the grant.
+  await recordCoveredChannel({
+    organizationId: connection.organizationId,
+    connectionId: connection.id,
+    youtubeChannelId: resolved.channelId,
+    title: resolved.title,
+  });
+
   const existing = await prisma.trackedChannel.findUnique({
     where: {
       organizationId_channelId: {
@@ -990,22 +1023,6 @@ export async function linkConnectionToTrackedChannel(
   // has to complete promptly, and a full history walk takes tens of seconds on
   // a large channel. The scheduled refresh picks the new channel up on its next
   // pass, and an admin who cannot wait can refresh it from the channel page.
-
-  await prisma.youTubeConnection.update({
-    where: { id: connection.id },
-    data: { youtubeChannelId: resolved.channelId, channelTitle: resolved.title },
-    select: { id: true },
-  });
-
-  // And in the coverage table, which is what the credential lookup reads. The
-  // connection column above keys the row; this is what makes the channel
-  // READABLE through the grant.
-  await recordCoveredChannel({
-    organizationId: connection.organizationId,
-    connectionId: connection.id,
-    youtubeChannelId: resolved.channelId,
-    title: resolved.title,
-  });
 
   return {
     trackedChannelId: tracking.id,
