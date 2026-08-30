@@ -30,13 +30,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-dvh w-full">
-      {/* --- Desktop sidebar --- */}
-      <aside className="hidden w-[212px] shrink-0 flex-col border-r border-border bg-surface-sunken lg:flex">
-        <div className="flex h-14 items-center px-4">
+      {/* --- Desktop sidebar ---
+
+          PINNED TO THE VIEWPORT, not to the document.
+
+          It used to be a plain column in a `min-h-dvh` row, so it grew to
+          whatever the page was tall — and its footer went with it. On a long
+          channel list that put Settings and the theme toggle thousands of
+          pixels down, reachable only by scrolling past every row of content
+          they have nothing to do with.
+
+          `sticky top-0 h-dvh` fixes the height to the window and holds the
+          column there while the main column scrolls underneath. Sticky rather
+          than `fixed` because the aside stays in the flex row, so the main
+          column's width is still computed from it — a fixed sidebar would be
+          lifted out of flow and the content would slide under it. */}
+      <aside className="sticky top-0 hidden h-dvh w-[212px] shrink-0 flex-col border-r border-border bg-surface-sunken lg:flex">
+        <div className="flex h-14 shrink-0 items-center px-4">
           <BrandMark />
         </div>
-        <div className="flex flex-1 flex-col justify-between px-3 pb-4">
-          <div className="flex flex-col gap-4">
+        <div className="flex min-h-0 flex-1 flex-col justify-between px-3 pb-4">
+          {/* The navigation scrolls INSIDE the sidebar if it ever outgrows the
+              window — on a short laptop screen, or as sections are added. That
+              keeps the overflow local: without `min-h-0` a flex child refuses to
+              shrink below its content, and the footer would be pushed out of
+              the sidebar rather than the list gaining a scrollbar. */}
+          <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
             <SidebarNav />
             <div className="px-1">
               <AddChannelDialog
@@ -51,8 +70,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           {/* The footer: the two controls that change the tool rather than the
               data. Settings sits above the theme toggle because it is the one
-              with a page behind it. */}
-          <div className="flex flex-col gap-0.5">
+              with a page behind it.
+
+              `shrink-0` is what makes "permanently visible" true rather than
+              usually true — without it these two rows are the first thing a
+              cramped column gives up. */}
+          <div className="flex shrink-0 flex-col gap-0.5 pt-2">
             <SidebarFooterNav />
             <ThemeToggle />
           </div>
@@ -92,8 +115,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <X />
             </Button>
           </div>
-          <div className="flex flex-1 flex-col justify-between px-3 pb-4">
-            <div className="flex flex-col gap-4">
+          {/* Same treatment as the desktop column. The drawer is already the
+              height of the window — it is `inset-y-0` inside a fixed overlay —
+              so Settings was never lost here, but a long nav on a short phone
+              would have pushed it past the bottom edge with nothing to scroll.
+              Identical classes on purpose: two sidebars that behave differently
+              under pressure is how one of them quietly regresses. */}
+          <div className="flex min-h-0 flex-1 flex-col justify-between px-3 pb-4">
+            <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
               <SidebarNav onNavigate={() => setMobileOpen(false)} />
               <div className="px-1">
                 <AddChannelDialog
@@ -107,7 +136,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 />
               </div>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="flex shrink-0 flex-col gap-0.5 pt-2">
               <SidebarFooterNav onNavigate={() => setMobileOpen(false)} />
               <ThemeToggle />
             </div>
