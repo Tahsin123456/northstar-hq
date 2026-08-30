@@ -72,10 +72,21 @@ export function googleOAuthRedirectUri(): string {
  */
 export function isGoogleOAuthConfigured(): boolean {
   return (
-    googleOAuthEnv.clientId !== null &&
-    googleOAuthEnv.clientSecret !== null &&
-    authEnv.encryptionKey !== null
+    googleOAuthEnv.clientId !== null && googleOAuthEnv.clientSecret !== null && encryptionKeyUsable()
   );
+}
+
+/**
+ * Whether the key can actually encrypt, not merely whether somebody set it.
+ *
+ * "Non-empty" was the old test, and it let a truncated key through every gate to
+ * fail at the last write — after consent, after the authorization code was
+ * spent. Size is cheap to check and the only property that matters here, so
+ * "configured" now means usable.
+ */
+function encryptionKeyUsable(): boolean {
+  if (authEnv.encryptionKey === null) return false;
+  return Buffer.from(authEnv.encryptionKey, "base64").length === 32;
 }
 
 /**
@@ -89,7 +100,10 @@ export function googleOAuthStatus(): GoogleOAuthStatusDTO {
   const missing: string[] = [];
   if (googleOAuthEnv.clientId === null) missing.push("GOOGLE_CLIENT_ID");
   if (googleOAuthEnv.clientSecret === null) missing.push("GOOGLE_CLIENT_SECRET");
-  if (authEnv.encryptionKey === null) missing.push("APP_ENCRYPTION_KEY");
+  // Listed as missing when it is set but unusable, too. The setup card names the
+  // variable and the credentials panel below it explains the size problem, which
+  // together is more use than a screen that calls a broken key configured.
+  if (!encryptionKeyUsable()) missing.push("APP_ENCRYPTION_KEY");
 
   // `resolveAppUrl` throws in production when APP_URL is unset. That is the
   // correct behaviour for a link in an email; here it would crash the admin
@@ -245,11 +259,38 @@ export function requireGoogleOAuthConfig(): GoogleOAuthConfig {
         "GOOGLE_CLIENT_SECRET to .env.local (see .env.example) and restart the server.",
     );
   }
-  if (authEnv.encryptionKey === null) {
+  /*
+   * Set AND the right size, checked together.
+   *
+   * A key that is present but does not decode to 32 bytes used to pass every
+   * gate on the way in and fail at `encryptSecret`, deep inside the callback —
+   * which is to say AFTER Google's five screens and after the single-use
+   * authorization code had been spent. It threw a plain Error rather than an
+   * AppError, so the callback had no message to forward and the admin got the
+   * generic "could not connect" banner with nothing in it, on every attempt,
+   * forever.
+   *
+   * That is the same late-failure shape the client-credential pre-flight was
+   * written to eliminate, reached by a different route — and the risk is live
+   * here, because a rotated key is exactly the one that arrives truncated or
+   * missing its base64 padding.
+   *
+   * Checked here rather than at import so a deployment that never connects a
+   * Google account still boots, which is the whole reason these variables are
+   * optional.
+   */
+  const keyBytes =
+    authEnv.encryptionKey === null ? 0 : Buffer.from(authEnv.encryptionKey, "base64").length;
+  if (keyBytes !== 32) {
     throw new AppError(
       "MISSING_API_KEY",
-      "APP_ENCRYPTION_KEY is not configured, so a Google account's tokens cannot be stored " +
-        "securely. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"",
+      authEnv.encryptionKey === null
+        ? "APP_ENCRYPTION_KEY is not configured, so a Google account's tokens cannot be stored " +
+          "securely. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\""
+        : `APP_ENCRYPTION_KEY decodes to ${keyBytes} bytes, but AES-256 needs exactly 32, so a ` +
+          "Google account's tokens cannot be stored. This usually means the value was truncated " +
+          "or lost its padding when it was pasted. Generate a replacement with: node -e " +
+          "\"console.log(require('crypto').randomBytes(32).toString('base64'))\"",
     );
   }
   return { clientId, clientSecret };

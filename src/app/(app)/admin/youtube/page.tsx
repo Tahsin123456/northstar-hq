@@ -1498,9 +1498,20 @@ function readOutcome(params: Pick<URLSearchParams, "get">): Outcome | null {
         title: "Could not connect that account",
         // The callback only ever forwards this app's own error text; Google's
         // error_description is deliberately kept out of anything user-facing.
+        /*
+         * "Nothing was saved" was not true. The callback writes the connection
+         * row, the channel row and the ownership flip in six separate round
+         * trips with no transaction around them, so a failure late in that
+         * sequence leaves a live, token-bearing connection behind — and this
+         * banner told the admin it did not exist.
+         *
+         * Every write on the path is idempotent, so the honest instruction is
+         * also the useful one: connecting again resumes rather than duplicates.
+         */
         body:
           params.get("message") ??
-          "The connection failed partway through. Nothing was saved — try again.",
+          "The connection did not finish. Reload this page — if the account is listed, it partly " +
+            "succeeded and connecting again will pick up where it left off.",
       };
   }
 }

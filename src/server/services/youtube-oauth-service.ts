@@ -837,11 +837,40 @@ async function fetchOwnChannels(accessToken: string): Promise<YouTubeChannel[]> 
     });
 
     if (!response.ok) {
-      throw new AppError(
-        "UPSTREAM_ERROR",
-        "YouTube would not say which channels this Google account owns. Try connecting again.",
-        { internalMessage: `channels?mine=true returned HTTP ${response.status}` },
-      );
+      /*
+       * Google answers this one endpoint with several unrelated problems, and
+       * two of them are permanent — so a single "try connecting again" is wrong
+       * advice for exactly the cases where the admin most needs right advice.
+       * Retrying costs the whole consent flow and cannot possibly help.
+       *
+       * 401 is the one that matters most here. A Google account that has never
+       * created a channel does NOT come back as an empty `items` array, which is
+       * what the code below is written for — YouTube refuses the request
+       * outright. Reported as a failure, that reads as "the app is broken" when
+       * the truth is "you signed in with the wrong Google account", which is the
+       * single easiest mistake to make when a channel lives on a Brand Account
+       * and Google's chooser offers the personal account first.
+       *
+       * 403 is almost always the YouTube Data API not being enabled on the Cloud
+       * project that issued the OAuth client — a separate console step from
+       * creating the client, and easy to miss when a different project holds the
+       * API key the competitor pipeline uses.
+       */
+      const guidance =
+        response.status === 401
+          ? "This Google account does not have a YouTube channel, so there is nothing to connect. " +
+            "If your channel is on a Brand Account, start again and choose the CHANNEL at Google's " +
+            "chooser rather than the personal Google account it sits under."
+          : response.status === 403
+            ? "YouTube refused to list this account's channels, so connecting again will not help. " +
+              "This usually means the YouTube Data API v3 is not enabled on the Google Cloud project " +
+              "that issued this app's OAuth client — enabling it is a separate step from creating " +
+              "the client. It can also mean the project's daily quota is exhausted."
+            : "YouTube would not say which channels this Google account owns. Try connecting again.";
+
+      throw new AppError("UPSTREAM_ERROR", guidance, {
+        internalMessage: `channels?mine=true returned HTTP ${response.status}`,
+      });
     }
 
     const data = (await response.json()) as RawListResponse<RawChannelItem>;
@@ -1040,7 +1069,7 @@ export async function completeConnection(options: {
 
   // `refreshTokenEnc` is selected only to answer "is one already stored?"; the
   // ciphertext is reduced to a boolean below and never held, returned or logged.
-  const existing = ownChannel
+  const keyed = ownChannel
     ? await prisma.youTubeConnection.findUnique({
         where: {
           organizationId_youtubeChannelId: {
@@ -1050,16 +1079,42 @@ export async function completeConnection(options: {
         },
         select: { id: true, refreshTokenEnc: true, revenueSyncStatus: true },
       })
-    : // No channel to key on, so fall back to the Google account itself — still
-      // scoped, so one workspace can never adopt another's connection row.
-      // Guarded on a known account id: matching `googleUserId: null` would pair
-      // this grant with whatever anonymous row happened to be there first.
-      identity.googleUserId
+    : null;
+
+  /*
+   * Fall back to the Google account itself, and — this is the part that was
+   * missing — do so even when a channel DID resolve but matched no row.
+   *
+   * The gap it closes is a first-run sequence this deployment is likely to hit.
+   * Connecting a Brand Account's personal Google identity resolves no channel,
+   * so a row is written with `youtubeChannelId: null`. The banner correctly says
+   * "connected, but no channel was found", so the obvious next move is to
+   * connect again and pick the channel this time. On that second pass a channel
+   * resolves, the keyed lookup misses (the orphan's channel id is null), and the
+   * account lookup was never consulted — so a SECOND row is created for the same
+   * Google account. The (organization, channel) unique cannot stop it, because
+   * Postgres does not consider two NULLs equal, so the orphan collides with
+   * nothing. The result is two live connections for one account, one of them
+   * permanently channel-less, both holding valid tokens.
+   *
+   * Restricted to channel-less rows when a channel resolved: a row already keyed
+   * to a DIFFERENT channel is a different connection and must not be hijacked by
+   * an account that happens to own both.
+   */
+  const existing =
+    keyed ??
+    // Guarded on a known account id: matching `googleUserId: null` would pair
+    // this grant with whatever anonymous row happened to be there first.
+    (identity.googleUserId
       ? await prisma.youTubeConnection.findFirst({
-          where: { organizationId: options.organizationId, googleUserId: identity.googleUserId },
+          where: {
+            organizationId: options.organizationId,
+            googleUserId: identity.googleUserId,
+            ...(ownChannel ? { youtubeChannelId: null } : {}),
+          },
           select: { id: true, refreshTokenEnc: true, revenueSyncStatus: true },
         })
-      : null;
+      : null);
 
   // A connection with no refresh token — neither newly issued nor already on
   // file — works for one hour and then stops, which reads as a random failure
@@ -1089,8 +1144,22 @@ export async function completeConnection(options: {
   const data = {
     googleAccountEmail: identity.email,
     googleUserId: identity.googleUserId,
-    youtubeChannelId: ownChannel?.channelId ?? null,
-    channelTitle: ownChannel?.title ?? null,
+    /*
+     * Written only when this attempt actually resolved a channel — never
+     * blanked back to null.
+     *
+     * `?? null` meant a reconnection that resolved nothing ERASED the channel a
+     * working connection already had. That is not a rare path: the prompt to
+     * reconnect and grant the revenue scope is the app's own advice, and
+     * `channels?mine=true` intermittently answers with an empty list. Once
+     * blanked, nothing restores it — `linkConnectionToTrackedChannel` returns
+     * early with no channel to link — so a healthy connection silently becomes
+     * one the admin screen describes as owning no channel.
+     *
+     * Same idiom, and the same reasoning, as `refreshTokenEnc` below: an absent
+     * value from Google means "unchanged", never "deleted".
+     */
+    ...(ownChannel ? { youtubeChannelId: ownChannel.channelId, channelTitle: ownChannel.title } : {}),
     accessTokenEnc: encryptSecret(tokens.accessToken),
     // Only overwrite the refresh token when Google actually sent one, for the
     // same reason as in `refreshAccessToken`.

@@ -131,7 +131,18 @@ export async function GET(request: Request) {
     // so it is safe to carry in the URL for the admin page to render.
     return finish({
       error: "failed",
-      ...(error instanceof AppError ? { message: error.userMessage.slice(0, 200) } : {}),
+      /*
+       * 500, not 200. The messages on this path were rewritten to name a
+       * specific fix, and the longest is 359 characters — so a 200-character cap
+       * was cutting the `invalid_client` explanation off mid-word, at exactly
+       * the clause telling the admin which variable to change. The message that
+       * survived truncation read like an unfinished sentence and named nothing.
+       *
+       * 500 matches the `lastError.slice(0, 500)` convention used for the same
+       * strings elsewhere in the service, and leaves a redirect URL far short of
+       * any browser or proxy limit.
+       */
+      ...(error instanceof AppError ? { message: error.userMessage.slice(0, 500) } : {}),
     });
   }
 }
