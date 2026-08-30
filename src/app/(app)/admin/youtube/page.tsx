@@ -260,6 +260,44 @@ function ConnectPanel({
 }
 
 /**
+ * A link straight to the Cloud project that issued this client ID.
+ *
+ * The digits before the first hyphen of a client ID are the Google Cloud project
+ * NUMBER, which makes the worst version of a credential mismatch diagnosable.
+ *
+ * That version: several Google accounts, each with its own Cloud projects, and a
+ * console that silently opens whichever project the signed-in account last used.
+ * A secret generated there is perfectly valid — for a different project. Every
+ * screen looks right, because each half IS right on its own; only the pairing is
+ * wrong, and neither console ever says so.
+ *
+ * `?project=` pins the selection, so the link lands on the correct project
+ * regardless of what the console would otherwise have shown — and an access
+ * error on it is itself the answer: wrong Google account.
+ */
+function CloudProjectLink({ clientId }: { clientId: string | undefined }) {
+  const projectNumber = clientId ? /^(\d{6,})-/.exec(clientId)?.[1] : undefined;
+  if (!projectNumber) return null;
+
+  return (
+    <p className="text-[11px] leading-relaxed text-muted-foreground">
+      This client belongs to Google Cloud project{" "}
+      <span className="font-medium text-foreground">{projectNumber}</span>.{" "}
+      <a
+        href={`https://console.cloud.google.com/apis/credentials?project=${projectNumber}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-accent underline decoration-dotted underline-offset-2 hover:text-accent-hover"
+      >
+        Open it in the Google console
+      </a>
+      . If that page says you have no access, you are signed in as the wrong Google account —
+      which is also what makes a secret from a different project look correct everywhere.
+    </p>
+  );
+}
+
+/**
  * What credentials this deployment is actually holding.
  *
  * WHY A SCREEN SHOWS THIS AT ALL. `configured` only ever meant "both variables
@@ -314,6 +352,8 @@ function CredentialShapes({ google }: { google: GoogleOAuthStatusDTO }) {
             ))}
           </div>
         ))}
+
+        <CloudProjectLink clientId={shapes.find((c) => c.name === "GOOGLE_CLIENT_ID")?.prefix} />
 
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           Both must come from the <em>same</em> OAuth client. If connecting fails with the
