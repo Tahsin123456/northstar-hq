@@ -73,6 +73,19 @@ export interface YouTubeSetupState {
   /** True when the fix is a fresh consent, so a surface can offer the button. */
   readonly offerConnect: boolean;
   /** The label that button should carry, since it differs per state. */
+  /**
+   * What the button says.
+   *
+   * PLURAL ON THE FIRST CONNECT, and the owner is the reason. It read "Connect
+   * YouTube Channel", and they asked whether that meant they could only have
+   * one — which is exactly what a singular noun on a button promises. One Google
+   * account can own several channels, the picker lists all of them, and a second
+   * account can be added afterwards, so the singular was teaching something
+   * false about the product's own capability.
+   *
+   * It stays singular once at least one channel is connected: "Connect another
+   * channel" is then the true and more useful sentence.
+   */
   readonly connectLabel: string;
 }
 
@@ -138,7 +151,7 @@ export function youTubeSetupState(input: {
       // `error=not_configured`, which teaches nobody anything. Same reasoning as
       // `SetupCard` on the admin screen, which is where the fix actually is.
       offerConnect: false,
-      connectLabel: "Connect YouTube Channel",
+      connectLabel: "Connect Your Channel(s)",
     };
   }
 
@@ -152,7 +165,7 @@ export function youTubeSetupState(input: {
         "is the public one anybody can see, and there is no revenue to import. Northstar HQ asks " +
         "for read-only access and can never modify a channel.",
       offerConnect: true,
-      connectLabel: "Connect YouTube Channel",
+      connectLabel: "Connect Your Channel(s)",
     };
   }
 
