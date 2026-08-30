@@ -2,7 +2,12 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { AlertTriangle, Coins, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Coins, ListChecks, ShieldCheck } from "lucide-react";
+import {
+  IMPORTED_FIELD_GROUPS,
+  IMPORT_COVERAGE_SUMMARY,
+  UNAVAILABLE_FIELDS,
+} from "@/lib/youtube/import-coverage";
 
 /**
  * The three facts somebody deserves BEFORE they grant access to their channel.
@@ -56,6 +61,48 @@ export function ConnectScopeFacts() {
           Finance
         </Link>{" "}
         and must not be treated as settled cash.
+      </Fact>
+
+      {/*
+        THE FOURTH FACT, and the one people are most surprised by afterwards.
+        "Connect your channel" reads as "get your YouTube Studio numbers", and
+        Studio's headline metrics — watch time, average view duration,
+        impressions, click-through rate — come from a different API that this app
+        does not query. Saying so before the grant costs a sentence; discovering
+        it afterwards costs somebody's confidence in every other figure on the
+        screen. The list is folded away because it is long and only some people
+        want it, and stated in full because the alternative was inventing
+        plausible substitutes, which nobody could check against Studio.
+      */}
+      <Fact icon={<ListChecks className="text-subtle-foreground" />}>
+        {IMPORT_COVERAGE_SUMMARY}
+        <details className="mt-1.5 rounded-md border border-border bg-surface-sunken px-3 py-2">
+          <summary className="cursor-pointer text-[11px] font-medium text-foreground">
+            Exactly what is and is not imported
+          </summary>
+
+          <p className="mt-2 text-[11px] font-medium uppercase tracking-wider text-subtle-foreground">
+            Imported
+          </p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {IMPORTED_FIELD_GROUPS.map((group) => (
+              <li key={group.label} className="text-[11px] leading-relaxed">
+                <strong className="text-foreground">{group.label}:</strong> {group.fields}
+              </li>
+            ))}
+          </ul>
+
+          <p className="mt-3 text-[11px] font-medium uppercase tracking-wider text-subtle-foreground">
+            Not available through this connection
+          </p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {UNAVAILABLE_FIELDS.map((field) => (
+              <li key={field.label} className="text-[11px] leading-relaxed">
+                <strong className="text-foreground">{field.label}:</strong> {field.reason}
+              </li>
+            ))}
+          </ul>
+        </details>
       </Fact>
     </ul>
   );

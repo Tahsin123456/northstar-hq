@@ -18,7 +18,11 @@ import {
   YOUTUBE_CONNECT_PATH,
 } from "@/hooks/use-youtube-connections";
 import type { OwnChannelDTO } from "@/lib/dto";
-import { youTubeSetupState, type YouTubeSetupState } from "@/lib/youtube/connection-state";
+import {
+  ownChannelPickerState,
+  youTubeSetupState,
+  type YouTubeSetupState,
+} from "@/lib/youtube/connection-state";
 import { formatCompactNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -99,7 +103,9 @@ export function ConnectYouTubePanel({
           is unhappy: a workspace with one broken grant and two working ones
           still has channels worth adding, and hiding the list would make the
           broken account's problem look like everybody's. */}
-      {data.connections.length > 0 ? <OwnChannelList variant={variant} /> : null}
+      {data.connections.length > 0 ? (
+        <OwnChannelList variant={variant} connectionCount={data.connections.length} />
+      ) : null}
     </Card>
   );
 }
@@ -188,13 +194,24 @@ function StateHeader({
 /**
  * The channels the connection says it owns.
  *
- * Renders nothing at all when there is nothing to offer — every discovered
- * channel is already tracked as one of ours, which is the finished state and
- * needs no announcement. The one exception is a channel filed as a competitor,
- * which is offered with a different verb because adding it corrects a label
- * rather than creating anything.
+ * Every outcome is stated, including the two that used to render nothing: an
+ * account that owns no channel at all, and an account whose channels are all
+ * already tracked. The first was the worse of the two — a green "connected and
+ * syncing" heading above a blank area, with the actual fact ("this account owns
+ * no channel") stated only in the one-time banner right after the callback,
+ * which nobody sees twice. The wording lives in `ownChannelPickerState` so it is
+ * decided once and testable.
+ *
+ * A channel filed as a competitor is still offered, with a different verb,
+ * because adding it corrects a label rather than creating anything.
  */
-function OwnChannelList({ variant }: { variant: "full" | "compact" }) {
+function OwnChannelList({
+  variant,
+  connectionCount,
+}: {
+  variant: "full" | "compact";
+  connectionCount: number;
+}) {
   const { data, isLoading, error } = useOwnYouTubeChannels(true);
 
   if (isLoading) {
@@ -212,31 +229,36 @@ function OwnChannelList({ variant }: { variant: "full" | "compact" }) {
   if (error || !data) return null;
 
   const channels = data.channels;
-  if (channels.length === 0) return null;
-
   const offerable = channels.filter((channel) => !channel.alreadyTracked);
-  if (offerable.length === 0) {
-    return variant === "full" ? (
-      <div className="border-t border-border px-5 py-3 text-[12px] text-subtle-foreground">
-        Every channel these accounts own is already in your tracker
-        {channels.length === 1 ? "" : ` (${channels.length})`}, and reads through the connection
-        rather than the public API.
+  const picker = ownChannelPickerState({
+    discoveredCount: channels.length,
+    offerableCount: offerable.length,
+    connectionCount,
+  });
+
+  if (picker.id !== "offering") {
+    /*
+     * "Owns no channel" is stated on both variants, because it is the one that
+     * explains why the rest of the screen is empty. "Everything is already
+     * tracked" stays on the full variant only: it is a confirmation, and the
+     * compact panel sits beside a channel list that already shows the channels
+     * it is confirming.
+     */
+    if (picker.id === "all_tracked" && variant !== "full") return null;
+
+    return (
+      <div className="border-t border-border px-5 py-3">
+        <h3 className="text-[13px] font-medium text-foreground">{picker.title}</h3>
+        <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">{picker.body}</p>
       </div>
-    ) : null;
+    );
   }
 
   return (
     <div className="flex flex-col border-t border-border">
       <div className="px-5 pt-4">
-        <h3 className="text-[13px] font-medium text-foreground">
-          {offerable.length === 1
-            ? "1 channel on your connected account is not in the tracker"
-            : `${offerable.length} channels on your connected accounts are not in the tracker`}
-        </h3>
-        <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-          Added straight from the connection — no channel ID to paste. Their figures are then read
-          with that account&rsquo;s own authorisation rather than from the public API.
-        </p>
+        <h3 className="text-[13px] font-medium text-foreground">{picker.title}</h3>
+        <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">{picker.body}</p>
       </div>
 
       <div className="mt-2 divide-y divide-border">

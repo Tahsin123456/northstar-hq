@@ -52,6 +52,7 @@ export type YouTubeSetupStateId =
   | "not_configured"
   | "not_connected"
   | "needs_reauth"
+  | "sync_failed"
   | "no_revenue_scope"
   | "revenue_refused"
   | "syncing";
@@ -171,6 +172,38 @@ export function youTubeSetupState(input: {
     };
   }
 
+  /**
+   * The grant is fine and the SYNC is not.
+   *
+   * This state exists because the two used to be indistinguishable on screen. A
+   * channel sync that fails for a reason that is not the token — the channel was
+   * deleted or made private, the daily quota is gone, a 403 that is not a dead
+   * grant — wrote nothing to the connection at all, so its card looked exactly
+   * like a healthy one while nothing had updated for days.
+   *
+   * DELIBERATELY DOES NOT OFFER RECONNECT, unlike `needs_reauth` directly above
+   * it. Reconnecting is the fix for an authorisation that died, and this is not
+   * one: `status` is still "connected", the credentials still work, and sending
+   * somebody through Google's consent screen would cost them a minute and change
+   * nothing. The failure's own sentence is on Admin → YouTube, written by
+   * whatever actually failed, and that is where the next step is.
+   */
+  if (connections.some((connection) => connection.channelSyncStatus === "error")) {
+    return {
+      id: "sync_failed",
+      tone: "danger",
+      title: "A connected account's last sync failed",
+      body:
+        "The authorisation is still good — this is not a permissions problem and reconnecting " +
+        "will not fix it. Something went wrong reading the channel itself: it may have been " +
+        "deleted or made private, or the day's YouTube quota may be spent. The figures behind it " +
+        "are frozen at the last successful sync rather than falling back to the public API. " +
+        "Admin → YouTube shows what YouTube actually said.",
+      offerConnect: false,
+      connectLabel: "Reconnect",
+    };
+  }
+
   if (connections.some((connection) => !connection.revenueScopeGranted)) {
     return {
       id: "no_revenue_scope",
@@ -219,21 +252,91 @@ export function youTubeSetupState(input: {
   };
 }
 
-/**
- * How many of this workspace's own channels the connections actually cover.
+/*
+ * `OwnChannelCoverage` used to be declared here: an exported interface with no
+ * producer and no consumer anywhere in the app, describing a Finance-overview
+ * check that was never built. It has been deleted rather than left standing,
+ * because a type that names a safety property nobody implemented is worse than
+ * no type — it invites the next reader to assume the check exists.
  *
- * Separate from the state above because it answers a different question, and
- * because it is the one the Finance overview has to ask: a revenue total that
- * silently omits an unconnected channel is worse than no total, so the screen
- * needs the count of channels NOT covered rather than a verdict on the
- * connections that exist.
+ * The requirement it described IS implemented, under a different name and in the
+ * place that actually needs it: `YouTubeRevenueReport.uncoveredChannelCount` in
+ * `server/services/youtube-revenue-report.ts`, rendered by the coverage panel
+ * and the caveat above the Finance KPI row.
  */
-export interface OwnChannelCoverage {
-  readonly ownChannelCount: number;
-  readonly connectedCount: number;
-  readonly unconnectedCount: number;
-  /** Connected, but the grant has stopped working — covered on paper only. */
-  readonly brokenCount: number;
+
+/** What the "your channels" picker should say, for a given discovery result. */
+export type OwnChannelPickerStateId = "none_owned" | "all_tracked" | "offering";
+
+export interface OwnChannelPickerState {
+  readonly id: OwnChannelPickerStateId;
+  readonly title: string;
+  readonly body: string;
+}
+
+/**
+ * The picker's own copy, including the case that used to render nothing at all.
+ *
+ * A Google account that owns no YouTube channel is a real and unremarkable state
+ * — a Workspace account that was only ever a viewer, or somebody who authorised
+ * with their personal address by mistake. The panel used to answer it with an
+ * empty area under a green "connected and syncing" heading, which reads as a
+ * screen that has failed to load. The fact was stated only in the one-time
+ * banner immediately after the callback, which nobody sees again.
+ *
+ * Pure, and here rather than in the component, because it is a judgement about
+ * what is true rather than about layout — and because that makes it testable
+ * without rendering anything.
+ */
+export function ownChannelPickerState(input: {
+  /** Channels the connected accounts report owning. */
+  readonly discoveredCount: number;
+  /** Of those, the ones not already tracked as ours. */
+  readonly offerableCount: number;
+  /** How many accounts are connected, so the copy can use the right pronoun. */
+  readonly connectionCount: number;
+}): OwnChannelPickerState {
+  const { discoveredCount, offerableCount, connectionCount } = input;
+  const plural = connectionCount > 1;
+
+  if (discoveredCount === 0) {
+    return {
+      id: "none_owned",
+      title: plural
+        ? "The connected Google accounts own no YouTube channel"
+        : "This Google account owns no YouTube channel",
+      body:
+        "The authorisation worked and nothing is broken — YouTube simply reports no channel for " +
+        (plural ? "these accounts" : "this account") +
+        ". That is normal for an account that only ever watched, or for a Workspace account with " +
+        "no channel of its own. Connect the account that actually owns your channels; the one " +
+        "already connected can stay or be disconnected from Admin → YouTube.",
+    };
+  }
+
+  if (offerableCount === 0) {
+    return {
+      id: "all_tracked",
+      title:
+        discoveredCount === 1
+          ? "Your channel is already in the tracker"
+          : `All ${discoveredCount} of your channels are already in the tracker`,
+      body:
+        "Nothing left to add. These read through the connection rather than the public API, so " +
+        "their figures are the ones you see in YouTube Studio.",
+    };
+  }
+
+  return {
+    id: "offering",
+    title:
+      offerableCount === 1
+        ? "1 channel on your connected account is not in the tracker"
+        : `${offerableCount} channels on your connected accounts are not in the tracker`,
+    body:
+      "Added straight from the connection — no channel ID to paste. Their figures are then read " +
+      "with that account's own authorisation rather than from the public API.",
+  };
 }
 
 /** Names the missing variables in the order the admin should set them. */

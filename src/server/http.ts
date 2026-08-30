@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { AppError, errors, serializeError, toAppError } from "./errors";
+import { describeCauseForLog } from "./log-safety";
 import type { ApiErrorDTO } from "@/lib/dto";
 
 /**
@@ -40,7 +41,10 @@ export function jsonError(error: unknown): NextResponse<ApiErrorDTO> {
   // 5xx means we broke something; log the whole thing. 4xx is the caller's
   // problem and would only be log noise.
   if (appError.status >= 500) {
-    console.error(`[api] ${appError.code}: ${appError.message}`, appError.cause ?? "");
+    // Through `describeCauseForLog` rather than raw: a Prisma validation error
+    // carries the failing query's serialised arguments, and on the token-writing
+    // paths those arguments are encrypted Google credentials. See log-safety.ts.
+    console.error(`[api] ${appError.code}: ${appError.message}`, describeCauseForLog(appError.cause));
   } else {
     console.warn(`[api] ${appError.code}: ${appError.message}`);
   }

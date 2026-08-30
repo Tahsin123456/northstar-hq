@@ -429,6 +429,34 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
           </div>
         ) : null}
 
+        {/*
+          A failed CHANNEL sync, which is a different sentence from a failed
+          authorisation and used to have nowhere to be said. The grant is fine —
+          `status` is still "connected" — and something else went wrong: the
+          channel was deleted or made private, the day's quota is spent, YouTube
+          answered 403 for a reason that is not a dead token. Before this, that
+          failure was written only on the channel row, so the connection card
+          showed a healthy account whose figures had silently stopped moving.
+
+          Deliberately NOT offering a Reconnect button: reconnecting fixes an
+          authorisation, and this is not one.
+        */}
+        {connection.channelSyncStatus === "error" && connection.channelSyncError ? (
+          <div className="mx-4 mt-3 flex items-start gap-2.5 rounded-lg border border-danger/25 bg-danger-subtle px-3 py-2.5">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-danger" />
+            <div className="text-[12px] leading-relaxed text-muted-foreground">
+              <p className="font-medium text-foreground">
+                Sync failed &mdash; the authorisation is still good
+              </p>
+              <p className="mt-1">{connection.channelSyncError}</p>
+              <p className="mt-1">
+                Its channels are frozen at the last successful sync rather than falling back to the
+                public API. Reconnecting will not help; the next scheduled sync retries on its own.
+              </p>
+            </div>
+          </div>
+        ) : null}
+
         <RevenueNotice connection={connection} />
 
         <dl className="mt-4 grid gap-x-6 gap-y-3 border-t border-border px-4 py-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -450,12 +478,35 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
             )}
           </Field>
 
-          <Field label="Last sync">
+          {/*
+            "Last successful", and the adjective is load-bearing. This column is
+            written by BOTH things that spend the grant — the channel sync and
+            the revenue read — and only when one of them succeeds, so a failing
+            connection's figure stays where it was rather than being refreshed
+            by the failure. It used to be written by a successful revenue report
+            alone, which meant every connection without the monetary scope read
+            "Never synced" indefinitely while syncing its channel every hour.
+          */}
+          <Field label="Last successful sync">
             {connection.lastSyncAt === null ? (
               <span className="text-subtle-foreground">Never synced</span>
             ) : (
               <span title={formatDateTime(connection.lastSyncAt)}>
                 {formatRelativeTime(connection.lastSyncAt, now === 0 ? undefined : now)}
+              </span>
+            )}
+          </Field>
+
+          <Field label="Channel data">
+            {connection.channelSyncStatus === "error" ? (
+              <span className="text-danger">Last sync failed</span>
+            ) : connection.lastChannelSyncAt === null ? (
+              // Not "never": a connection whose channel the sweep has not
+              // reached yet and one that has been failing are different facts.
+              <span className="text-subtle-foreground">Not synced yet</span>
+            ) : (
+              <span title={formatDateTime(connection.lastChannelSyncAt)}>
+                Synced {formatRelativeTime(connection.lastChannelSyncAt, now === 0 ? undefined : now)}
               </span>
             )}
           </Field>
@@ -485,7 +536,13 @@ function ConnectionCard({ connection }: { connection: YouTubeConnectionDTO }) {
             )}
           </Field>
 
-          <Field label="Next sync">
+          {/*
+            "Next revenue check", because that is the only thing this column
+            schedules: `nextSyncAt` is written by the revenue service alone.
+            Channel data is swept on its own staleness rules, per channel, and
+            labelling this "Next sync" implied one clock governed both.
+          */}
+          <Field label="Next revenue check">
             <NextSyncValue nextSyncAt={connection.nextSyncAt} now={now} />
           </Field>
 
@@ -663,7 +720,7 @@ function NextSyncValue({ nextSyncAt, now }: { nextSyncAt: number | null; now: nu
   if (nextSyncAt === null) {
     return (
       <span className="text-subtle-foreground">
-        After the first sync of this connection
+        After the first revenue read of this connection
       </span>
     );
   }

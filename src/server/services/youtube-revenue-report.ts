@@ -3,6 +3,12 @@ import "server-only";
 import { prisma } from "@/server/db";
 import { isGoogleOAuthConfigured } from "@/server/auth/google-oauth-env";
 import { normalizeCurrencyCode } from "@/lib/finance/money";
+import {
+  buildMonthRows,
+  summariseRevenueTotals,
+  type RevenueDayInput,
+  type RevenueHeadline,
+} from "@/lib/finance/youtube-revenue-rollup";
 
 /**
  * =========================================================================
@@ -40,11 +46,6 @@ import { normalizeCurrencyCode } from "@/lib/finance/money";
  * scheduler might one day reach.
  */
 
-/** Groups a UTC day onto the `YYYY-MM` its revenue belongs to. */
-function monthKey(day: Date): string {
-  return day.toISOString().slice(0, 7);
-}
-
 export interface YouTubeRevenueMonthRow {
   readonly channelId: string;
   readonly channelName: string;
@@ -72,6 +73,16 @@ export interface YouTubeRevenueMonthRow {
    * a fact about the number on the screen.
    */
   readonly revisedDayCount: number;
+  /**
+   * True when the selected period covers only part of this calendar month, so
+   * the figure is part of a month rather than a month.
+   *
+   * Without it the table was quietly wrong on every default load: a 30-day
+   * window clips the previous month, and the row rendered as that whole month
+   * with a partial total under a footnote blaming YouTube for not having
+   * finished computing it.
+   */
+  readonly clippedByPeriod: boolean;
 }
 
 /**
@@ -107,6 +118,17 @@ export interface YouTubeRevenueReport {
   readonly months: readonly YouTubeRevenueMonthRow[];
   readonly channels: readonly YouTubeRevenueChannelStatus[];
   /**
+   * Total, this month and previous month — computed over EVERY stored day, not
+   * over the selected period.
+   *
+   * The owner asked for these three by name and none of them existed: the period
+   * control offers 7/30/90/180 days and a custom range, so "this month" was
+   * reachable only by hand-picking dates, and "total" not at all. They are
+   * deliberately independent of the period selector, because a "this month"
+   * figure that changes when somebody switches the window is not this month.
+   */
+  readonly headline: RevenueHeadline;
+  /**
    * Own channels with nothing reading their revenue: no connection, or one that
    * has stopped working, or one without the revenue permission.
    *
@@ -130,10 +152,13 @@ export async function getYouTubeRevenueReport(options: {
   organizationId: string;
   range: { startMs: number; endMs: number };
   channelNames: ReadonlyMap<string, string>;
+  /** Injectable so the headline months are deterministic in a test. */
+  now?: number;
 }): Promise<YouTubeRevenueReport> {
   const { organizationId, range, channelNames } = options;
+  const nowMs = options.now ?? Date.now();
 
-  const [days, ownChannels, connections] = await Promise.all([
+  const [days, allDays, ownChannels, connections] = await Promise.all([
     prisma.channelRevenueDay.findMany({
       // Half-open, exactly like every other finance window, so a day never
       // lands in two periods.
@@ -150,6 +175,24 @@ export async function getYouTubeRevenueReport(options: {
         channel: { select: { title: true } },
       },
       orderBy: { day: "asc" },
+    }),
+    /**
+     * Every stored day, for the three headline figures.
+     *
+     * A second read rather than a wider first one, because the two answer
+     * different questions and must not be tempted into sharing a filter: the
+     * table is about the selected period and the headline is about the calendar.
+     *
+     * Deliberately not `groupBy`. Three figures over two dimensions (month and
+     * currency) would be three grouped queries or one with a computed month
+     * expression Prisma cannot express portably, and the row count this reads is
+     * one per channel per day — a handful of thousands for a studio with several
+     * channels and years of history. Folding those in memory is cheaper than the
+     * round trips, and it keeps the arithmetic in one tested function.
+     */
+    prisma.channelRevenueDay.findMany({
+      where: { organizationId },
+      select: { channelId: true, day: true, estimatedRevenueMinor: true, currency: true },
     }),
     prisma.trackedChannel.findMany({
       // Own channels only. A competitor has no revenue to read and never will —
@@ -176,59 +219,44 @@ export async function getYouTubeRevenueReport(options: {
   ]);
 
   // ---- Money, grouped by (channel, month, currency) -------------------------
+  //
+  // The grouping itself is `lib/finance/youtube-revenue-rollup`, which is where
+  // the clipped-month rule and the headline arithmetic are pinned by tests.
+  // This function's job is to read the rows and name the channels.
 
-  interface Bucket {
-    channelId: string;
-    channelName: string;
-    month: string;
-    currency: string;
-    amountMinor: number;
-    dayCount: number;
-    revisedDayCount: number;
-  }
+  const months = buildMonthRows(
+    days.map(
+      (row): RevenueDayInput => ({
+        channelId: row.channelId,
+        // The tracker's name first, so this table and the profit table above it
+        // call the same channel the same thing. The YouTube title is the
+        // fallback for a channel whose tracking row has since been removed —
+        // its revenue is still real and still belongs on the screen.
+        channelName: channelNames.get(row.channelId) ?? row.channel.title,
+        dayMs: row.day.getTime(),
+        amountMinor: row.estimatedRevenueMinor,
+        currency: normalizeCurrencyCode(row.currency),
+        revisionCount: row.revisionCount,
+      }),
+    ),
+    range,
+  );
 
-  const buckets = new Map<string, Bucket>();
-
-  for (const row of days) {
-    const month = monthKey(row.day);
-    const currency = normalizeCurrencyCode(row.currency);
-    // Currency is part of the key rather than an assumption. Two currencies in
-    // one channel-month is rare and pathological, and the honest rendering is
-    // two rows — not a sum of unlike things, and not a silently dropped row.
-    const key = `${row.channelId}:${month}:${currency}`;
-
-    const existing = buckets.get(key);
-    if (existing) {
-      // Integer minor units, so this addition is exact.
-      existing.amountMinor += row.estimatedRevenueMinor;
-      existing.dayCount += 1;
-      if (row.revisionCount > 0) existing.revisedDayCount += 1;
-      continue;
-    }
-
-    buckets.set(key, {
-      channelId: row.channelId,
-      // The tracker's name first, so this table and the profit table above it
-      // call the same channel the same thing. The YouTube title is the fallback
-      // for a channel whose tracking row has since been removed — its revenue
-      // is still real and still belongs on the screen.
-      channelName: channelNames.get(row.channelId) ?? row.channel.title,
-      month,
-      currency,
-      amountMinor: row.estimatedRevenueMinor,
-      dayCount: 1,
-      revisedDayCount: row.revisionCount > 0 ? 1 : 0,
-    });
-  }
-
-  const months = [...buckets.values()].sort(
-    (a, b) =>
-      // Newest month first: the current month is the one anybody opens this to
-      // look at. Then largest earner, then name, so the order is total rather
-      // than "whatever the map happened to hold".
-      b.month.localeCompare(a.month) ||
-      b.amountMinor - a.amountMinor ||
-      a.channelName.localeCompare(b.channelName),
+  const headline = summariseRevenueTotals(
+    allDays.map(
+      (row): RevenueDayInput => ({
+        channelId: row.channelId,
+        // Not read by the headline, which sums across channels. Filled from the
+        // tracker anyway rather than left blank, so the input type means the
+        // same thing in both calls.
+        channelName: channelNames.get(row.channelId) ?? "",
+        dayMs: row.day.getTime(),
+        amountMinor: row.estimatedRevenueMinor,
+        currency: normalizeCurrencyCode(row.currency),
+        revisionCount: 0,
+      }),
+    ),
+    nowMs,
   );
 
   // ---- Coverage -------------------------------------------------------------
@@ -279,6 +307,7 @@ export async function getYouTubeRevenueReport(options: {
     configured: isGoogleOAuthConfigured(),
     months,
     channels,
+    headline,
     uncoveredChannelCount,
   };
 }

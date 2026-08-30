@@ -24,6 +24,7 @@ import type { ChannelDataSource } from "@/lib/dto";
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { AppError, toAppError, type AppErrorCode } from "@/server/errors";
+import { recordConnectionChannelSync } from "./youtube-connection-health";
 import {
   classifyVideos,
   MIN_SHORT_CONFIDENCE,
@@ -36,7 +37,7 @@ import type {
   YouTubeCredential,
   YouTubeVideo,
 } from "./youtube";
-import { snapshotIntervalMinutes } from "@/lib/sync/snapshot-cadence";
+import { snapshotBucket, snapshotIntervalMinutes } from "@/lib/sync/snapshot-cadence";
 
 /**
  * =========================================================================
@@ -235,6 +236,17 @@ export async function syncChannel(
   // Present only on the connection path, and `undefined` on the key path so the
   // client sets `key=` exactly as it did before.
   const apiCredential = credential.source === "connection" ? credential.credential : undefined;
+  /**
+   * The connection this run is spending, when it is spending one.
+   *
+   * Only the "connection" case. A run refused for a broken connection
+   * ("connection_unavailable") is deliberately NOT recorded here: that
+   * connection's row already carries the reason — the token lifecycle wrote it,
+   * and it is the reason this run refused — and re-stamping it with a derived
+   * copy would overwrite Google's own words with ours.
+   */
+  const connectionId =
+    credential.source === "connection" ? credential.credential.connectionId : null;
 
   const run = await prisma.channelRefreshRun.create({
     data: {
@@ -376,6 +388,8 @@ export async function syncChannel(
     );
 
     const now = new Date();
+    // The instant this run's readings are filed under. See `SNAPSHOT_GRID_MS`.
+    const capturedAt = snapshotBucket(now);
 
     for (const batch of chunk(videos, WRITE_CHUNK)) {
       const operations: Prisma.PrismaPromise<unknown>[] = [];
@@ -452,12 +466,45 @@ export async function syncChannel(
         likeCount: toBigInt(video.likeCount),
         commentCount: toBigInt(video.commentCount),
         videoAgeHours: ageHours,
-        capturedAt: now,
+        capturedAt,
       });
     }
 
+    /**
+     * Upsert, not createMany, and the empty `update` is the whole point.
+     *
+     * The guard above ("has the interval elapsed, and did anything move?") is
+     * correct for runs that happen one after another and useless for runs that
+     * overlap: the hourly sweep and somebody pressing Refresh both read the
+     * previous snapshot before either writes, both conclude a reading is due,
+     * and both insert. The result is two near-identical rows a few seconds
+     * apart — not a duplicate video, but duplicate time-series data, which
+     * silently skews every per-interval delta computed from it.
+     *
+     * With `capturedAt` snapped to a five-minute grid and a unique on
+     * (videoId, capturedAt), the second writer's row collides with the first's
+     * and `update: {}` makes that collision a no-op rather than an error. The
+     * first reading of a bucket wins, which is the honest choice: it is the one
+     * whose figure was actually fetched at that time.
+     *
+     * `skipDuplicates` would say this more directly and is not available — the
+     * schema targets the Postgres/SQLite intersection and SQLite does not
+     * support it. Batched through `$transaction` so the statement count matches
+     * what `createMany` cost in round trips.
+     */
     for (const batch of chunk(snapshotRows, WRITE_CHUNK)) {
-      await prisma.videoSnapshot.createMany({ data: batch });
+      await prisma.$transaction(
+        batch.map((snapshot) =>
+          prisma.videoSnapshot.upsert({
+            where: { videoId_capturedAt: { videoId: snapshot.videoId, capturedAt } },
+            create: snapshot,
+            update: {},
+          }),
+        ),
+      );
+      // Rows offered rather than rows inserted: a suppressed duplicate is the
+      // rare concurrent case, and a second query to count precisely would cost
+      // more than the number is worth.
       counters.snapshotsWritten += batch.length;
     }
 
@@ -480,6 +527,18 @@ export async function syncChannel(
       where: { id: channel.id },
       data: { lastFetchedAt: now, lastFetchStatus: "success", lastFetchError: null },
     });
+
+    /**
+     * And say so on the connection, when a connection is what read this.
+     *
+     * A completed sync proves the stored grant still works, which is exactly the
+     * claim "Last sync" on Admin → YouTube makes. Before this, only a successful
+     * revenue report wrote that column, so a connection without the monetary
+     * scope reported "Never synced" indefinitely while syncing perfectly.
+     */
+    if (connectionId) {
+      await recordConnectionChannelSync(connectionId, { ok: true, at: new Date() });
+    }
 
     await prisma.channelRefreshRun.update({
       where: { id: run.id },
@@ -517,6 +576,25 @@ export async function syncChannel(
         data: { lastFetchStatus: "error", lastFetchError: appError.userMessage },
       })
       .catch(() => undefined);
+
+    /**
+     * The failure belongs on the connection too, and through the same door as
+     * the success.
+     *
+     * Without this, a sync that failed for a reason that is not the grant — the
+     * channel was deleted, the daily quota is gone, a 403 that is not a dead
+     * token — left the connection card looking healthy while nothing had
+     * updated for days. `status` is untouched on purpose: this is a run that
+     * failed, not an authorisation that died, and telling an admin to reconnect
+     * a working account is worse than saying nothing.
+     */
+    if (connectionId) {
+      await recordConnectionChannelSync(connectionId, {
+        ok: false,
+        error: appError.userMessage,
+        at: new Date(),
+      });
+    }
 
     await prisma.channelRefreshRun
       .update({

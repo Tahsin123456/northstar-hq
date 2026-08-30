@@ -59,9 +59,102 @@ export function YouTubeRevenueSection({
 
   return (
     <div className="flex flex-col gap-4">
+      <RevenueHeadline report={report} />
       <CoveragePanel report={report} />
       {hasMoney ? <MonthTable report={report} /> : <NoFiguresYet report={report} />}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TOTAL / THIS MONTH / PREVIOUS MONTH
+// ---------------------------------------------------------------------------
+
+/**
+ * The three figures the owner asked for by name, and which had nowhere to live.
+ *
+ * The page's period control offers 7, 30, 90 or 180 days plus a custom range, so
+ * before this the only route to "this month" was hand-picking two calendar dates
+ * and the only route to a lifetime total was none at all. Everything here is
+ * computed on the server over EVERY stored day and is deliberately unaffected by
+ * the period selector above it — a "this month" that changed when somebody
+ * switched to 90 days would be a different quantity wearing the same label,
+ * which is the mistake the table underneath used to make in its own way.
+ *
+ * Nothing reported is an em dash, never a zero: this whole subsystem is built on
+ * "we could not ask" and "the answer was nothing" being different sentences.
+ */
+function RevenueHeadline({ report }: { report: YouTubeRevenueReport }) {
+  const { headline } = report;
+
+  // Nothing has ever been imported. The coverage panel and the "no figures yet"
+  // card below already explain why; three em dashes would only repeat it.
+  if (headline.total.length === 0) return null;
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      <HeadlineTile
+        label="Total"
+        caption="Every day YouTube has reported, all channels"
+        amounts={headline.total}
+      />
+      <HeadlineTile
+        label={formatMonth(headline.thisMonthKey)}
+        caption="This month so far — YouTube reports the last few days in arrears"
+        amounts={headline.thisMonth}
+      />
+      <HeadlineTile
+        label={formatMonth(headline.previousMonthKey)}
+        caption="Previous month, complete"
+        amounts={headline.previousMonth}
+      />
+    </div>
+  );
+}
+
+function HeadlineTile({
+  label,
+  caption,
+  amounts,
+}: {
+  label: string;
+  caption: string;
+  amounts: YouTubeRevenueReport["headline"]["total"];
+}) {
+  return (
+    <Card className="flex flex-col gap-1 p-4">
+      <div className="flex items-center gap-1.5">
+        <span className="text-[11px] font-medium uppercase tracking-wider text-subtle-foreground">
+          {label}
+        </span>
+        {/* On the tile, not once at the top of the section: a figure gets
+            screenshotted and quoted on its own, and the caveat has to travel
+            with it. Same rule as the "Est" chip on every table row. */}
+        <Badge variant="neutral" size="sm" className="shrink-0 tracking-wider">
+          Est
+        </Badge>
+      </div>
+
+      {amounts.length === 0 ? (
+        <span
+          className="tnum text-[18px] font-medium text-subtle-foreground"
+          title="YouTube has reported nothing for this month. That is not the same as earning nothing — see the coverage panel below for which channels are being read at all."
+        >
+          {EM_DASH}
+        </span>
+      ) : (
+        amounts.map((amount) => (
+          <span
+            key={amount.currency}
+            className="tnum text-[18px] font-medium text-foreground"
+          >
+            {formatMoney(amount.amountMinor, amount.currency)}
+          </span>
+        ))
+      )}
+
+      <span className="text-[11px] leading-relaxed text-subtle-foreground">{caption}</span>
+    </Card>
   );
 }
 
@@ -340,6 +433,23 @@ function MonthTable({ report }: { report: YouTubeRevenueReport }) {
                   className="px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground"
                 >
                   {formatMonth(group.month)}
+                  {/*
+                    The month header says when it is showing PART of a month.
+                    The rows underneath are summed from whatever days fall inside
+                    the selected period, so on the default 30-day window the
+                    previous month's row is a fortnight of it — and it used to be
+                    rendered as the month, with a footnote blaming YouTube for
+                    the missing days. The clip is a fact about the period, not
+                    about YouTube, and this is where it belongs.
+                  */}
+                  {group.rows.some((row) => row.clippedByPeriod) ? (
+                    <span
+                      className="ml-2 normal-case tracking-normal text-subtle-foreground"
+                      title="The selected period covers only part of this month, so these figures are part of the month rather than the whole of it. Widen the period to see the full month."
+                    >
+                      part of month
+                    </span>
+                  ) : null}
                 </td>
               </tr>
 
@@ -388,12 +498,22 @@ function MonthTable({ report }: { report: YouTubeRevenueReport }) {
         </table>
       </div>
 
+      {/*
+        The old version of this footnote gave ONE explanation for a low day
+        count — "YouTube has not finished computing" — and applied it to every
+        month. For a month the selected period only clips, that explanation is
+        not merely incomplete, it is false: YouTube reported those days perfectly
+        well and the window simply excludes them. The two causes are now named
+        separately, and the month header says which applies.
+      */}
       <p className="border-t border-border px-4 py-2.5 text-[11px] leading-relaxed text-subtle-foreground">
         Amounts are in the currency YouTube reported them in and are deliberately not converted
         here, so they can be checked against YouTube Studio directly. &ldquo;Days reported&rdquo; is
-        how many days of the month YouTube has given a figure for &mdash; fewer than the month has
-        is normal for the current month and for the last few days of any month, which YouTube has
-        not finished computing.
+        how many days of the month have a stored figure. On a month marked{" "}
+        <span className="text-muted-foreground">part of month</span>, the rest of the month falls
+        outside the selected period &mdash; widen the period to see all of it. On a month that is
+        not marked, the missing days are ones YouTube has not reported yet, which is normal for the
+        current month and for the last few days of any month.
       </p>
     </Card>
   );

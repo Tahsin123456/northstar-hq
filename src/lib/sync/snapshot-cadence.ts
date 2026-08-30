@@ -158,6 +158,41 @@ export function snapshotIntervalMinutes(input: SnapshotCadenceInput): number {
 }
 
 /**
+ * =========================================================================
+ * THE GRID EVERY READING IS FILED ON
+ * =========================================================================
+ *
+ * Five minutes, and the number is chosen from both directions.
+ *
+ * FROM ABOVE: it must be finer than any cadence this app schedules, or a
+ * legitimate reading would be swallowed. The densest `snapshotIntervalMinutes`
+ * ever returns is 60, and the tightest interval an organization can configure
+ * for itself is minutes rather than seconds. Five is comfortably inside that.
+ *
+ * FROM BELOW: it must be coarser than the window in which two syncs of the same
+ * channel can race. That window is one run's read-then-write — the sweep and a
+ * manual Refresh overlapping — which is seconds to about a minute. Five minutes
+ * covers it with room to spare.
+ *
+ * Snapping down rather than to the nearest, so a reading is never filed under a
+ * bucket that had not started when it was taken.
+ */
+export const SNAPSHOT_GRID_MS = 5 * 60 * 1000;
+
+/**
+ * The bucket a reading taken at `at` belongs to.
+ *
+ * This is what makes snapshot idempotency a database constraint rather than a
+ * matter of timing — see `VideoSnapshot` in the schema and the upsert in
+ * `channel-sync`. Two overlapping runs of the same channel produce the same
+ * `capturedAt` for the same video, so the second one's row collides with the
+ * first's instead of joining it.
+ */
+export function snapshotBucket(at: Date): Date {
+  return new Date(Math.floor(at.getTime() / SNAPSHOT_GRID_MS) * SNAPSHOT_GRID_MS);
+}
+
+/**
  * True when this video's window is still open at `nowMs`.
  *
  * The sweep uses it to decide which channels are urgent. Kept here beside the

@@ -59,15 +59,23 @@ npm run db:push
 
 ### Migrations — read this before you wire up a release pipeline
 
-**The schema is currently managed with `db push`. There is no `prisma/migrations`
-directory, and `npm run db:migrate` therefore does nothing.**
+**This is now a migrated schema.** `prisma/migrations/` exists and is the
+history, so `npm run db:migrate` (`prisma migrate deploy`) is the release
+command and it does apply changes. Run it against production on every deploy
+that carries a schema change; `db push` should not be pointed at production
+again.
 
-That script runs `prisma migrate deploy`, which with no migration history finds
+Locally, where `DATABASE_URL` is the SQLite file, `npm run db:push` is still
+the way to bring `prisma/dev.db` up to date — the migration SQL is written for
+PostgreSQL and is not replayed against SQLite.
+
+The warning this section used to carry is still worth knowing, because it is
+how the trap re-arms: `prisma migrate deploy` with no migration history finds
 nothing to apply, prints "No migration found", and **exits successfully**. In
-CI that is the worst possible shape of failure: a green deploy step that never
-touched the database, followed by an application talking to a schema that is one
-release behind. Until you create a history, `npm run db:push` is the command
-that actually applies schema changes.
+CI that is the worst possible shape of failure — a green deploy step that never
+touched the database, followed by an application talking to a schema one release
+behind. If `prisma/migrations/` is ever lost or not committed, the deploy goes
+quiet rather than red.
 
 `db push` suits a single-deployment internal tool — but it has no
 down-migration and keeps no record of what changed. That is acceptable while

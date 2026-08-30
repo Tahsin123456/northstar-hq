@@ -441,19 +441,64 @@ function needsReauthError(): AppError {
   );
 }
 
-async function markNeedsReauth(connectionId: string, lastError: string): Promise<void> {
+/**
+ * Google says the grant is gone: record it AND destroy the tokens.
+ *
+ * The stored tokens are provably useless at this point. Clearing them shrinks
+ * the window in which a database leak yields a live credential, and removes any
+ * chance a later code path retries with them.
+ *
+ * Reserved for exactly that case. See `markCredentialsUnreadable` for the one
+ * that used to share this function and must not.
+ */
+async function markGrantRevoked(connectionId: string, lastError: string): Promise<void> {
   await prisma.youTubeConnection.update({
     where: { id: connectionId },
     data: {
       status: "needs_reauth",
       lastError: lastError.slice(0, 500),
-      // The stored tokens are provably useless at this point. Clearing them
-      // shrinks the window in which a database leak yields a live credential,
-      // and removes any chance a later code path retries with them.
       accessTokenEnc: null,
       refreshTokenEnc: null,
       accessTokenExpiresAt: null,
     },
+    // Nothing reads the result, and the default would materialise the very
+    // ciphertext columns this file is careful never to hold.
+    select: { id: true },
+  });
+}
+
+/**
+ * We cannot READ the stored tokens — and the ciphertext is deliberately kept.
+ *
+ * WHY THIS IS NOT `markGrantRevoked`.
+ * These two failures used to be the same function, and treating them alike did
+ * real damage in the one case that matters. "Google revoked the grant" means the
+ * ciphertext is worthless, so destroying it is free. "The ciphertext will not
+ * decrypt" means something happened to APP_ENCRYPTION_KEY — it was rotated, or
+ * the environment was restored from a different backup — and the tokens
+ * themselves may be perfectly good.
+ *
+ * Deleting them there had two consequences, both bad. Restoring the correct key
+ * could no longer recover the connection, which flatly contradicted the message
+ * this very function writes telling the admin to do exactly that. And the grant
+ * is still LIVE at Google with the only credential that could revoke it now
+ * gone — the outcome `disconnect`'s ordering exists to prevent.
+ *
+ * So the columns are left alone. A connection in this state cannot be used
+ * (nothing can decrypt it), it is visibly `needs_reauth`, and reconnecting still
+ * fixes it — but restoring the key fixes it too, and `disconnect` can still hand
+ * Google back its token.
+ *
+ * It is also the precondition for ever rotating APP_ENCRYPTION_KEY safely.
+ */
+async function markCredentialsUnreadable(
+  connectionId: string,
+  lastError: string,
+): Promise<void> {
+  await prisma.youTubeConnection.update({
+    where: { id: connectionId },
+    data: { status: "needs_reauth", lastError: lastError.slice(0, 500) },
+    select: { id: true },
   });
 }
 
@@ -476,13 +521,15 @@ export async function refreshAccessToken(connectionId: string): Promise<string |
 
   const refreshToken = decryptSecret(connection.refreshTokenEnc);
   if (!refreshToken) {
-    // Either the token was never stored or APP_ENCRYPTION_KEY has changed.
-    // Both are recovered the same way, so the message covers both rather than
-    // guessing.
-    await markNeedsReauth(
+    // Either the token was never stored or APP_ENCRYPTION_KEY has changed. The
+    // message covers both because nothing here can tell them apart — but the
+    // ciphertext is KEPT either way, so restoring the right key recovers the
+    // connection instead of leaving a live grant at Google with no way to
+    // revoke it. See `markCredentialsUnreadable`.
+    await markCredentialsUnreadable(
       connection.id,
       "The stored Google credentials could not be read. If APP_ENCRYPTION_KEY was changed or " +
-        "restored from a different backup, reconnect the account.",
+        "restored from a different backup, restore the original key or reconnect the account.",
     );
     return null;
   }
@@ -500,7 +547,7 @@ export async function refreshAccessToken(connectionId: string): Promise<string |
     // revoked in the account's security settings, the password changed, the
     // account was suspended, or six months went by without use.
     if (result.body.error === "invalid_grant") {
-      await markNeedsReauth(
+      await markGrantRevoked(
         connection.id,
         "Google has revoked this authorisation. It usually means the grant was removed from the " +
           "Google account, the password changed, or the connection went unused for six months. " +
@@ -539,6 +586,7 @@ export async function refreshAccessToken(connectionId: string): Promise<string |
       status: "connected",
       lastError: null,
     },
+    select: { id: true },
   });
 
   return tokens.accessToken;
@@ -803,6 +851,17 @@ export async function linkConnectionToTrackedChannel(
   await prisma.youTubeConnection.update({
     where: { id: connection.id },
     data: { youtubeChannelId: resolved.channelId, channelTitle: resolved.title },
+    select: { id: true },
+  });
+
+  // And in the coverage table, which is what the credential lookup reads. The
+  // connection column above keys the row; this is what makes the channel
+  // READABLE through the grant.
+  await recordCoveredChannel({
+    organizationId: connection.organizationId,
+    connectionId: connection.id,
+    youtubeChannelId: resolved.channelId,
+    title: resolved.title,
   });
 
   return {
@@ -982,6 +1041,9 @@ const CONNECTION_DTO_SELECT = {
   status: true,
   lastError: true,
   lastSyncAt: true,
+  channelSyncStatus: true,
+  channelSyncError: true,
+  lastChannelSyncAt: true,
   revenueScopeGranted: true,
   monetizationStatus: true,
   revenueSyncStatus: true,
@@ -1001,6 +1063,9 @@ interface ConnectionRow {
   readonly status: string;
   readonly lastError: string | null;
   readonly lastSyncAt: Date | null;
+  readonly channelSyncStatus: string;
+  readonly channelSyncError: string | null;
+  readonly lastChannelSyncAt: Date | null;
   readonly revenueScopeGranted: boolean;
   readonly monetizationStatus: string;
   readonly revenueSyncStatus: string;
@@ -1022,6 +1087,9 @@ function toConnectionDTO(row: ConnectionRow): YouTubeConnectionDTO {
     lastError: row.lastError,
     // Epoch milliseconds, per the wire convention in lib/dto.ts.
     lastSyncAt: row.lastSyncAt?.getTime() ?? null,
+    channelSyncStatus: row.channelSyncStatus,
+    channelSyncError: row.channelSyncError,
+    lastChannelSyncAt: row.lastChannelSyncAt?.getTime() ?? null,
     revenueScopeGranted: row.revenueScopeGranted,
     monetizationStatus: row.monetizationStatus,
     revenueSyncStatus: row.revenueSyncStatus,
@@ -1197,24 +1265,77 @@ async function revokeAtGoogle(token: string): Promise<boolean> {
  * you own.
  */
 
-/** Connections in one workspace that name a channel, keyed by YouTube id. */
+/**
+ * Record that a grant provably covers a channel, so that channel can be READ
+ * with it.
+ *
+ * Called at the two moments Google itself has just confirmed the ownership: the
+ * callback resolving the account's channel, and `trackOwnChannel` matching a
+ * requested id against `channels?mine=true`. Never called from a request body.
+ *
+ * The upsert on (organization, channel) means the most recent grant to prove
+ * ownership wins, rather than a second connection colliding with the first. Two
+ * Google accounts claiming one channel is a real situation — an owner who moved
+ * a channel between accounts — and the last one to demonstrate it is the one
+ * whose token will actually work.
+ */
+async function recordCoveredChannel(options: {
+  organizationId: string;
+  connectionId: string;
+  youtubeChannelId: string;
+  title: string | null;
+}): Promise<void> {
+  const { organizationId, connectionId, youtubeChannelId, title } = options;
+  await prisma.youTubeConnectionChannel.upsert({
+    where: { organizationId_youtubeChannelId: { organizationId, youtubeChannelId } },
+    create: { organizationId, connectionId, youtubeChannelId, title },
+    update: { connectionId, title, confirmedAt: new Date() },
+    select: { id: true },
+  });
+}
+
+/**
+ * Connections in one workspace that cover a channel, keyed by YouTube id.
+ *
+ * TWO SOURCES, AND THE SECOND IS THE REPAIR. The connection row itself names one
+ * channel — the one Google scoped the consent to — and that has always been
+ * read here. `YouTubeConnectionChannel` names every channel the same grant was
+ * shown to own, which is what makes channels two through N of one account
+ * resolve to a real credential instead of falling through to `{source: "public"}`
+ * and being read with the shared API key while labelled as ours.
+ *
+ * The link table wins where both speak, because it is the more specific record
+ * and the more recently confirmed one. The connection column is still read so a
+ * deployment that has not run the backfill resolves exactly as it did before.
+ */
 async function connectionsByChannel(
   organizationId: string,
 ): Promise<Map<string, { id: string; status: string; label: string }>> {
-  const rows = await prisma.youTubeConnection.findMany({
-    where: { organizationId, youtubeChannelId: { not: null } },
-    select: {
-      id: true,
-      status: true,
-      youtubeChannelId: true,
-      channelTitle: true,
-      googleAccountEmail: true,
-    },
-    // Oldest first, so a duplicate — which the (organization, channel) unique
-    // makes impossible today — would resolve to the same connection on every
-    // run rather than alternating between them.
-    orderBy: { createdAt: "asc" },
-  });
+  const [rows, covered] = await Promise.all([
+    prisma.youTubeConnection.findMany({
+      where: { organizationId, youtubeChannelId: { not: null } },
+      select: {
+        id: true,
+        status: true,
+        youtubeChannelId: true,
+        channelTitle: true,
+        googleAccountEmail: true,
+      },
+      // Oldest first, so a duplicate — which the (organization, channel) unique
+      // makes impossible today — would resolve to the same connection on every
+      // run rather than alternating between them.
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.youTubeConnectionChannel.findMany({
+      where: { organizationId },
+      select: {
+        youtubeChannelId: true,
+        title: true,
+        connection: { select: { id: true, status: true, googleAccountEmail: true } },
+      },
+      orderBy: { confirmedAt: "asc" },
+    }),
+  ]);
 
   const byChannel = new Map<string, { id: string; status: string; label: string }>();
   for (const row of rows) {
@@ -1225,6 +1346,18 @@ async function connectionsByChannel(
       label: row.channelTitle ?? row.googleAccountEmail ?? "Google account",
     });
   }
+
+  for (const row of covered) {
+    byChannel.set(row.youtubeChannelId, {
+      id: row.connection.id,
+      status: row.connection.status,
+      // This channel's own title, never the connection's `channelTitle` — that
+      // names the channel the row is keyed on, which for a second channel from
+      // the same account is a different channel entirely.
+      label: row.title ?? row.connection.googleAccountEmail ?? "Google account",
+    });
+  }
+
   return byChannel;
 }
 
@@ -1465,6 +1598,27 @@ export async function trackOwnChannel(options: {
         "from the Add Channel dialog.",
     );
   }
+
+  /**
+   * Record the coverage BEFORE the tracker row exists.
+   *
+   * This is the line that closes the hole the multi-channel path used to have.
+   * `owned` is Google's own answer to "what does this token own", and this
+   * channel is in it — so the grant genuinely covers it, whether or not it is
+   * the one channel the connection row is keyed on. Without this, channels two
+   * through N were marked "own" and then read with the shared public API key,
+   * silently, because a public read succeeds.
+   *
+   * Ordered first so there is no window in which a channel is tracked as ours
+   * with no credential resolving to it: a failure here refuses the whole
+   * addition rather than producing exactly that state.
+   */
+  await recordCoveredChannel({
+    organizationId: options.organizationId,
+    connectionId: connection.id,
+    youtubeChannelId: resolved.channelId,
+    title: resolved.title,
+  });
 
   const channelRow = await upsertChannel(resolved);
 

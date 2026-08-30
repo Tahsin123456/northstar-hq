@@ -747,6 +747,11 @@ async function recordConnectionOutcome(
         : {}),
       ...(outcome.nextSyncAt !== undefined ? { nextSyncAt: outcome.nextSyncAt } : {}),
     },
+    // Nothing reads the result. Without this the default return materialises
+    // `accessTokenEnc` and `refreshTokenEnc` into this module, which otherwise
+    // never touches them at all — the no-token guarantee is worth making
+    // structural on the write paths as it already is on the read paths.
+    select: { id: true },
   });
 }
 
@@ -909,6 +914,7 @@ export async function fetchRevenueForConnection(
       await prisma.youTubeConnection.update({
         where: { id: connection.id },
         data: { revenueScopeGranted: false },
+        select: { id: true },
       });
     }
 

@@ -152,6 +152,7 @@ model Organization {
   invitations             Invitation[]
   auditEvents             AuditEvent[]
   youtubeConnections      YouTubeConnection[]
+  youtubeConnectionChannels YouTubeConnectionChannel[]
   financeCategories       FinanceCategory[]
   financeEntries          FinanceEntry[]
   exchangeRates           ExchangeRate[]
@@ -569,9 +570,27 @@ model VideoSnapshot {
   /// 24h / 48h / 7d" is a range scan rather than a join against Video.
   videoAgeHours Int
 
+  /// When this reading was taken, SNAPPED DOWN TO A FIVE-MINUTE GRID.
+  ///
+  /// The rounding is what makes the unique below enforceable. Two syncs of the
+  /// same channel can genuinely overlap — the hourly sweep and somebody pressing
+  /// Refresh — and each reads the previous snapshot before either writes, so the
+  /// "has the interval elapsed?" guard in `channel-sync` passes twice and both
+  /// insert. That produced two near-identical rows seconds apart, which is not a
+  /// duplicate video but IS duplicate time-series data, and it skews every
+  /// per-interval delta computed from it.
+  ///
+  /// A unique on the raw instant would not have caught it (the two runs differ
+  /// by milliseconds). A unique on a five-minute bucket does: it is far coarser
+  /// than the race window and far finer than the densest cadence this app ever
+  /// schedules, which is hourly. The cost is that `capturedAt` is the reading's
+  /// bucket rather than the instant of the HTTP call — up to five minutes early,
+  /// against a column whose consumers all work in hours.
   capturedAt DateTime @default(now())
 
-  @@index([videoId, capturedAt])
+  /// Idempotency, enforced by the database rather than by timing. Replaces the
+  /// plain [videoId, capturedAt] index, which this serves identically.
+  @@unique([videoId, capturedAt])
   @@index([capturedAt])
   @@map("video_snapshots")
 }
@@ -1013,9 +1032,30 @@ model YouTubeConnection {
   scope String @default("")
 
   /// "connected" | "needs_reauth" | "revoked"
-  status     String    @default("connected")
-  lastError  String?
+  status String  @default("connected")
+  lastError String?
+
+  /// The last time this connection was used successfully for ANYTHING.
+  ///
+  /// Written by both halves that spend the grant — the channel/video sync and
+  /// the revenue read — because that is the claim the admin screen's "Last
+  /// sync" makes. It used to be written only by a successful revenue report,
+  /// which meant a connection without the monetary scope read "Never synced"
+  /// forever while its channel had been syncing correctly every hour.
   lastSyncAt DateTime?
+
+  /// "never" | "ok" | "error" — how the last CHANNEL/VIDEO sync through this
+  /// connection went, as distinct from the revenue read below.
+  ///
+  /// Separate from `status`, and the distinction is the point. `status` is about
+  /// the GRANT: "needs_reauth" means Google will not honour the credentials any
+  /// more and a human must reconnect. This is about the RUN: a channel that was
+  /// deleted, an exhausted quota, a 403 that is not a dead grant. Those leave a
+  /// perfectly healthy connection failing every hour, and folding them into
+  /// `status` would tell an admin to reconnect an account that is fine.
+  channelSyncStatus String    @default("never")
+  channelSyncError  String?
+  lastChannelSyncAt DateTime?
 
   /// Whether the monetary Analytics scope was actually granted.
   ///
@@ -1052,12 +1092,62 @@ model YouTubeConnection {
   connectedById String?
   connectedBy   AppUser? @relation(fields: [connectedById], references: [id], onDelete: SetNull)
 
+  /// Every channel this grant provably covers — see YouTubeConnectionChannel.
+  coveredChannels YouTubeConnectionChannel[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([organizationId, youtubeChannelId])
   @@index([organizationId, status])
   @@map("youtube_connections")
+}
+
+/// One channel a connection's grant provably covers, so it can be READ with
+/// that grant.
+///
+/// WHY THIS TABLE EXISTS, AND WHAT IT REPAIRS
+/// A connection row is keyed on exactly ONE `youtubeChannelId` — the channel
+/// Google scoped the consent to, which is what the (organization, channel)
+/// unique is for. But discovery and tracking are one-to-many: `mine=true` is
+/// read with `maxResults=50` on purpose, and `trackOwnChannel` will add any
+/// channel the token reports owning.
+///
+/// Before this table, channels two through N of a single grant were invisible to
+/// the credential lookup, which keys on the connection's single id. They were
+/// marked "own" and then read with the SHARED PUBLIC API KEY — silently, because
+/// a public read succeeds. That is precisely the substitution the whole OAuth
+/// path exists to prevent, and it failed closed nowhere: the numbers simply
+/// changed meaning.
+///
+/// So the mapping lives here, one row per channel, and the credential lookup
+/// reads it. The (organization, channel) unique means a channel resolves to at
+/// most one grant — the most recent one to claim it wins, by upsert — so two
+/// connections can never fight over whose token reads a channel.
+model YouTubeConnectionChannel {
+  id String @id @default(cuid())
+
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  connectionId String
+  connection   YouTubeConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  /// YouTube's own id, not the internal Channel row id: this is resolved before
+  /// (and independently of) anything being tracked.
+  youtubeChannelId String
+  title            String?
+
+  /// When the connection last CONFIRMED it owns this channel, from Google's own
+  /// answer. Not a guess and not user input — see `trackOwnChannel`.
+  confirmedAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, youtubeChannelId])
+  @@index([connectionId])
+  @@map("youtube_connection_channels")
 }
 
 // ---------------------------------------------------------------------------

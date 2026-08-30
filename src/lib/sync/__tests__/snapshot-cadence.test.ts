@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   densePhaseHours,
   isInsideWindow,
+  snapshotBucket,
+  SNAPSHOT_GRID_MS,
   snapshotIntervalMinutes,
   snapshotPhase,
 } from "../snapshot-cadence";
@@ -160,5 +162,63 @@ describe("isInsideWindow", () => {
   it("is never open without a window", () => {
     expect(isInsideWindow(published, null, published)).toBe(false);
     expect(isInsideWindow(published, 0, published)).toBe(false);
+  });
+});
+
+/**
+ * THE GRID IS WHAT MAKES SNAPSHOT IDEMPOTENCY A CONSTRAINT RATHER THAN A HOPE.
+ *
+ * Duplicate suppression used to be one in-memory check — "has the interval
+ * elapsed, and did anything move?" — evaluated against a snapshot read at the
+ * start of the run. Two syncs of the same channel that overlap (the hourly
+ * sweep and somebody pressing Refresh) both read the same previous snapshot,
+ * both pass that check, and both insert. The rows are not duplicate videos;
+ * they are duplicate TIME SERIES, which silently skews every per-interval
+ * delta computed from them.
+ *
+ * Snapping the capture instant onto a shared grid is what lets the database
+ * refuse the second one. So the two properties below are the constraint: two
+ * readings taken within the same five minutes must land on the same instant,
+ * and a legitimate cadence must not.
+ */
+describe("snapshotBucket — the grid the unique constraint is enforced on", () => {
+  const base = Date.UTC(2026, 0, 1, 12, 0, 0);
+
+  it("gives two overlapping runs the same capturedAt, so the second collides", () => {
+    // The sweep starts, and a manual Refresh lands 40 seconds later while the
+    // first run is still classifying. Both will write a snapshot for the same
+    // video; only one row may exist.
+    const sweep = snapshotBucket(new Date(base + 3_000));
+    const manual = snapshotBucket(new Date(base + 43_000));
+
+    expect(manual.getTime()).toBe(sweep.getTime());
+  });
+
+  it("snaps down, never forward — a reading is never filed before it was taken", () => {
+    expect(snapshotBucket(new Date(base + 299_999)).getTime()).toBe(base);
+    expect(snapshotBucket(new Date(base)).getTime()).toBe(base);
+    expect(snapshotBucket(new Date(base + SNAPSHOT_GRID_MS)).getTime()).toBe(
+      base + SNAPSHOT_GRID_MS,
+    );
+  });
+
+  /**
+   * The grid must be finer than any cadence this app schedules, or it would
+   * swallow readings it was meant to keep. The densest interval
+   * `snapshotIntervalMinutes` can return is the dense phase's 60 minutes.
+   */
+  it("is finer than the densest cadence the scheduler can ask for", () => {
+    const densest = snapshotIntervalMinutes({
+      ageHours: 0,
+      windowHours: WEEK,
+      baseIntervalMinutes: 15,
+    });
+
+    expect(SNAPSHOT_GRID_MS).toBeLessThan(densest * 60_000);
+    // And two readings a legitimate interval apart still land in different
+    // buckets, so nothing real is ever suppressed.
+    expect(snapshotBucket(new Date(base + densest * 60_000)).getTime()).not.toBe(
+      snapshotBucket(new Date(base)).getTime(),
+    );
   });
 });

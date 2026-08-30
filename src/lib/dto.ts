@@ -917,7 +917,28 @@ export interface YouTubeConnectionDTO {
   /** "connected" | "needs_reauth" | "revoked" */
   readonly status: string;
   readonly lastError: string | null;
+  /**
+   * The last time this connection was used successfully for ANYTHING — a
+   * channel sync or a revenue read.
+   *
+   * It used to be written only by a successful revenue report, which made
+   * "Never synced" the permanent reading for any connection without the
+   * monetary scope, however well its channel was syncing. Both halves that
+   * spend the grant now write it, so the field means what its label says.
+   */
   readonly lastSyncAt: number | null;
+  /**
+   * "never" | "ok" | "error" — the last CHANNEL/VIDEO sync through this
+   * connection, as distinct from `status`.
+   *
+   * `status` is about the grant ("Google will not honour these credentials");
+   * this is about the run (channel deleted, quota exhausted, a 403 that is not
+   * a dead token). Kept apart so a screen never tells somebody to reconnect a
+   * working account because a channel was deleted.
+   */
+  readonly channelSyncStatus: string;
+  readonly channelSyncError: string | null;
+  readonly lastChannelSyncAt: number | null;
   /**
    * Whether the grant covers YouTube's monetary Analytics scope.
    *
