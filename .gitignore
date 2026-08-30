@@ -60,3 +60,9 @@ next-env.d.ts
 
 # Generated production secrets, for pasting into the host. Never committed.
 VERCEL-SETTINGS.local.txt
+
+# Secret scratch files that must never be committed. Named broadly on purpose:
+# a rule that only listed the one file it was written for is how the next one
+# gets missed.
+*.local.txt
+NEW-SECRETS*
