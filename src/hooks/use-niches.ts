@@ -107,6 +107,31 @@ export function useUpdateNicheRule() {
   });
 }
 
+/**
+ * Writes a niche's RPM range, or clears it.
+ *
+ * Separate from `useUpdateNicheRule` for the same reason the API call is
+ * separate: a hit rule and a price per 1,000 views are two decisions behind two
+ * permission sets, and bundling them would make each one impossible for
+ * somebody who holds only the other. It invalidates the same catalogue, because
+ * the resolved rate travels on `NicheDTO` and every card reads it from there.
+ */
+export function useSetNicheRpm() {
+  const invalidate = useInvalidateNicheCatalogue();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...rpm
+    }: {
+      id: string;
+      rpmLowMinorPerMillion: number | null;
+      rpmHighMinorPerMillion: number | null;
+      rpmCurrency: string | null;
+    }) => api.setNicheRpm(id, rpm),
+    onSuccess: () => invalidate(),
+  });
+}
+
 export function useDeleteNiche() {
   const invalidate = useInvalidateNicheCatalogue();
   return useMutation({

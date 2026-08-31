@@ -14,6 +14,7 @@
 
 import type { AnalyticsVideo } from "@/lib/analytics/types";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
+import type { NicheRpmResolution } from "@/lib/analytics/niche-rpm";
 import type { NicheKind } from "@/lib/niches/niche-kind";
 
 /**
@@ -130,6 +131,29 @@ export interface NicheDTO extends NicheRefDTO {
    * replaced, and it reported the publishing calendar as if it were quality.
    */
   readonly hitWindowHours: number | null;
+  /**
+   * What 1,000 views in this niche are worth, and on what basis.
+   *
+   * `null` MEANS WITHHELD, and only that. "Nobody has said" is a value of the
+   * union itself — `{ source: "none" }` — carrying the reason why, so the two
+   * can never be confused the way an unqualified null would let them be. A
+   * reader who may see niche economics always gets an object; a reader who may
+   * not always gets `null` and no surface for them renders the strip at all.
+   *
+   * WITHHELD BEHIND `finance.view`, not behind `settings.manage`. A derived
+   * rate is `ChannelRevenueDay.estimatedRevenueMinor` divided by a view count —
+   * it is company revenue, and multiplying it back by the view count printed
+   * beside it reconstructs what an own channel earned. `GET /api/niches` and
+   * `GET /api/dataset` are both gated on `analytics.view`, which every employee
+   * role holds, so anything on this DTO that is not deliberately withheld is
+   * published to the entire team. See `niche-rpm-disclosure.test.ts`.
+   *
+   * The hand-entered range is withheld on the same gate rather than a weaker
+   * one: it is the studio's own commercial estimate of what a market pays, and
+   * splitting the two would put a "$0.03–$0.06" beside a blank on the same card
+   * and invite somebody to work out which niches earn.
+   */
+  readonly rpm: NicheRpmResolution | null;
   readonly sortOrder: number;
   /** Active tracked channels currently assigned to this niche. */
   readonly channelCount: number;

@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import {
   ArrowRight,
+  DollarSign,
   Layers,
   MoreHorizontal,
   Pencil,
@@ -50,6 +51,11 @@ import {
   needsRuleConfiguration,
   unconfiguredFirst,
 } from "@/components/niches/niche-threshold-status";
+import {
+  NicheRpmDialog,
+  useCanConfigureRpm,
+} from "@/components/niches/niche-rpm-dialog";
+import { NicheValueStrip } from "@/components/niches/niche-value-strip";
 import { NotesPanel } from "@/components/notes/notes-panel";
 import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
@@ -57,6 +63,7 @@ import { useDataset } from "@/hooks/use-dataset";
 import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
+import { calculateMarketShare } from "@/lib/analytics/market-share";
 import type { NicheDTO } from "@/lib/dto";
 import {
   NICHE_KIND_DESCRIPTION,
@@ -297,6 +304,8 @@ function NicheCard({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [notesOpen, setNotesOpen] = React.useState(false);
   const [thresholdOpen, setThresholdOpen] = React.useState(false);
+  const [rpmOpen, setRpmOpen] = React.useState(false);
+  const canConfigureRpm = useCanConfigureRpm();
 
   const members = React.useMemo(
     () => rows.filter((row) => row.channel.niches.some((n) => n.id === niche.id)),
@@ -336,6 +345,33 @@ function NicheCard({
   );
 
   const summary = React.useMemo(() => calculatePortfolioSummary(entries), [entries]);
+
+  /*
+   * The two view totals the money strip prices: ours, and everybody else we
+   * track in this niche.
+   *
+   * `calculateMarketShare` already splits exactly this way and already carries
+   * the honesty rules — a share of nothing is `null`, and the denominator is
+   * the TRACKED set rather than the market. Reusing it means the money figure
+   * and the share on the dashboard are built from one view measure rather than
+   * two that can drift.
+   *
+   * NOTE WHICH VIEW MEASURE THAT IS: current lifetime views of Shorts PUBLISHED
+   * in the period, per `getShortsInDateRange`. It is not views EARNED in the
+   * period, which needs the snapshot series nothing is currently writing. That
+   * distinction is why this figure is only ever used to size the niche and is
+   * never fed back into deriving a rate — pairing lifetime views of new videos
+   * with a month of revenue produces a number with no interpretation.
+   */
+  const share = React.useMemo(() => {
+    const own = members.filter((row) => row.channel.ownershipType === "own");
+    const others = members.filter((row) => row.channel.ownershipType !== "own");
+    return calculateMarketShare(
+      own.map((row) => ({ videos: row.videos })),
+      others.map((row) => ({ videos: row.videos })),
+      range,
+    );
+  }, [members, range]);
 
   const best = summary.topChannel;
   /*
@@ -392,6 +428,16 @@ function NicheCard({
                   <DropdownMenuItem onSelect={() => setThresholdOpen(true)}>
                     <Target />
                     Hit rule
+                  </DropdownMenuItem>
+                ) : null}
+                {/* A separate item for a separate decision behind a separate
+                    pair of permissions. The hit rule says what counts as a win
+                    here; the RPM says what the market pays for views, which is
+                    a fact about the outside world. */}
+                {canConfigureRpm ? (
+                  <DropdownMenuItem onSelect={() => setRpmOpen(true)}>
+                    <DollarSign />
+                    RPM range
                   </DropdownMenuItem>
                 ) : null}
                 {/* There was a "Niche settings" item here, and a second link to
@@ -460,6 +506,16 @@ function NicheCard({
           />
         </div>
 
+        {/* Between the volume stats and the top-channel footer: what the
+            tracked niche is worth follows what it did, and precedes who in it
+            did best. Renders nothing at all for a reader without finance
+            access — see the note on `NicheDTO.rpm`. */}
+        <NicheValueStrip
+          niche={niche}
+          ourViews={share.ourViews}
+          competitorViews={share.competitorViews}
+        />
+
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">
           {nicheThreshold === null ? (
             <span className="text-[12px] text-subtle-foreground">
@@ -502,6 +558,7 @@ function NicheCard({
         open={thresholdOpen}
         onOpenChange={setThresholdOpen}
       />
+      <NicheRpmDialog niche={niche} open={rpmOpen} onOpenChange={setRpmOpen} />
       <NicheNotesDialog niche={niche} open={notesOpen} onOpenChange={setNotesOpen} />
       <RenameNicheDialog niche={niche} open={renameOpen} onOpenChange={setRenameOpen} />
       <DeleteNicheDialog

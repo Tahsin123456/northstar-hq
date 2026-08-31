@@ -350,6 +350,78 @@ model Niche {
   /// BOTH before it can score anything. Half a rule is not a rule.
   hitWindowHours Int?
 
+  /// What 1,000 views in this niche are worth, entered by hand as a LOW–HIGH
+  /// range.
+  ///
+  /// The question these answer is not "what did we earn" — `ChannelRevenueDay`
+  /// already answers that, and only for channels we own. It is "how big is this
+  /// niche, and how much of it are we capturing", which needs a rate that can be
+  /// applied to competitors whose earnings nobody will ever show us.
+  ///
+  /// UNITS: minor units per 1,000,000 VIEWS, not per 1,000. A Shorts RPM sits
+  /// well under $0.10, so whole cents per 1,000 views cannot express one at all —
+  /// $0.045 would have to round to 4 or 5, an 11% error in the rate, and that
+  /// error is then multiplied by the niche's entire view count. Carrying a
+  /// further factor of 1,000 makes the granularity $0.00001 per 1,000 views and
+  /// keeps every step integral: revenueMinor = views * rpm / 1000000, an exact
+  /// division by a power of ten with no float anywhere. $1.00 per 1,000 views is
+  /// stored as 100000; $0.045 is stored as 4500.
+  ///
+  /// A RANGE rather than a point because a guess IS a range. Whoever fills this
+  /// in has no measurement to enter — they have a band they believe the niche
+  /// pays in — and demanding a single number would launder that belief into a
+  /// figure the screen then presents with more confidence than it was given.
+  /// Both columns or neither, the same rule `hitThreshold` and `hitWindowHours`
+  /// follow above: half a range is not a range. `low <= high`, with equality
+  /// allowed for somebody who genuinely does mean one number.
+  ///
+  /// Null is unconfigured and is NOT zero, which is the distinction the whole
+  /// nullability exists for. Zero is a claim that this niche pays nothing; null
+  /// is the absence of a claim. They render as opposite sentences and must never
+  /// collapse into each other — the same reason `hitPaymentMinor` above is
+  /// nullable rather than defaulted.
+  ///
+  /// This range is the FALLBACK in the owner's ordering, behind a rate derived
+  /// from a monetized channel the studio operates in the niche. On this
+  /// deployment it is nonetheless the only path that yields a number today: with
+  /// `OrganizationSettings.autoRefreshEnabled` false there are no `VideoSnapshot`
+  /// rows, so views-gained-in-a-window — the denominator every derived rate needs
+  /// — is not computable for anybody. See the note below the currency column.
+  rpmLowMinorPerMillion  Int?
+  rpmHighMinorPerMillion Int?
+
+  /// ISO 4217 code the range above was entered in. Null exactly when the range
+  /// is null.
+  ///
+  /// Stored rather than inherited from `OrganizationSettings.baseCurrency`, for
+  /// the reason stated on that column: individual entries always keep their own
+  /// currency. A range typed as 0.03–0.06 USD must not silently become 0.03–0.06
+  /// EUR on the day an admin switches the base — that is a number nobody entered,
+  /// sitting in a figure somebody plans against. Conversion into the base happens
+  /// on read, in `resolveNicheRpm`, using the organization's own ExchangeRate
+  /// rows in the one direction they were entered — never inverted, matching the
+  /// ledger's `resolveConversion`. With no rate configured it REFUSES: the niche
+  /// resolves to `{ source: "none", reason: "manual_range_unconvertible" }` and
+  /// the card names the stored range and the missing rate, rather than inventing
+  /// a conversion or printing the digits under the base currency's symbol. The
+  /// range as typed still travels to the browser, as `enteredRange`, so the
+  /// dialog seeds the boxes with what somebody actually entered.
+  rpmCurrency String?
+
+  // NOTHING IS STORED FOR THE *DERIVED* RATE, deliberately.
+  //
+  // Where the studio owns a monetized channel in this niche, that channel's own
+  // RPM overrides the range above. It is reported revenue over views gained in
+  // the same window, and both halves of that fraction keep moving after the
+  // fact: YouTube revises daily revenue for weeks (see ChannelRevenueDay's
+  // revision columns), and snapshots keep landing. A stored derived rate would
+  // therefore be a number that was true once, going quietly stale while still
+  // being presented as measured rather than estimated — strictly worse than not
+  // having it, because it looks authoritative. It is computed on read instead,
+  // and carried with the window, channel count and view count it came from so
+  // the reader can judge it. Storing it would also duplicate own-channel revenue
+  // into a table read under a weaker permission than the finance one.
+
   /// Manual ordering in the filter menu; ties break alphabetically.
   sortOrder Int @default(0)
 

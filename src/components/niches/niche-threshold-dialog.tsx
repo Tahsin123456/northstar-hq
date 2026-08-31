@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useQuery } from "@tanstack/react-query";
+
 import { Target } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -13,7 +13,7 @@ import {
   THRESHOLD_PRESETS,
 } from "@/lib/analytics/constants";
 import { formatHitWindow } from "@/lib/analytics/hit-rate";
-import { api } from "@/lib/api-client";
+import { useOrgBaseCurrency } from "@/hooks/use-org-currency";
 import type { NicheDTO } from "@/lib/dto";
 import {
   MAX_MONEY_MINOR,
@@ -114,27 +114,8 @@ export function useCanManageNiches(): boolean {
  * fallback is only ever used for the frame between mount and response.
  */
 export function useHitPaymentCurrency(): string {
-  const canConfigure = useCanConfigureThreshold();
-  const { data } = useQuery({
-    // The same key the settings page uses, so the two share one cached copy
-    // rather than each fetching the organization independently.
-    queryKey: ["settings", "organization"] as const,
-    queryFn: api.getOrganizationSettings,
-    enabled: canConfigure,
-    staleTime: 5 * 60 * 1000,
-  });
-  return data?.organization.baseCurrency ?? FALLBACK_CURRENCY;
+  return useOrgBaseCurrency(useCanConfigureThreshold());
 }
-
-/**
- * Only until the organization's own currency arrives.
- *
- * It decides how many decimal places the input accepts, so a wrong guess here
- * would misparse a typed amount for one frame. USD's two places match every
- * currency this app supports that has any, which is why the fallback is safe
- * rather than merely convenient.
- */
-const FALLBACK_CURRENCY = "USD";
 
 export function NicheThresholdDialog({
   niche,

@@ -48,6 +48,8 @@ const mocks = vi.hoisted(() => ({
   trackedFindMany: vi.fn(),
   /** The permission set `requireActor` reports for this test's caller. */
   permissions: new Set<string>(),
+  /** The role that set came from. Read by the niche-scope narrowing. */
+  role: "admin" as string,
 }));
 
 vi.mock("@/server/db", () => ({
@@ -68,6 +70,15 @@ vi.mock("@/server/auth/dal", () => ({
   requireActor: async () => ({
     userId: "user_1",
     organizationId: ORG_ID,
+    /*
+     * The ROLE, not only its permissions, because the RPM resolver narrows on
+     * the caller's visible niches too. `resolveVisibleNicheIds` fails closed on
+     * a role it does not recognise, so an actor with no role would be treated
+     * as the least privileged niche-scoped one and answered for nothing —
+     * which would quietly make every DTO assertion below about a withheld
+     * figure rather than the permission under test.
+     */
+    role: mocks.role,
     permissions: mocks.permissions,
   }),
   /*
@@ -90,6 +101,13 @@ vi.mock("../user-service", () => ({
     actor: { userId: "user_1" },
   }),
   getCurrentOrgId: async () => ORG_ID,
+  /*
+   * Read by the RPM resolver, which `updateNiche` calls to build the DTO it
+   * returns. It needs the base currency to convert an own channel's revenue
+   * into before any rate is divided out of it — an admin in this file holds
+   * `finance.view`, so the resolver really does run.
+   */
+  getCurrentOrgSettings: async () => ({ baseCurrency: "USD", defaultPeriodDays: 30 }),
 }));
 
 const { createNiche, updateNiche } = await import("../niche-service");
@@ -100,6 +118,7 @@ const { effectivePermissions } = await import("@/lib/auth/permissions");
 /** Signs the test in as somebody holding exactly this role's permissions. */
 function signInAs(role: "admin" | "head_of_shorts"): void {
   mocks.permissions = new Set(effectivePermissions(role));
+  mocks.role = role;
 }
 
 function nicheRow(overrides: Record<string, unknown> = {}) {
@@ -285,12 +304,33 @@ describe("the hit window is guarded exactly as the threshold is", () => {
  * and a payslip quoting another.
  */
 describe("re-evaluation after a rule change", () => {
+  /**
+   * How many times the RE-EVALUATION walked the tracker.
+   *
+   * Two different readers of `trackedChannel` now run inside one `updateNiche`:
+   * the re-evaluation, which walks every tracked channel in the niche, and the
+   * RPM resolver, which reads only the channels the studio OWNS to see whether
+   * one of them can supply a measured rate. An admin holds `finance.view`, so
+   * both really do run, and a bare call count would pass whichever of the two
+   * happened to fire.
+   *
+   * They are told apart by the one clause that differs — the resolver narrows
+   * on `ownershipType` and the re-evaluation cannot, because a competitor's
+   * Shorts are judged by the niche's rule exactly as an own channel's are.
+   */
+  function reevaluationCalls(): number {
+    return mocks.trackedFindMany.mock.calls.filter(
+      ([args]) => (args as { where?: { ownershipType?: string } })?.where?.ownershipType
+        === undefined,
+    ).length;
+  }
+
   it("re-decides the niche's Shorts when the threshold moves", async () => {
     signInAs("admin");
 
     await updateNiche("niche_gta", { hitThreshold: 750_000 });
 
-    expect(mocks.trackedFindMany).toHaveBeenCalledTimes(1);
+    expect(reevaluationCalls()).toBe(1);
   });
 
   it("re-decides them when the window moves", async () => {
@@ -298,7 +338,7 @@ describe("re-evaluation after a rule change", () => {
 
     await updateNiche("niche_gta", { hitWindowHours: 168 });
 
-    expect(mocks.trackedFindMany).toHaveBeenCalledTimes(1);
+    expect(reevaluationCalls()).toBe(1);
   });
 
   it("does not re-decide anything for a rename", async () => {
@@ -317,6 +357,6 @@ describe("re-evaluation after a rule change", () => {
 
     await updateNiche("niche_gta", { hitThreshold: 750_000 });
 
-    expect(mocks.trackedFindMany).not.toHaveBeenCalled();
+    expect(reevaluationCalls()).toBe(0);
   });
 });

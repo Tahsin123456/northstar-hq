@@ -5,7 +5,8 @@
   "description": "Northstar HQ — internal Shorts intelligence and business command centre for Northstar Studios.",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/deploy-migrate.mjs && next build",
+    "build:app-only": "next build",
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",

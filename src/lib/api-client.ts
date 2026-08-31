@@ -387,6 +387,32 @@ export const api = {
       body: JSON.stringify(rule),
     }),
 
+  /**
+   * What 1,000 views in this niche are worth, as a hand-entered range.
+   *
+   * A SEPARATE CALL FROM `setNicheRule`, on the same endpoint, because they are
+   * separate decisions with separate permissions — the rule is
+   * `settings.manage`, the range needs `finance.view` alongside it. Sending
+   * them together would mean an admin without finance access could not save a
+   * hit rule, and one without settings access could not save a range, because
+   * the service refuses the whole request rather than stripping a key.
+   *
+   * All three keys travel together or none does. An absent key is not a write,
+   * which is what lets this be sent without clearing anything else on the row.
+   */
+  setNicheRpm: (
+    id: string,
+    rpm: {
+      rpmLowMinorPerMillion: number | null;
+      rpmHighMinorPerMillion: number | null;
+      rpmCurrency: string | null;
+    },
+  ): Promise<{ niche: NicheDTO }> =>
+    request(`/api/niches/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(rpm),
+    }),
+
   deleteNiche: (id: string): Promise<{ unassignedChannels: number }> =>
     request(`/api/niches/${id}`, { method: "DELETE" }),
 
