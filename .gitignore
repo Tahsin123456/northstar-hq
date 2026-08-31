@@ -70,3 +70,5 @@ NEW-SECRETS*
 # Google credential check scratch file (holds a client secret).
 GOOGLE-CREDENTIALS.local.txt
 check-google-credentials.mjs
+fix-google-credentials.mjs
+.vercel/
