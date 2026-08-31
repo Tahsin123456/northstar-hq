@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
 import type { ChannelMetrics } from "@/lib/analytics/types";
@@ -332,5 +334,95 @@ describe("sortRows — ownFirst", () => {
     const before = ROWS.map((r) => r.channel.id);
     sortRows(ROWS, DEFAULT_SORT, { ownFirst: true });
     expect(ROWS.map((r) => r.channel.id)).toEqual(before);
+  });
+});
+
+/**
+ * =========================================================================
+ * THE TWO SCOPES ON THE OVERVIEW ARE NOT THE SAME SCOPE
+ * =========================================================================
+ *
+ * The dashboard derives two sets from the same rows: `scopedRows`, which is
+ * niche + ownership + CONTENT TYPE and feeds the channel table and the empty
+ * state, and `nicheScopedRows`, which stops at ownership and feeds
+ * "Performance by content type". The second deliberately ignores the type
+ * filter, because a table whose job is to rank the types against each other
+ * would collapse to a single row if it applied the selection made among its
+ * own rows.
+ *
+ * That makes `scopedRows.length === 0` a statement about a DIFFERENT question
+ * than "is there a breakdown to show", and a draft of the reorder used it as
+ * though the two were equivalent. They diverge on one reachable input and the
+ * tests below are that input: a type nobody claims empties the channel list
+ * while leaving a full, correct breakdown behind it.
+ */
+describe("the empty channel list does not mean the breakdown is empty", () => {
+  const RANKING = "ct-ranking";
+  const TAGGED_ROWS: TestRow[] = [
+    makeRow({ id: "a", niches: [GTA], views: [100, 100], contentTypeIds: [RANKING] }),
+    makeRow({ id: "b", niches: [GTA], views: [100], contentTypeIds: [RANKING] }),
+  ];
+
+  it("empties the channel scope while the breakdown scope stays full", () => {
+    // Every channel is tagged, so "Unassigned" matches none of them.
+    const scopedRows = filterRowsByScope(TAGGED_ROWS, "all", "all", "unassigned");
+    const nicheScopedRows = filterRowsByScope(TAGGED_ROWS, "all", "all");
+
+    expect(scopedRows).toHaveLength(0);
+    // The set the content-type table is built from. Gating that table on the
+    // emptiness of the set above would have deleted these two channels'
+    // figures from the screen at the one moment they were all that was left.
+    expect(nicheScopedRows).toHaveLength(2);
+  });
+
+  it("collapses both only when the narrowing is one the breakdown shares", () => {
+    // Niche and ownership ARE applied to both, so an empty channel scope from
+    // either of them really does mean an empty breakdown — which is why the
+    // empty card and the table's own empty state read as one statement there.
+    expect(filterRowsByScope(TAGGED_ROWS, RDR.id, "all", "all")).toHaveLength(0);
+    expect(filterRowsByScope(TAGGED_ROWS, RDR.id, "all")).toHaveLength(0);
+    expect(filterRowsByScope(TAGGED_ROWS, "all", "own", "all")).toHaveLength(0);
+    expect(filterRowsByScope(TAGGED_ROWS, "all", "own")).toHaveLength(0);
+  });
+});
+
+/**
+ * And the gate itself, read off the page.
+ *
+ * The property above is about two pure functions; this is about the one line of
+ * JSX that has to respect it. There is no DOM in this runner, so the render
+ * cannot be exercised — but the mistake was not a subtle rendering bug, it was
+ * a condition naming the wrong variable, and that is visible in the source.
+ */
+describe("the Overview's content-type table", () => {
+  const page = readFileSync(
+    fileURLToPath(new URL("../../app/(app)/page.tsx", import.meta.url)),
+    "utf8",
+  );
+
+  // The condition between the brace that opens the JSX expression and the
+  // component itself. `[^{}]*` is what confines it to the gate: the prose block
+  // above ends in `*/}`, so the match cannot start any earlier than that.
+  const gate =
+    page.match(/\{([^{}]*)\?\s*\(\s*<ContentTypePerformanceTable/)?.[1] ?? "";
+
+  it("is rendered under a gate that exists", () => {
+    expect(gate).not.toBe("");
+  });
+
+  /**
+   * `scopeIsEmpty` is measured over the content-type-filtered rows; this table
+   * is not. Gating on it hides a populated breakdown whenever somebody picks a
+   * type no channel claims.
+   */
+  it("is not gated on a scope it does not share", () => {
+    expect(gate).not.toContain("scopeIsEmpty");
+  });
+
+  /** Last on the page, at the owner's request — below the channel table. */
+  it("renders below the channel table", () => {
+    expect(page.indexOf("<ChannelTable")).toBeLessThan(
+      page.indexOf("<ContentTypePerformanceTable"),
+    );
   });
 });

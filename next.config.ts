@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { YOUTUBE_EMBED_ORIGIN } from "./src/lib/format";
 
 /**
  * Security headers.
@@ -31,9 +32,32 @@ const CSP_DIRECTIVES = [
   // The app talks only to itself. Widen this if a rate provider is configured.
   "connect-src 'self' https://oauth2.googleapis.com https://www.googleapis.com",
   // Nothing in this app should ever be framed — clickjacking protection that
-  // supersedes X-Frame-Options in modern browsers.
+  // supersedes X-Frame-Options in modern browsers. NOT the same directive as
+  // the one below it, and the difference is easy to lose: `frame-ancestors`
+  // governs who may frame US, `frame-src` governs who WE may frame. Only the
+  // second one had to move for the in-app player, and this one must not.
   "frame-ancestors 'none'",
-  "frame-src 'none'",
+  /*
+   * The Shorts player, and nothing else.
+   *
+   * This was `'none'` until Winners, Outliers and the notes log gained an
+   * in-app player, and it is the ONLY directive that had to change for it. One
+   * exact origin, https, no wildcard and no path — `frame-src *` would let any
+   * injected markup frame a phishing page inside a screen a signed-in member of
+   * staff already trusts, which is the whole attack this header exists to stop.
+   *
+   * It is deliberately not widened to `https://www.youtube.com` as well: the
+   * nocookie host serves the same player from the same infrastructure and
+   * answers /embed/ directly rather than redirecting, so a second origin would
+   * buy nothing and double the surface.
+   *
+   * `script-src` is untouched, which is why the player is a plain <iframe>
+   * rather than the YouTube IFrame Player API — the API would need
+   * https://www.youtube.com allowed as a script source, a far larger hole than
+   * this, and the only thing it would buy is stopping playback on close, which
+   * unmounting the element already does.
+   */
+  `frame-src ${YOUTUBE_EMBED_ORIGIN}`,
   "object-src 'none'",
   // Stops an injected <base> tag redirecting every relative URL on the page.
   "base-uri 'self'",

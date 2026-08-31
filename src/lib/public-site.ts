@@ -67,9 +67,9 @@ export const PUBLIC_SITE = {
   },
 
   /** Shown to readers at the top of the privacy policy and the terms. */
-  lastUpdated: "30 August 2026",
+  lastUpdated: "31 August 2026",
   /** Machine-readable form of the same date, for <time dateTime>. */
-  lastUpdatedIso: "2026-08-30",
+  lastUpdatedIso: "2026-08-31",
 } as const;
 
 /** Absolute URL for a public path, e.g. for the Google Branding form. */

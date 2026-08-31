@@ -154,12 +154,91 @@ export function youtubeThumbnailUrl(videoId: string): string {
   return `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
 }
 
+/**
+ * THE PORTRAIT FRAME OF A SHORT, from the id alone.
+ *
+ * `mqdefault.jpg` above is 320x180 WHATEVER SHAPE THE VIDEO IS. For a 9:16
+ * Short that means the real frame is pillarboxed into a 101px strip in the
+ * middle and the remaining two thirds is stretched blur — fine as a 64px chip
+ * beside a note, ruinous as the lead element of a browsing tile, which is what
+ * a Shorts grid makes it.
+ *
+ * `oardefault.jpg` is the same frame at its original aspect ratio — measured
+ * 1080x1920, exactly 9:16, no matting — and it exists for the same video id
+ * with no API call, no key and nothing to store. ("oar" is YouTube's own
+ * shorthand for the original aspect ratio.)
+ *
+ * IT IS NOT GUARANTEED, AND THE 404 IS THE POINT. YouTube generates it only for
+ * a video that actually is portrait. A landscape video returns 404 with the
+ * grey 120x90 placeholder body — verified against a known landscape upload,
+ * where `mqdefault` is 200 and this is 404 — so the miss is a real error event
+ * the `onError` handler can see, not a 200 carrying a picture of nothing. Every
+ * caller must therefore pair this with a fallback to `youtubeThumbnailUrl`:
+ * this app calls a video a Short from its duration and its metadata, and a
+ * sub-minute landscape upload is a perfectly ordinary thing for a competitor to
+ * publish.
+ */
+export function youtubeShortsPosterUrl(videoId: string): string {
+  return `https://i.ytimg.com/vi/${videoId}/oardefault.jpg`;
+}
+
 export function youtubeWatchUrl(videoId: string): string {
   return `https://www.youtube.com/watch?v=${videoId}`;
 }
 
 export function youtubeShortsUrl(videoId: string): string {
   return `https://www.youtube.com/shorts/${videoId}`;
+}
+
+/**
+ * The one host this app is allowed to put in an iframe.
+ *
+ * Exported as a constant rather than inlined into the URL below because it has
+ * to appear in exactly one other place — the `frame-src` directive in
+ * `next.config.ts` — and the two must agree character for character or every
+ * embed fails silently with nothing in the UI to say why. A test asserts the
+ * header contains this value, so a well-meaning tidy-up of either one breaks a
+ * build rather than the player.
+ *
+ * `youtube-nocookie.com` rather than `youtube.com`: it serves the identical
+ * player, but defers cookies until somebody actually presses play and keeps the
+ * view out of ad personalisation. It is not "cookieless" — it still writes a
+ * device id to browser storage on load — so the honest claim is "less", not
+ * "none", which is how the privacy policy words it.
+ */
+export const YOUTUBE_EMBED_ORIGIN = "https://www.youtube-nocookie.com";
+
+/**
+ * The embeddable form of a Short, for the in-app player.
+ *
+ * A Short is an ordinary video that happens to be shot 9:16, so the standard
+ * `/embed/` endpoint is the right one — `/shorts/<id>` is a watch page and
+ * refuses to be framed at all.
+ *
+ * COMPOSED FROM THE ID, never from a stored URL string, for the same reason
+ * `canonicalShortUrl` is: this string becomes the `src` of a document the
+ * browser will execute, and "safe because of what some other file writes into
+ * that column" is a property that holds until somebody restores a backup.
+ *
+ * The parameters are all subtractive except one. `rel=0` keeps the end screen's
+ * suggestions inside the same channel instead of turning a research tool into a
+ * recommendation feed; `modestbranding=1` drops the watermark; `playsinline=1`
+ * stops iOS taking the video fullscreen the moment it starts, which on a phone
+ * would throw the reader out of the app they were reading. `autoplay` is the
+ * caller's decision because it is the only one that depends on the person: see
+ * `usePrefersReducedMotion` at the player.
+ */
+export function youtubeShortsEmbedUrl(
+  videoId: string,
+  options: { autoplay?: boolean } = {},
+): string {
+  const params = new URLSearchParams({
+    rel: "0",
+    modestbranding: "1",
+    playsinline: "1",
+  });
+  if (options.autoplay) params.set("autoplay", "1");
+  return `${YOUTUBE_EMBED_ORIGIN}/embed/${videoId}?${params.toString()}`;
 }
 
 export function youtubeChannelUrl(handle: string | null, channelId: string): string {

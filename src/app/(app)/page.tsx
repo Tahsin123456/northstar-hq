@@ -280,27 +280,6 @@ export default function OverviewPage() {
             loading={isLoading}
           />
 
-          {/*
-            HERE, AND ONLY HERE.
-
-            "What kind of content is working?" is a portfolio question, and the
-            Overview is the one screen that already holds every channel's Shorts
-            alongside the active period, threshold and scope — so this is the
-            only place the table can be built without a second data path or a
-            second definition of a hit. A copy on the niche page would answer a
-            narrower question with the same title, and a copy on a channel page
-            would rank formats over a sample of one channel; both would be a
-            second number that could disagree with this one.
-
-            It sits between the portfolio KPIs and the channel ranking on
-            purpose: the cards say how the operation did, this says what kind of
-            work did it, and the table below says who. Same order as the
-            question a person actually asks.
-          */}
-          {!isLoading && contentTypes.length > 0 ? (
-            <ContentTypePerformanceTable performance={contentTypePerformance} />
-          ) : null}
-
           {!isLoading && scopeIsEmpty ? (
             <div className="rounded-lg border border-border bg-surface">
               <EmptyState
@@ -335,6 +314,61 @@ export default function OverviewPage() {
               loading={isLoading}
             />
           )}
+
+          {/*
+            HERE, AND ONLY HERE.
+
+            "What kind of content is working?" is a portfolio question, and the
+            Overview is the one screen that already holds every channel's Shorts
+            alongside the active period, threshold and scope — so this is the
+            only place the table can be built without a second data path or a
+            second definition of a hit. A copy on the niche page would answer a
+            narrower question with the same title, and a copy on a channel page
+            would rank formats over a sample of one channel; both would be a
+            second number that could disagree with this one.
+
+            LAST ON THE PAGE, at the owner's request. It used to sit between the
+            portfolio KPIs and the channel ranking, and the argument for that
+            position was the order of the questions — how did we do, what kind
+            of work did it, who did it. The argument against turned out to be
+            stronger in use: the channel table is what this screen is opened
+            for, and a second table above it pushed the thing people came to
+            read below the fold on a laptop. The order is now the two answers
+            people came for, then the breakdown they go looking for afterwards.
+
+            Above the hit-rate footnote rather than below it, because that
+            footnote defines the hit rate THIS table also reports — a definition
+            that appears after the last thing it defines is a definition nobody
+            reads in time.
+
+            THE GATE IS THE ONE IT ALWAYS HAD, and an earlier draft of this move
+            was wrong about that. It briefly also required `!scopeIsEmpty`, on
+            the theory that "no channels match these filters" followed by a full
+            table reads as a contradiction, and that `scorecardRows` would be
+            empty in that case anyway so nothing was being hidden. The second
+            half is false, and it is the half the first half rested on.
+
+            `scopeIsEmpty` is measured over `scopedRows`, which applies the
+            CONTENT-TYPE filter; this table is built from `scorecardRows`, which
+            comes off `nicheScopedRows` and deliberately does not — see the long
+            note on `scorecardRows` above for why. The two therefore diverge on
+            exactly one input, and it is a reachable one: pick a type no channel
+            claims (Unassigned, on an org that has tagged everything) and
+            `scopedRows` is empty while this table is fully populated and
+            correct. Gating on `scopeIsEmpty` deleted a real breakdown from the
+            screen at the one moment it was the only thing left on it.
+
+            When the scope is empty for any OTHER reason — a niche or an
+            ownership with no channels — `nicheScopedRows` is empty too, so the
+            table renders its own "nothing to group yet" state under the empty
+            card, which is a pair of consistent statements rather than a
+            contradiction. The search-empty branch never gated it either: search
+            narrows the channel list, not this table's scope, so its figures are
+            still true while a search matches nothing.
+          */}
+          {!isLoading && contentTypes.length > 0 ? (
+            <ContentTypePerformanceTable performance={contentTypePerformance} />
+          ) : null}
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION}

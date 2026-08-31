@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ExternalLink,
   Layers,
   Pencil,
   Plus,
@@ -43,6 +42,7 @@ import {
   NoteVisibilityToggle,
   VisibilityBadge,
 } from "@/components/notes/note-visibility";
+import { ShortPlayerDialog } from "@/components/shorts/short-player-dialog";
 import { useSession } from "@/components/providers/session-provider";
 import { useDeleteNote, useUpdateNote } from "@/hooks/use-research";
 import { useDataset } from "@/hooks/use-dataset";
@@ -51,7 +51,7 @@ import { api } from "@/lib/api-client";
 import { AUTHOR_ME, UNKNOWN_AUTHOR_LABEL, GENERAL_NOTE_LABEL, NOTE_KINDS } from "@/lib/dto";
 import type { NoteKind, NoteWithContextDTO } from "@/lib/dto";
 import type { NoteLogQuery } from "@/server/services/research-service";
-import { formatDate, formatRelativeTime, youtubeShortsUrl } from "@/lib/format";
+import { formatDate, formatRelativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 /**
@@ -505,6 +505,14 @@ function NoteCard({
 }) {
   const [editing, setEditing] = React.useState(false);
   const [draft, setDraft] = React.useState(note.body);
+  /*
+   * A note has up to two Shorts on it and they are different things: the one it
+   * QUOTES from outside the tracker, drawn by `ExternalShortPreview` above the
+   * footer, and the tracked Short it is a note ABOUT, named in the footer. Both
+   * used to open a new tab; both now play here. The preview owns its own
+   * player, so this state is only ever the footer's.
+   */
+  const [playingTarget, setPlayingTarget] = React.useState(false);
   // Seeded from the note so opening the editor shows the Short it already
   // quotes. This card TOGGLES its form rather than unmounting it, so — like
   // `draft` above — it is re-seeded on the way in rather than on mount.
@@ -729,17 +737,32 @@ function NoteCard({
         {hasContext ? (
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             {note.targetType === "video" && note.youtubeVideoId ? (
-              <a
-                href={youtubeShortsUrl(note.youtubeVideoId)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
-                title={note.targetLabel}
-              >
-                <Video className="size-3 shrink-0" />
-                <span className="truncate">{note.targetLabel}</span>
-                <ExternalLink className="size-2.5 shrink-0 opacity-50" />
-              </a>
+              <>
+                {/* Plays in place rather than opening a tab, the same as every
+                    other Short in the app now. Still a control that says what
+                    it is about — the title is the note's context first and the
+                    play affordance second, which is why the icon stays a film
+                    frame rather than becoming a play triangle. */}
+                <button
+                  type="button"
+                  onClick={() => setPlayingTarget(true)}
+                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded text-muted-foreground transition-colors hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
+                  title={`Play ${note.targetLabel}`}
+                >
+                  <Video className="size-3 shrink-0" />
+                  <span className="truncate">{note.targetLabel}</span>
+                </button>
+
+                <ShortPlayerDialog
+                  short={{
+                    youtubeVideoId: note.youtubeVideoId,
+                    title: note.targetLabel,
+                    subtitle: note.channelName,
+                  }}
+                  open={playingTarget}
+                  onOpenChange={setPlayingTarget}
+                />
+              </>
             ) : null}
 
             {note.channelId ? (

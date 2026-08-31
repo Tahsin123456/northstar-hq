@@ -4,6 +4,7 @@ import * as React from "react";
 import { ExternalLink, Play, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label } from "@/components/ui/input";
+import { ShortPlayerDialog } from "@/components/shorts/short-player-dialog";
 import type { NoteDTO } from "@/lib/dto";
 import { youtubeThumbnailUrl } from "@/lib/format";
 import {
@@ -61,6 +62,22 @@ export function ExternalShortPreview({
   note: ExternalShortFields;
   className?: string;
 }) {
+  /*
+   * THE ATTACHMENT PLAYS HERE NOW, and this component is why request "same for
+   * notes as well" reaches three screens at once: the research log, the notes
+   * panel on a channel page, and the composer's own preview all draw this. That
+   * is the point of it being one component — an attachment that played in the
+   * log and opened a tab in the panel would be the exact drift the file header
+   * argues against.
+   *
+   * It became a card with two controls rather than one link, because a play
+   * button inside an anchor is invalid markup and a keyboard user gets whichever
+   * of the two the browser happens to pick. So: the frame and the title are a
+   * button that opens the player, and the way out to YouTube is its own small
+   * link beside them.
+   */
+  const [playing, setPlaying] = React.useState(false);
+
   const { externalVideoId, externalUrl } = note;
   if (!externalVideoId || !externalUrl) return null;
 
@@ -76,8 +93,30 @@ export function ExternalShortPreview({
   const subtitle = note.externalChannelTitle ?? `youtube.com/shorts/${externalVideoId}`;
 
   return (
-    <a
-      /*
+    <div
+      className={cn(
+        "group/short flex items-center gap-2.5 rounded-lg border border-border bg-surface-sunken/60 p-2",
+        "transition-colors duration-150 hover:border-border-strong hover:bg-surface-hover",
+        className,
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setPlaying(true)}
+        title={note.externalTitle ?? `Play this Short — ${externalVideoId}`}
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
+      >
+        <ExternalShortThumbnail videoId={externalVideoId} />
+
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-[12px] font-medium text-foreground transition-colors group-hover/short:text-accent">
+            {title}
+          </span>
+          <span className="truncate text-[11px] text-subtle-foreground">{subtitle}</span>
+        </span>
+      </button>
+
+      {/*
        * COMPOSED HERE, not read from the column.
        *
        * `externalUrl` is safe today — `externalShortColumns` is its only writer
@@ -87,33 +126,36 @@ export function ExternalShortPreview({
        * backup, hand-edits a row, or adds a second writer. Rebuilding from
        * `externalVideoId`, which this component already requires to be present,
        * costs nothing and makes a hostile value unreachable rather than absent.
-       */
-      href={canonicalShortUrl(externalVideoId)}
-      target="_blank"
-      // Opening in a new tab hands the new document a handle on this one
-      // through `window.opener` unless it is cut. `noreferrer` covers the
-      // browsers where `noopener` alone is not enough, and neither is optional
-      // on a link whose destination somebody else chose.
-      rel="noopener noreferrer"
-      title={note.externalTitle ?? `Open this Short on YouTube — ${externalVideoId}`}
-      className={cn(
-        "group/short flex items-center gap-2.5 rounded-lg border border-border bg-surface-sunken/60 p-2",
-        "transition-colors duration-150 hover:border-border-strong hover:bg-surface-hover",
-        "focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]",
-        className,
-      )}
-    >
-      <ExternalShortThumbnail videoId={externalVideoId} />
+       * The player's `src` is built from the same id for the same reason.
+       *
+       * KEPT, now that the card plays in place. Some Shorts refuse to be
+       * embedded at all — the creator disabled it, or the music on it is
+       * licensed that way — and this is then the only route to the video. It is
+       * also simply a smaller thing than YouTube: no comments, no channel, no
+       * subscribe. Replacing the link with the player would have been a
+       * capability removed, not a capability added.
+       */}
+      <a
+        href={canonicalShortUrl(externalVideoId)}
+        target="_blank"
+        // Opening in a new tab hands the new document a handle on this one
+        // through `window.opener` unless it is cut. `noreferrer` covers the
+        // browsers where `noopener` alone is not enough, and neither is optional
+        // on a link whose destination somebody else chose.
+        rel="noopener noreferrer"
+        title={`Open this Short on YouTube — ${externalVideoId}`}
+        aria-label="Open this Short on YouTube"
+        className="shrink-0 rounded p-1 text-subtle-foreground transition-colors hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
+      >
+        <ExternalLink className="size-3" />
+      </a>
 
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="truncate text-[12px] font-medium text-foreground transition-colors group-hover/short:text-accent">
-          {title}
-        </span>
-        <span className="truncate text-[11px] text-subtle-foreground">{subtitle}</span>
-      </span>
-
-      <ExternalLink className="size-3 shrink-0 text-subtle-foreground transition-colors group-hover/short:text-accent" />
-    </a>
+      <ShortPlayerDialog
+        short={{ youtubeVideoId: externalVideoId, title, subtitle }}
+        open={playing}
+        onOpenChange={setPlaying}
+      />
+    </div>
   );
 }
 

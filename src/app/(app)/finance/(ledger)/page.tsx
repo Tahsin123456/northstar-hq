@@ -79,144 +79,179 @@ export default function FinancePage() {
 
       {isLoading || !data ? (
         <OverviewSkeleton />
-      ) : isPeriodEmpty(data.summary) ? (
-        <Card>
-          <EmptyState
-            icon={<Wallet />}
-            title="No finance entries in this period"
-            description={
-              <>
-                This page reads one ledger. Add what the studio{" "}
-                <strong className="text-foreground">earned</strong> — AdSense payouts,
-                sponsorships, affiliate income — and what it{" "}
-                <strong className="text-foreground">spent</strong> — editors, thumbnails,
-                software, ads — and the totals, trends and per-channel profit below fill
-                themselves in. Entries dated outside{" "}
-                {formatDate(data.range.startMs)} {EM_DASH}{" "}
-                {formatDate(data.range.endMs - 1)} are not counted here, so a wider period
-                may already have something to show.
-              </>
-            }
-            action={
-              <IfPermitted
-                to="finance.manage"
-                fallback={
-                  <Button variant="secondary" asChild>
-                    <Link href="/finance/entries">Open entries</Link>
-                  </Button>
-                }
-              >
-                <Button variant="primary" asChild>
-                  <Link href="/finance/entries">Add the first entry</Link>
-                </Button>
-              </IfPermitted>
-            }
-          />
-        </Card>
       ) : (
         <>
-          <KpiRow
-            revenueMinor={data.summary.revenueMinor}
-            expenseMinor={data.summary.expenseMinor}
-            netMinor={data.summary.netMinor}
-            margin={data.summary.margin}
-            currency={data.baseCurrency}
-            estimatedRevenueMinor={data.estimated.revenueMinor}
-          />
+          {isPeriodEmpty(data.summary) ? (
+            <Card>
+              <EmptyState
+                icon={<Wallet />}
+                title="No finance entries in this period"
+                description={
+                  <>
+                    This page reads one ledger. Add what the studio{" "}
+                    <strong className="text-foreground">earned</strong> — AdSense payouts,
+                    sponsorships, affiliate income — and what it{" "}
+                    <strong className="text-foreground">spent</strong> — editors, thumbnails,
+                    software, ads — and the totals, trends and per-channel profit below fill
+                    themselves in. Entries dated outside{" "}
+                    {formatDate(data.range.startMs)} {EM_DASH}{" "}
+                    {formatDate(data.range.endMs - 1)} are not counted here, so a wider period
+                    may already have something to show.
+                  </>
+                }
+                action={
+                  <IfPermitted
+                    to="finance.manage"
+                    fallback={
+                      <Button variant="secondary" asChild>
+                        <Link href="/finance/entries">Open entries</Link>
+                      </Button>
+                    }
+                  >
+                    <Button variant="primary" asChild>
+                      <Link href="/finance/entries">Add the first entry</Link>
+                    </Button>
+                  </IfPermitted>
+                }
+              />
+            </Card>
+          ) : (
+            <>
+              <KpiRow
+                revenueMinor={data.summary.revenueMinor}
+                expenseMinor={data.summary.expenseMinor}
+                netMinor={data.summary.netMinor}
+                margin={data.summary.margin}
+                currency={data.baseCurrency}
+                estimatedRevenueMinor={data.estimated.revenueMinor}
+              />
 
-          {data.estimated.revenueMinor > 0 ? (
-            <EstimateNotice
-              estimatedRevenueMinor={data.estimated.revenueMinor}
-              revenueMinor={data.summary.revenueMinor}
-              entryCount={data.estimated.entryCount}
-              currency={data.baseCurrency}
-            />
-          ) : null}
+              {data.estimated.revenueMinor > 0 ? (
+                <EstimateNotice
+                  estimatedRevenueMinor={data.estimated.revenueMinor}
+                  revenueMinor={data.summary.revenueMinor}
+                  entryCount={data.estimated.entryCount}
+                  currency={data.baseCurrency}
+                />
+              ) : null}
+
+              {/*
+                Directly under the figures it qualifies, beside the estimate notice
+                rather than buried in the YouTube section below — an omitted channel
+                changes what revenue, net profit and margin MEAN, and that has to be
+                readable at the same moment as the numbers.
+              */}
+              <YouTubeCoverageCaveat report={data.youtubeRevenue} />
+
+              {data.truncated ? <TruncationNotice /> : null}
+
+              <div className="grid gap-4 xl:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Revenue vs expenses</CardTitle>
+                    <CardDescription>
+                      Money in against money out, by {data.granularity}. The gap between each
+                      pair is that {data.granularity}&rsquo;s profit.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <RevenueExpenseChart
+                      points={data.series}
+                      currency={data.baseCurrency}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Net profit over time</CardTitle>
+                    <CardDescription>
+                      Revenue minus expenses per {data.granularity}. Anything below the zero
+                      line is a {data.granularity} that lost money.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <NetProfitChart points={data.series} currency={data.baseCurrency} />
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid gap-4 xl:grid-cols-[1.6fr_minmax(260px,1fr)]">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Revenue by channel</CardTitle>
+                    <CardDescription>
+                      Which channels brought the money in. Income not attributed to one channel
+                      is grouped as company-wide rather than shared out.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <RevenueByChannelChart
+                      slices={data.summary.revenueByChannel}
+                      currency={data.baseCurrency}
+                    />
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Expense breakdown</CardTitle>
+                    <CardDescription>What the studio spent on, by category.</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ExpenseBreakdownDonut
+                      slices={data.summary.expenseByCategory}
+                      currency={data.baseCurrency}
+                      totalMinor={sumSlices(data.summary.expenseByCategory)}
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+
+              <ChannelProfitTable rows={data.byChannel} currency={data.baseCurrency} />
+            </>
+          )}
 
           {/*
-            Directly under the figures it qualifies, beside the estimate notice
-            rather than buried in the YouTube section below — an omitted channel
-            changes what revenue, net profit and margin MEAN, and that has to be
-            readable at the same moment as the numbers.
-          */}
-          <YouTubeCoverageCaveat report={data.youtubeRevenue} />
+            =====================================================================
+            OWN-CHANNEL EARNINGS — OUTSIDE THE EMPTY-PERIOD BRANCH, DELIBERATELY
+            =====================================================================
 
-          {data.truncated ? <TruncationNotice /> : null}
+            Last on the page, and deliberately below the ledger's own view of the
+            money. The figures above are the record — converted, reconciled, the
+            ones a profit decision is made on. This section is the SOURCE: what
+            YouTube itself reported per channel per month, un-converted and
+            checkable against YouTube Studio, plus which of the studio's own
+            channels have nothing reading their earnings at all. Putting it above
+            the totals would make an estimate the headline; leaving it off the
+            page entirely is what let a total quietly omit an unconnected
+            channel.
 
-          <div className="grid gap-4 xl:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <CardTitle>Revenue vs expenses</CardTitle>
-                <CardDescription>
-                  Money in against money out, by {data.granularity}. The gap between each
-                  pair is that {data.granularity}&rsquo;s profit.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <RevenueExpenseChart
-                  points={data.series}
-                  currency={data.baseCurrency}
-                />
-              </CardContent>
-            </Card>
+            IT USED TO BE INSIDE THE ELSE-BRANCH, and that was a real bug rather
+            than a layout preference. `isPeriodEmpty` asks a question about the
+            LEDGER — are there typed entries in the selected window — and this
+            section answers a question that is not scoped to the window at all:
+            its headline "Total" is computed over every day YouTube has ever
+            reported, precisely so it survives the period selector. So an
+            organisation whose only income is imported YouTube revenue, viewed
+            on a period with no ledger entries, was shown "No finance entries in
+            this period" and nothing else — no lifetime total, and, worse, no
+            coverage panel naming the channels nobody is reading. The one screen
+            that exists to say "this figure omits a channel" went silent in
+            exactly the state where somebody is most likely to be wondering
+            where their money is.
 
-            <Card>
-              <CardHeader>
-                <CardTitle>Net profit over time</CardTitle>
-                <CardDescription>
-                  Revenue minus expenses per {data.granularity}. Anything below the zero
-                  line is a {data.granularity} that lost money.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <NetProfitChart points={data.series} currency={data.baseCurrency} />
-              </CardContent>
-            </Card>
-          </div>
+            The coverage CAVEAT above stays inside the branch, because its words
+            are about the figures it sits under — "missing from revenue, net
+            profit and margin above" — and there are none in the empty state.
+            The coverage panel inside this section covers that case instead, and
+            it names every channel rather than only counting them.
 
-          <div className="grid gap-4 xl:grid-cols-[1.6fr_minmax(260px,1fr)]">
-            <Card>
-              <CardHeader>
-                <CardTitle>Revenue by channel</CardTitle>
-                <CardDescription>
-                  Which channels brought the money in. Income not attributed to one channel
-                  is grouped as company-wide rather than shared out.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <RevenueByChannelChart
-                  slices={data.summary.revenueByChannel}
-                  currency={data.baseCurrency}
-                />
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle>Expense breakdown</CardTitle>
-                <CardDescription>What the studio spent on, by category.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ExpenseBreakdownDonut
-                  slices={data.summary.expenseByCategory}
-                  currency={data.baseCurrency}
-                  totalMinor={sumSlices(data.summary.expenseByCategory)}
-                />
-              </CardContent>
-            </Card>
-          </div>
-
-          <ChannelProfitTable rows={data.byChannel} currency={data.baseCurrency} />
-
-          {/*
-            Last, and deliberately below the ledger's own view of the money.
-            The figures above are the record — converted, reconciled, the ones a
-            profit decision is made on. This section is the SOURCE: what YouTube
-            itself reported per channel per month, un-converted and checkable
-            against YouTube Studio, plus which of the studio's own channels have
-            nothing reading their earnings at all. Putting it above the totals
-            would make an estimate the headline; leaving it off the page entirely
-            is what let a total quietly omit an unconnected channel.
+            Nothing about who may READ this changed. The whole route is behind
+            `finance.view`: the ledger layout redirects without it, and
+            `/api/finance/overview` refuses the request that carries
+            `youtubeRevenue` at all, so an unauthorised caller does not receive
+            these figures and then have them hidden — they never arrive.
           */}
           <YouTubeRevenueSection report={data.youtubeRevenue} />
         </>

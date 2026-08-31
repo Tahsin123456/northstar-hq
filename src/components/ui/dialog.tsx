@@ -18,7 +18,12 @@ export const DialogOverlay = React.forwardRef<
     ref={ref}
     className={cn(
       "fixed inset-0 z-50 bg-black/55 backdrop-blur-[2px]",
-      "data-[state=open]:animate-[overlay-in_150ms_ease-out]",
+      // The global reduced-motion rule in globals.css already collapses the
+      // duration to ~0, so this is belt and braces — but it is stated at the
+      // element because a dialog is the one animation in the app that moves a
+      // large surface across the viewport, which is the kind somebody with a
+      // vestibular condition asks their system to stop.
+      "data-[state=open]:animate-[overlay-in_150ms_ease-out] motion-reduce:animate-none",
       className,
     )}
     {...props}
@@ -39,7 +44,13 @@ export const DialogContent = React.forwardRef<
       className={cn(
         "fixed left-1/2 top-1/2 z-50 w-[calc(100vw-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2",
         "rounded-xl border border-border bg-surface-raised shadow-2xl shadow-black/40",
-        "data-[state=open]:animate-[content-in_180ms_cubic-bezier(0.16,1,0.3,1)]",
+        // No EXIT animation, and that is load-bearing rather than an omission:
+        // Radix keeps the portal mounted for the length of one, and the Shorts
+        // player inside this content is a cross-origin iframe that goes on
+        // playing for exactly as long as it stays in the tree. An exit
+        // transition added here would put a voice behind a dismissed overlay on
+        // every screen at once.
+        "data-[state=open]:animate-[content-in_180ms_cubic-bezier(0.16,1,0.3,1)] motion-reduce:animate-none",
         "focus:outline-none",
         className,
       )}

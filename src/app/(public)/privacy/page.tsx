@@ -121,6 +121,11 @@ export default function PrivacyPage() {
             email provider and to Telegram. Nothing else.
           </li>
           <li>
+            Shorts can be played inside the application. Pressing play loads YouTube&apos;s
+            own player, which means your browser connects to Google directly at that moment.
+            Nothing loads it until you click a specific Short.
+          </li>
+          <li>
             Access can be withdrawn at any time from the{" "}
             <ExternalLink href="https://myaccount.google.com/permissions">
               Google Account permissions page
@@ -199,6 +204,12 @@ export default function PrivacyPage() {
           </li>
           <li>
             No viewer, audience or demographic data, and no watch history for any individual.
+            One clarification, because the sentence could otherwise be read too widely: this
+            is about what {BRAND.product} collects and stores. Playing a Short in the built-in
+            player is a normal YouTube view, so it may appear in the watch history of
+            whichever Google account the member of staff&apos;s own browser is signed in to,
+            in the same way as watching it on youtube.com. {BRAND.product} neither receives
+            nor records that.
           </li>
           <li>No payment card or bank details of any kind.</li>
         </Bullets>
@@ -291,8 +302,12 @@ export default function PrivacyPage() {
 
       <Section title="Who else the data reaches">
         <Paragraph>
-          {BRAND.product} sends data to three external services and no others. There is no
-          analytics, telemetry or error-reporting service embedded in this application.
+          {BRAND.product} sends data to three external services and no others. Google is
+          listed twice below, because data reaches it by two genuinely different routes and
+          collapsing them into one entry would hide the second: everything this application
+          asks for goes from its server to Google, but the embedded Shorts player is loaded
+          by the reader&apos;s own browser. There is no analytics, telemetry or
+          error-reporting service embedded in this application.
         </Paragraph>
         <Bullets>
           <li>
@@ -301,6 +316,32 @@ export default function PrivacyPage() {
             receives Google user data itself — no channel, video, view or revenue figure
             obtained through the connection is sent anywhere else. One derived number does
             leave, and it is described under Telegram below.
+          </li>
+          <li>
+            <strong className="font-medium text-foreground">
+              Google again, and by a different route: the embedded Shorts player
+            </strong>{" "}
+            is named separately because it is a different kind of flow from everything else
+            in this policy, and calling both of them &ldquo;Google&rdquo; would hide that.
+            Everywhere else, this application&apos;s server asks Google for data. Here, the
+            member of staff&apos;s own browser loads YouTube&apos;s player directly, so
+            Google sees their IP address, their browser, which video they opened, and
+            whichever Google account that browser happens to be signed in to. It can also
+            store data in that browser, as YouTube does on youtube.com. None of it passes
+            through {BRAND.product} and none of it is recorded here.
+            <br />
+            Three things limit it. It happens only when somebody clicks a specific Short to
+            watch it — no page loads the player on its own, so a session that never plays
+            anything never reaches it. The player is loaded from{" "}
+            <ExternalLink href="https://www.youtube-nocookie.com">
+              youtube-nocookie.com
+            </ExternalLink>
+            , which defers cookies until playback starts and keeps the view out of ad
+            personalisation; it is not cookie-free, and the honest description is
+            &ldquo;less&rdquo;, not &ldquo;none&rdquo;. And the browser is told to send only
+            this site&apos;s address rather than the page being read, so Google is not told
+            which screen of the tool the Short was opened from. The content security policy
+            permits that one address to be embedded and no other.
           </li>
           <li>
             <strong className="font-medium text-foreground">
