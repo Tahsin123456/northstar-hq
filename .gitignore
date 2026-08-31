@@ -72,3 +72,5 @@ GOOGLE-CREDENTIALS.local.txt
 check-google-credentials.mjs
 fix-google-credentials.mjs
 .vercel/
+diagnose-credentials.mjs
+.env.vercel-check
