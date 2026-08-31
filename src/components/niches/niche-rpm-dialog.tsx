@@ -4,11 +4,13 @@ import * as React from "react";
 import { DollarSign } from "lucide-react";
 import { toast } from "sonner";
 import {
+  ENGAGED_VIEWS_GLOSS,
   MAX_RPM_MAJOR_PER_THOUSAND,
   RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND,
   formatRpm,
   maxRpmMinorPerMillion,
   parseRpmToMinorPerMillion,
+  rpmQuoteUnit,
   rpmToInputText,
   rpmDigitsFor,
 } from "@/lib/analytics/niche-rpm";
@@ -110,39 +112,42 @@ export function NicheRpmDialog({
 }
 
 /**
- * A button that opens the dialog, for a surface that only wants "let somebody
- * fix this from here".
+ * What the "…" menu item is called, in one place.
  *
- * Renders nothing without the permission rather than a disabled control,
- * following `SetNicheThresholdButton`: somebody looking at an unpriced niche is
- * not being denied something, they are looking at work that belongs to
- * somebody else, and a greyed-out button would suggest otherwise.
+ * Exported so the value strip can POINT at it by name — "set it from this
+ * card's … menu, under RPM range" — rather than describing a label that could
+ * be renamed here tomorrow and leave the sentence pointing at nothing.
+ *
+ * THIS REPLACED A BUTTON. `SetNicheRpmButton` used to render an inline accent
+ * link inside the money strip, at two places, and the owner's word for the
+ * result was "ugly": a control dressed as prose, sitting in the middle of a
+ * paragraph that explains why there is no number. The dialog is opened from the
+ * card's menu now, beside the card's other four actions, which is also where
+ * somebody looks for it. The component was deleted rather than left exported
+ * with no callers — dead exported code reads as "something else must use this".
  */
-export function SetNicheRpmButton({
-  niche,
-  label = "Set RPM range",
-}: {
-  niche: NicheDTO;
-  label?: string;
-}) {
-  const canConfigure = useCanConfigureRpm();
-  const [open, setOpen] = React.useState(false);
+export const RPM_MENU_ITEM_LABEL = "RPM range";
 
-  if (!canConfigure) return null;
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="text-[11px] font-medium text-accent transition-colors hover:text-accent-hover"
-      >
-        {label}
-      </button>
-      <NicheRpmDialog niche={niche} open={open} onOpenChange={setOpen} />
-    </>
-  );
-}
+/**
+ * THE UNIT UNDER THIS FIELD CHANGED, AND THE STORED NUMBER DID NOT.
+ *
+ * The previous release asked for "what 1,000 views in {niche} are worth" and
+ * multiplied the answer by the full view count. This release asks for the same
+ * column as 1,000 ENGAGED views and multiplies it by the engaged subset —
+ * roughly half. The migration is additive by design and rewrites no niche row,
+ * which is correct (a backfill would be this code guessing which unit somebody
+ * meant), but it means any range entered before this deploy now produces about
+ * half the money it did yesterday with nothing on screen to explain the drop.
+ *
+ * Nobody can check the production table from here, and "we assume no niche is
+ * priced yet" is an assumption in a comment rather than a fact. So the form
+ * says it, once, and only to a reader who actually has a stored range in the
+ * boxes — the only person who can be affected, and the only one who can fix it.
+ * It is a note rather than a blocking confirmation because the number may well
+ * still be right; what it must not be is a silent halving.
+ */
+export const RPM_UNIT_CHANGED_NOTICE =
+  "Heads up: this range is now read as revenue per 1,000 ENGAGED views. Earlier versions of this dialog asked for it per 1,000 total views. If this figure was entered before that change, check it against the engaged unit — otherwise the niche will be valued at roughly half of what it was.";
 
 /** The stored range as this form's two boxes, or empty strings. */
 function seedFields(
@@ -225,7 +230,9 @@ function NicheRpmForm({
     }
     if (parsed > maxRpmMinorPerMillion(currency)) {
       setError(
-        `That is more than ${MAX_RPM_MAJOR_PER_THOUSAND} ${currency} per 1,000 views, which is higher than any format has ever paid — check the decimal point.`,
+        `That is more than ${MAX_RPM_MAJOR_PER_THOUSAND} ${currency} ${rpmQuoteUnit(
+          "engaged",
+        )}, which is higher than any format has ever paid — check the decimal point.`,
       );
       return { ok: false };
     }
@@ -300,7 +307,7 @@ function NicheRpmForm({
                   : `${niche.name}: ${formatRpm(low.value ?? 0, currency)}–${formatRpm(
                       high.value ?? 0,
                       currency,
-                    )} per 1,000 views`,
+                    )} ${rpmQuoteUnit("engaged")}`,
                 {
                   description: unpriced
                     ? "No money figure is shown for this niche until somebody prices it again, or a monetized channel here starts reporting revenue."
@@ -320,45 +327,115 @@ function NicheRpmForm({
       <DialogHeader>
         <DialogTitle>{niche.name} RPM</DialogTitle>
         <DialogDescription>
-          What 1,000 views in {niche.name} are worth, as a low–high range. This is used
-          to estimate how much the tracked niche is generating and how much of it
-          Northstar is capturing. If Northstar operates a monetized channel here, that
-          channel&rsquo;s own measured rate is used instead of this.
+          {/* RPM glossed on first use, because this dialog is where somebody
+              who has never met the term is asked to supply one. */}
+          RPM is revenue per 1,000 views. This is what 1,000 ENGAGED views in{" "}
+          {niche.name} are worth, as a low–high range — engaged views being the paid
+          subset YouTube actually counts, which is the unit a Shorts RPM is quoted
+          in everywhere else. Northstar assumes they are a set share of the public
+          view count, editable under Settings, and applies that share before this
+          rate. The result estimates how much the tracked niche is generating and
+          how much of it Northstar is capturing. If Northstar operates a monetized
+          channel here, that channel&rsquo;s own measured rate is used instead of
+          this — and that one already accounts for engagement, so it is applied to
+          the full view count.
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody className="flex flex-col gap-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="niche-rpm-low">Low ({currency} per 1,000 views)</Label>
-            <Input
-              id="niche-rpm-low"
-              autoFocus
-              inputMode="decimal"
-              placeholder="e.g. 0.03"
-              value={lowValue}
-              invalid={Boolean(lowError)}
-              onChange={(event) => {
-                setLowValue(event.target.value);
-                setLowError(null);
-                setRangeError(null);
-              }}
-            />
-          </div>
-          <div className="flex flex-col gap-2">
-            <Label htmlFor="niche-rpm-high">High</Label>
-            <Input
-              id="niche-rpm-high"
-              inputMode="decimal"
-              placeholder="e.g. 0.08"
-              value={highValue}
-              invalid={Boolean(highError)}
-              onChange={(event) => {
-                setHighValue(event.target.value);
-                setHighError(null);
-                setRangeError(null);
-              }}
-            />
+        {/* Only for a reader who is actually looking at a pre-existing range.
+            See `RPM_UNIT_CHANGED_NOTICE`. */}
+        {seeded.low || seeded.high ? (
+          <p
+            role="note"
+            className="rounded-md border border-accent/30 bg-accent-subtle px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground"
+          >
+            {RPM_UNIT_CHANGED_NOTICE}
+          </p>
+        ) : null}
+
+        {/*
+          =====================================================================
+          WHY THE TWO BOXES DID NOT LINE UP, AND WHAT ACTUALLY FIXES IT
+          =====================================================================
+          The owner reported the low and high boxes sitting at different
+          heights. There were TWO independent causes and both had to go — fixing
+          either alone leaves the bug on some currency or some viewport.
+
+          (1) THE LABELS WERE ASYMMETRIC. The left one read "Low (USD per 1,000
+              views)" — 25 characters — against a bare "High". The dialog is
+              `max-w-sm` (384px) less 24px of body padding each side less a 12px
+              gap, so each column is 162px; 25 characters at 13px runs about
+              170px and wrapped to two lines while "High" stayed on one. The
+              right-hand input therefore sat exactly one label line-height
+              higher. It was not a near miss either: `currency` is dynamic, so
+              any code longer than three characters wraps it for certain.
+
+              The unit is now stated ONCE, above the pair, which also fixes an
+              accessibility gap nobody had noticed — a screen-reader user heard
+              "Low, USD per 1,000 views" and then a bare "High" with no unit at
+              all. `aria-describedby` now gives both fields the same unit.
+
+          (2) NOTHING PINNED THE INPUTS TO A SHARED LINE. Both cells were
+              top-packed flex columns: no `items-end`, no `self-end`, no
+              `mt-auto`, no minimum height on the label. So they aligned only
+              for as long as the two labels happened to occupy the same number
+              of lines, which is alignment by coincidence.
+
+              `h-full` on each cell (the grid already stretches its items) plus
+              `mt-auto` on each input pins both inputs to the BOTTOM of the
+              tallest cell. That holds whatever any future label does — a longer
+              currency code, a translation, a wrapped word — which is the
+              difference between fixing this instance and fixing the cause.
+        */}
+        <div className="flex flex-col gap-2">
+          {/* A span rather than a `<Label>`: it names the pair, not one input,
+              and a `<label>` with no `for` is a label pointing at nothing. The
+              two inputs reach it through `aria-describedby` instead, so both
+              carry the unit in their accessible description. */}
+          <span
+            id="niche-rpm-unit"
+            className="text-[13px] font-medium leading-none text-foreground"
+          >
+            {currency} {rpmQuoteUnit("engaged")}
+          </span>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex h-full flex-col gap-2">
+              <Label htmlFor="niche-rpm-low">Low</Label>
+              <Input
+                id="niche-rpm-low"
+                autoFocus
+                inputMode="decimal"
+                placeholder="e.g. 0.03"
+                value={lowValue}
+                invalid={Boolean(lowError)}
+                aria-describedby="niche-rpm-unit"
+                className="mt-auto"
+                onChange={(event) => {
+                  setLowValue(event.target.value);
+                  setLowError(null);
+                  setRangeError(null);
+                }}
+              />
+            </div>
+            <div className="flex h-full flex-col gap-2">
+              <Label htmlFor="niche-rpm-high">High</Label>
+              <Input
+                id="niche-rpm-high"
+                inputMode="decimal"
+                placeholder="e.g. 0.08"
+                value={highValue}
+                invalid={Boolean(highError)}
+                aria-describedby="niche-rpm-unit"
+                className="mt-auto"
+                onChange={(event) => {
+                  setHighValue(event.target.value);
+                  setHighError(null);
+                  setRangeError(null);
+                }}
+              />
+            </div>
           </div>
         </div>
 
@@ -372,8 +449,16 @@ function NicheRpmForm({
             10 ** rpmDigitsFor(currency) / 10,
             currency,
           )}{" "}
-          per 1,000 views. Leave both empty to clear the estimate.
+          {rpmQuoteUnit("engaged")}. Leave both empty to clear the estimate.
         </FieldHint>
+
+        {/* THE GLOSS, at the point of entry. This is the box where a rate
+            quoted in the wrong unit does its damage: type a per-raw-view figure
+            here and every money figure in the niche doubles. Saying what
+            engaged views are, right under the field, is cheaper than any
+            validation could be — the two units are both plausible numbers and
+            no parser can tell them apart. */}
+        <FieldHint>{ENGAGED_VIEWS_GLOSS}</FieldHint>
 
         {/*
           Said where the empty boxes are, because empty boxes are the thing that
@@ -399,9 +484,9 @@ function NicheRpmForm({
 
         {implausible ? (
           <FieldHint tone="danger">
-            That is above {RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND} {currency} per 1,000
-            views. Shorts rates are two orders of magnitude below that, so check the
-            decimal point before saving.
+            That is above {RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND} {currency}{" "}
+            {rpmQuoteUnit("engaged")}. Shorts rates are two orders of magnitude below
+            that, so check the decimal point before saving.
           </FieldHint>
         ) : null}
       </DialogBody>

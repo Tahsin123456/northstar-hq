@@ -170,6 +170,20 @@ export async function resolveNicheRpmByNiche(options: {
         channels: outcomesByNiche.get(niche.id) ?? [],
         window,
         baseCurrency,
+        /*
+         * THE ASSUMPTION TRAVELS WITH THE RATE, and this line is the whole
+         * delivery decision for engaged views.
+         *
+         * The money is projected in the browser, and `OrganizationSettings` is
+         * read behind `settings.manage` — so without this the share would never
+         * reach a `finance.view` reader through any payload that exists.
+         * Widening the organization settings read to deliver it would hand
+         * every employee the sync cadence and the lookback window to solve a
+         * problem about a single integer. This resolution is already gated on
+         * exactly the right permission, so the share rides on it and no client
+         * can price views with a share that is stale or absent.
+         */
+        engagedViewShareBasisPoints: settings.engagedViewShareBasisPoints,
         ratesToBase,
       }),
     );

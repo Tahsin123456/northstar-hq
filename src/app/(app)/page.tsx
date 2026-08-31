@@ -24,6 +24,7 @@ import {
   useVisibleRows,
 } from "@/hooks/use-channel-analytics";
 import { ContentTypePerformanceTable } from "@/components/dashboard/content-type-performance-table";
+import { NicheEarningsPanel } from "@/components/dashboard/niche-earnings-panel";
 import {
   ContentTypeFilterControl,
   NicheFilterControl,
@@ -279,6 +280,33 @@ export default function OverviewPage() {
             previousSummary={previousSummary}
             loading={isLoading}
           />
+
+          {/*
+            WHAT EACH NICHE IS GENERATING — directly under the KPI strip, and
+            only for a reader the server sent niche economics to.
+
+            THE POSITION follows the same rule that moved the content-type table
+            to the bottom of this page: the channel table is what this screen is
+            opened for, so nothing may push it below the fold. This is a
+            portfolio answer, which puts it in the portfolio-answer slot beside
+            the KPIs rather than above the table's own headings.
+
+            THE GATE IS THE DATA. `NicheDTO.rpm` is null for anybody without
+            `finance.view`, so this renders nothing at all for them — no empty
+            card, no lock icon, nothing to ask about. See the panel's header for
+            why the permission hook inside it is an optimisation rather than the
+            boundary.
+
+            IT READS THIS PAGE'S PERIOD. `range` is the value `PeriodSelector`
+            above already writes and every other aggregate here consumes, so the
+            panel cannot disagree with the cards beside it about which window is
+            on screen.
+
+            NOT GATED ON `isLoading` OR ON `scopeIsEmpty`. It renders its own
+            honest empty state — and on this deployment it renders exactly that,
+            because no niche has a rate yet.
+          */}
+          <NicheEarningsPanel niches={niches} rows={rows} range={range} />
 
           {!isLoading && scopeIsEmpty ? (
             <div className="rounded-lg border border-border bg-surface">

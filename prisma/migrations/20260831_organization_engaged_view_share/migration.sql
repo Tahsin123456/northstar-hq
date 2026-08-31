@@ -1,0 +1,57 @@
+-- YouTube does not pay Shorts against the view count the public sees. It pays
+-- against ENGAGED views, a strictly smaller number that nothing on this
+-- deployment can measure: the Analytics reads give money
+-- (`channel_revenue_days`) and raw public counters (`video_snapshots`), and
+-- engaged views appear in neither. So the ratio has to be assumed, and this
+-- column is where that assumption is written down once instead of being
+-- hardcoded in whichever file happened to need it first.
+--
+-- It matters because it is a factor of two, not a rounding. `niches.rpm*` is
+-- entered per 1,000 ENGAGED views; multiplying it by raw views — which is what
+-- the code does today — overstates a niche's earnings by roughly 2x at the
+-- owner's stated 50%.
+--
+-- UNITS: BASIS POINTS, hundredths of one percent. 5000 = 50.00%, 4750 = 47.5%,
+-- 10000 = 100%. Whole percent was the obvious scale and cannot express 47.5%,
+-- which is a granularity somebody deliberately tuning an assumption will want.
+-- Basis points also keep the arithmetic integral and float-free, as the money
+-- rule in this schema requires: engagedViews = views * bp / 10000, then
+-- revenueMinor = engagedViews * rpm / 1000000 — two exact divisions by powers
+-- of ten, no binary fraction anywhere upstream of a currency amount.
+--
+-- ORG-WIDE, not per niche. This is a fact about how YouTube pays, not about the
+-- GTA niche versus the finance niche, and no data source here could ever fill a
+-- per-niche column with anything but guesses. It lands beside `defaultThreshold`
+-- and `defaultPeriodDays`, which are the same class of shared analysis
+-- assumption.
+--
+-- NOT NULL WITH A DEFAULT, and that is what makes this safe against the release
+-- still serving traffic while the migration runs. The previous release never
+-- names this column: `getOrgSettings` creates the row with `{ organizationId }`
+-- alone and `updateOrganizationSettings` upserts a spread of only the fields it
+-- was sent. So the DEFAULT fills it on every insert the old code performs, and
+-- old reads simply ignore it. This is a slight extension of the "new NULLABLE
+-- columns" wording in docs/deploy-migrations.md — safe here ONLY because of the
+-- default; NOT NULL without one would break the old release's create on the
+-- first deploy.
+--
+-- 5000 rather than null is deliberate and is the exception to this schema's
+-- null-means-unconfigured rule. Elsewhere a default would launder a guess into
+-- a claim nobody made. Here the owner supplied the number himself, so 50% is a
+-- configured value on his authority — and a nullable share would make every
+-- manual money figure unrenderable until somebody visited Settings, switching
+-- off a working feature for the sake of a convention that does not apply. The
+-- assumption is disclosed next to the money in the UI instead.
+--
+-- No CHECK constraint: the 1..10000 range is enforced in Zod at the boundary,
+-- because this schema targets the Postgres/SQLite intersection and constraints
+-- are one of the things the two connectors do not agree about. Zero is refused
+-- there — it would collapse every priced niche to $0 — while 10000 is allowed,
+-- being the identity and the honest way to opt out.
+--
+-- Nothing is backfilled and no existing row is rewritten. Every organization
+-- comes out of this migration on the owner's stated assumption, which is the
+-- state they are genuinely in.
+
+-- AlterTable
+ALTER TABLE "organization_settings" ADD COLUMN     "engagedViewShareBasisPoints" INTEGER NOT NULL DEFAULT 5000;

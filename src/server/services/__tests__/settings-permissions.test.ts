@@ -221,6 +221,46 @@ describe("the schemas keep the two halves apart", () => {
     ).toBe(true);
   });
 
+  /**
+   * =========================================================================
+   * THE ENGAGED-VIEW SHARE IS BOUNDED HERE, BECAUSE IT IS BOUNDED NOWHERE ELSE
+   * =========================================================================
+   *
+   * `OrganizationSettings.engagedViewShareBasisPoints` carries no CHECK
+   * constraint: the schema has to stay portable between SQLite in development
+   * and Postgres in production, so no `@db.*` and no constraint the two spell
+   * differently. This Zod line is therefore the only thing standing between a
+   * settings form and a value that multiplies every money figure in the app.
+   *
+   * ZERO IS THE ONE THAT MATTERS. It asserts that no view is ever paid for,
+   * which prices every niche in the organization at nothing — the fabricated
+   * zero the whole RPM module is written to keep off a screen, arrived at
+   * through a settings field rather than through a rate.
+   */
+  it("bounds the engaged-view share, refusing nothing and refusing over 100%", () => {
+    const parse = (value: unknown) =>
+      organizationSettingsUpdateSchema.safeParse({
+        engagedViewShareBasisPoints: value,
+      }).success;
+
+    // 50% — the owner's default — and 47.5%, the case whole percent could not
+    // have expressed and the reason the scale is basis points.
+    expect(parse(5_000)).toBe(true);
+    expect(parse(4_750)).toBe(true);
+    // 100% is the identity and is allowed on purpose: it is how somebody who
+    // disagrees with the assumption turns it off honestly.
+    expect(parse(10_000)).toBe(true);
+    expect(parse(1)).toBe(true);
+
+    expect(parse(0)).toBe(false);
+    expect(parse(-1)).toBe(false);
+    expect(parse(10_001)).toBe(false);
+    // Basis points are whole. A fraction here would put a float directly
+    // upstream of every currency amount in the product.
+    expect(parse(5_000.5)).toBe(false);
+    expect(parse("5000")).toBe(false);
+  });
+
   it("refuses to change the base currency at all", () => {
     // Not an oversight. Finance entries store the rate they were converted at,
     // so changing the base currency re-labels history rather than re-converting

@@ -26,7 +26,10 @@ import type {
 import { isOwnershipType } from "@/lib/dto";
 import { toNicheKind } from "@/lib/niches/niche-kind";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
-import type { NicheRpmResolution } from "@/lib/analytics/niche-rpm";
+import {
+  normalizeEngagedViewShare,
+  type NicheRpmResolution,
+} from "@/lib/analytics/niche-rpm";
 import { youtubeChannelUrl } from "@/lib/format";
 
 /**
@@ -534,6 +537,13 @@ export function toOrganizationSettingsDTO(
     snapshotIntervalMinutes: orgSettings.snapshotIntervalMinutes,
     shortsProbeEnabled: orgSettings.shortsProbeEnabled,
     autoRefreshEnabled: orgSettings.autoRefreshEnabled,
+    // Normalised on the way out, so the settings form is seeded from a value it
+    // could legally send back. A row written before this column existed, or one
+    // hand-edited to something incoherent, would otherwise put an unsubmittable
+    // number in the box and make saving anything else impossible.
+    engagedViewShareBasisPoints: normalizeEngagedViewShare(
+      orgSettings.engagedViewShareBasisPoints,
+    ),
     baseCurrency: orgSettings.baseCurrency,
     companyName: orgSettings.companyName,
   };

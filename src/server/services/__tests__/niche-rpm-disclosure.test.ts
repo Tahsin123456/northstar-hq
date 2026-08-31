@@ -64,8 +64,24 @@ vi.mock("@/server/auth/dal", () => ({
 vi.mock("../user-service", () => ({
   getCurrentOrgId: async () => ORG_ID,
   getScope: async () => ({ organizationId: ORG_ID, userId: "user_1" }),
-  getCurrentOrgSettings: async () => ({ baseCurrency: "USD", defaultPeriodDays: 30 }),
-  getOrgSettings: async () => ({ baseCurrency: "USD", defaultPeriodDays: 30 }),
+  /*
+   * A DELIBERATELY NON-DEFAULT ENGAGED SHARE — 40%, not the 50% default.
+   *
+   * A mock carrying the default would pass whether the service read the column
+   * or not, because `normalizeEngagedViewShare` answers 50% for an absent
+   * value. 40% is only reachable by actually reading the row, which is what
+   * makes the delivery assertion below mean something.
+   */
+  getCurrentOrgSettings: async () => ({
+    baseCurrency: "USD",
+    defaultPeriodDays: 30,
+    engagedViewShareBasisPoints: 4_000,
+  }),
+  getOrgSettings: async () => ({
+    baseCurrency: "USD",
+    defaultPeriodDays: 30,
+    engagedViewShareBasisPoints: 4_000,
+  }),
 }));
 
 vi.mock("@/server/audit/audit-service", () => ({ recordAudit: vi.fn() }));
@@ -141,6 +157,33 @@ describe("niche economics on the catalogue", () => {
       highMinorPerMillion: 6_000,
       currency: "USD",
     });
+  });
+
+  /**
+   * =========================================================================
+   * THE ENGAGED-VIEW SHARE TRAVELS WITH THE RATE, OR THE MONEY DOUBLES
+   * =========================================================================
+   *
+   * The money is projected in the BROWSER. The share that scales it lives on
+   * `OrganizationSettings`, whose DTO is read behind `settings.manage` and
+   * lists its fields one by one — so a `finance.view` reader has no payload
+   * that could carry it. That is the delivery gap, and this is the fix being
+   * asserted: the value rides on the RPM resolution, which is already gated on
+   * exactly the right permission, so the rate, its currency, its basis and the
+   * share that scales it arrive as one object.
+   *
+   * IF THIS FIELD STOPPED ARRIVING, nothing would throw. The client would fall
+   * back to the 50% default and every hand-entered money figure in an
+   * organization that had chosen a different share would be silently wrong —
+   * by exactly the ratio between the two. That is why the mock above is 40%
+   * rather than the default: this assertion has to be able to fail.
+   */
+  it("delivers the organization's engaged-view share on the resolution itself", async () => {
+    granting("analytics.view", "finance.view");
+
+    const [niche] = await listNiches();
+
+    expect(niche.rpm?.engagedViewShareBasisPoints).toBe(4_000);
   });
 
   /**

@@ -3,6 +3,7 @@
 import * as React from "react";
 import {
   DERIVED_RPM_EXPLANATION,
+  ENGAGED_VIEWS_GLOSS,
   ESTIMATED_RPM_CHIP,
   MANUAL_RPM_EXPLANATION,
   MANUAL_RPM_UNCONVERTIBLE_EXPLANATION,
@@ -18,8 +19,11 @@ import {
   UNPRICED_NICHE_SHORT,
   UNPRICED_NICHE_SHORT_NO_SHORTS,
   calculateNicheValue,
+  engagedViewShareNote,
+  formatEngagedViewShare,
   formatRpmBounds,
   rpmBounds,
+  rpmQuoteUnit,
   type NicheRpmResolution,
   type ProjectedMoney,
   type RpmChannelOutcome,
@@ -28,7 +32,7 @@ import type { NicheDTO } from "@/lib/dto";
 import { formatMoney, formatMoneyCompact } from "@/lib/finance/money";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { InfoTip } from "@/components/ui/tooltip";
-import { SetNicheRpmButton } from "./niche-rpm-dialog";
+import { RPM_MENU_ITEM_LABEL } from "./niche-rpm-dialog";
 
 /**
  * What the tracked niche is generating, and how much of it is Northstar's.
@@ -39,11 +43,27 @@ import { SetNicheRpmButton } from "./niche-rpm-dialog";
  * to "$18…". These are also not two independent stats but a ratio, and a ratio
  * reads as a sentence rather than as two adjacent figures.
  *
- * `relative z-10` IS LOAD-BEARING. The whole card is one stretched link: a
- * `<span className="absolute inset-0">` inside the title's `<Link>` covers
- * every pixel of it. Without the stacking context the "Set RPM range" button
- * below — and the info tip beside the label — would never receive a click,
- * which is the same trap the card's footer comment already names.
+ * `relative z-10` IS STILL LOAD-BEARING, AND THIS COMMENT IS WHY IT SURVIVED.
+ * The whole card is one stretched link: a `<span className="absolute inset-0">`
+ * inside the title's `<Link>` covers every pixel of it. Without the stacking
+ * context, nothing inside this strip receives a click at all. The class used to
+ * be justified by naming the "Set RPM range" button first, and that button is
+ * gone — moved into the card's "…" menu at the owner's request, because two
+ * inline accent links in the middle of a money figure read as debris. The INFO
+ * TIP beside the label still needs the stacking context, so removing `relative
+ * z-10` along with the button would silently break the one control left in
+ * here. It is named here rather than left to be rediscovered.
+ *
+ * ---------------------------------------------------------------------------
+ * ENGAGED VIEWS ARE NAMED, NOT APPLIED SILENTLY
+ * ---------------------------------------------------------------------------
+ * A hand-entered rate now prices roughly half the views on the card, because
+ * that is the half YouTube pays for. Halving a money figure without saying so
+ * makes a number a reader recognised yesterday look like a bug today, so the
+ * assumption is written under the rate with its current value in it. The VIEW
+ * counts above stay raw — engagement is a fact about how YouTube pays, not
+ * about how many people watched, and understating reach to explain money would
+ * be a second wrong number solving the first.
  *
  * ---------------------------------------------------------------------------
  * DERIVED AND GUESSED ARE DISTINGUISHABLE FROM ACROSS THE ROOM
@@ -156,7 +176,15 @@ export function NicheValueStrip({
   if (rpm === null) return null;
 
   const bounds = rpmBounds(rpm);
-  const value = calculateNicheValue({ ourViews, competitorViews, bounds });
+  const value = calculateNicheValue({
+    ourViews,
+    competitorViews,
+    bounds,
+    // Off the resolution, never off a settings payload. The share is welded to
+    // the rate it scales precisely so this line cannot read a stale one, or
+    // silently fall back to a default the organization did not choose.
+    engagedViewShareBasisPoints: rpm.engagedViewShareBasisPoints,
+  });
   /*
    * NOTHING PUBLISHED IS NOT A PRICE OF ZERO.
    *
@@ -213,8 +241,36 @@ export function NicheValueStrip({
             </span>
           </div>
 
+          {/*
+              THE ENGAGED-VIEW STEP BELONGS TO THE FIGURE DIRECTLY ABOVE IT.
+
+              `pricedViews` is `ourPayable + competitorPayable` — the engaged
+              subset of the WHOLE tracked niche — so it is the denominator
+              behind `trackedRevenue`, the headline. It previously hung off the
+              end of the "Northstar's X of Y tracked views, worth Z" sentence,
+              where the money named is Northstar's ALONE: a reader dividing that
+              money by these views got a rate several times off, and the closer
+              they read the more wrong they got. Same number, moved to the
+              sentence it is the denominator of.
+          */}
+          {value.basis === "engaged" && value.pricedViews !== null ? (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Of {formatCompactNumber(value.trackedNicheViews)} tracked views,{" "}
+              {formatCompactNumber(value.pricedViews)} are priced as engaged (
+              {formatEngagedViewShare(value.engagedViewShareBasisPoints)}).
+            </p>
+          ) : null}
+
           {value.ourRevenue !== null ? (
             <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {/* RAW view counts, deliberately. These are what the channels did
+                  — the reach half of the sentence — and the money that follows
+                  is what YouTube pays for the engaged subset of them. Halving
+                  the reach figure to make the arithmetic look self-evident
+                  would understate the niche on the one line that is not about
+                  money at all. The engaged step is named in the line ABOVE
+                  instead, against the tracked total it is the denominator of —
+                  never here, where the money is Northstar's alone. */}
               Northstar&rsquo;s {formatCompactNumber(value.ourViews)} of{" "}
               {formatCompactNumber(value.trackedNicheViews)} tracked views, worth{" "}
               {formatProjected(value.ourRevenue, false)}.
@@ -248,7 +304,12 @@ function RateLine({ rpm }: { rpm: NicheRpmResolution }) {
         <span className="tnum font-medium text-foreground">
           {formatRpmBounds(bounds)}
         </span>{" "}
-        per 1,000 views — measured from {channels}{" "}
+        {/* THE UNIT IS READ OFF THE BASIS, not hard-coded. A measured rate and
+            an entered one are quoted against different denominators — see
+            `RpmBasis` — and two figures wearing the identical label while
+            meaning different things is the same failure as an unlabelled
+            currency. */}
+        {rpmQuoteUnit(bounds.basis)} — measured from {channels}{" "}
         {channels === 1 ? "channel" : "channels"} Northstar operates here over{" "}
         {RPM_WINDOW_DAYS} settled days ({formatCompactNumber(rpm.evidence.viewsUsed)}{" "}
         views).{" "}
@@ -260,12 +321,23 @@ function RateLine({ rpm }: { rpm: NicheRpmResolution }) {
           watches nothing move learns that the screen is broken. Saying it here
           is the difference between an override and a bug.
         */}
+        {/*
+          THE UNIT IS SPELLED OUT ON THE SUPERSEDED RANGE TOO.
+
+          The stored estimate is quoted per 1,000 ENGAGED views and the measured
+          rate above it per 1,000 views, so the two numbers are not comparable
+          by eye however similar they look. Printing them side by side with one
+          unit between them would invite exactly that comparison — which is the
+          reader concluding the measurement is "twice" the estimate when it is
+          the denominators that differ.
+        */}
         {rpm.supersededRange !== null
           ? `The entered estimate of ${formatRpmBounds({
               lowMinorPerMillion: rpm.supersededRange.lowMinorPerMillion,
               highMinorPerMillion: rpm.supersededRange.highMinorPerMillion,
               currency: rpm.supersededRange.currency,
-            })} is stored but not used here.`
+              basis: "engaged",
+            })} ${rpmQuoteUnit("engaged")} is stored but not used here.`
           : DERIVED_RPM_EXPLANATION}
       </p>
     );
@@ -281,7 +353,15 @@ function RateLine({ rpm }: { rpm: NicheRpmResolution }) {
     <>
       <p className="text-[11px] leading-relaxed text-muted-foreground">
         <span className="tnum font-medium text-foreground">{formatRpmBounds(bounds)}</span>{" "}
-        per 1,000 views — {MANUAL_RPM_EXPLANATION}
+        <span className="inline-flex items-center gap-1">
+          {rpmQuoteUnit(bounds.basis)}
+          {/* The gloss on first use. "Engaged views" is a YouTube term of art
+              and this is the first place a studio owner meets it — and it is
+              the reason the money beside it is about half what they were
+              expecting, so it cannot be left to be inferred. */}
+          {bounds.basis === "engaged" ? <InfoTip>{ENGAGED_VIEWS_GLOSS}</InfoTip> : null}
+        </span>{" "}
+        — {MANUAL_RPM_EXPLANATION}
         {/*
           A converted range says so. The digits somebody typed are not the
           digits on screen, and a reader comparing this card against the dialog
@@ -292,9 +372,22 @@ function RateLine({ rpm }: { rpm: NicheRpmResolution }) {
               lowMinorPerMillion: rpm.enteredRange.lowMinorPerMillion,
               highMinorPerMillion: rpm.enteredRange.highMinorPerMillion,
               currency: rpm.enteredRange.currency,
+              // A currency conversion does not change what the rate is quoted
+              // AGAINST — only what it is quoted IN. The basis survives it.
+              basis: bounds.basis,
             })} and converted at the organization's configured rate.`
           : null}
       </p>
+      {/* The assumption, in words, with the value actually in force in it. A
+          reader can argue with "50% of views are engaged"; they cannot argue
+          with a money figure that is quietly half what they expected. */}
+      {bounds.basis === "engaged" ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {engagedViewShareNote(
+            formatEngagedViewShare(rpm.engagedViewShareBasisPoints),
+          )}
+        </p>
+      ) : null}
       <RejectionReasons rejected={rpm.rejectedChannels} lead={RPM_NOT_MEASURED_BECAUSE} />
     </>
   );
@@ -333,6 +426,7 @@ function UnpricedNiche({
       lowMinorPerMillion: unconvertible.lowMinorPerMillion,
       highMinorPerMillion: unconvertible.highMinorPerMillion,
       currency: unconvertible.currency,
+      basis: "engaged",
     });
     return (
       <div className="flex flex-col gap-1">
@@ -343,10 +437,10 @@ function UnpricedNiche({
           {UNCONVERTIBLE_NICHE_SHORT}
         </span>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {stored} per 1,000 views is stored for {niche.name}.{" "}
+          {stored} {rpmQuoteUnit("engaged")} is stored for {niche.name}.{" "}
           {MANUAL_RPM_UNCONVERTIBLE_EXPLANATION}
         </p>
-        <SetNicheRpmButton niche={niche} />
+        <WhereToSetTheRate />
       </div>
     );
   }
@@ -375,7 +469,36 @@ function UnpricedNiche({
           {UNPRICED_NICHE_EXPLANATION}
         </p>
       )}
-      <SetNicheRpmButton niche={niche} />
+      <WhereToSetTheRate />
     </div>
+  );
+}
+
+/**
+ * Where the rate is set, now that it is not set from here.
+ *
+ * A SENTENCE, NOT A BUTTON, and that is the whole of the owner's second
+ * request. Two inline accent links sitting inside a money figure — one for the
+ * hit rule, one for the rate — were the "really ugly" part: they are controls
+ * dressed as prose, in the middle of a paragraph explaining why there is no
+ * number. The action moved to the card's "…" menu, where the card's other four
+ * actions already live and where it is now permanently visible rather than
+ * revealed on hover.
+ *
+ * The pointer stays because removing the button without it would leave an
+ * unpriced niche explaining a gap and offering nothing to close it. It is shown
+ * to everybody rather than gated on the write permission: somebody who cannot
+ * open that dialog still benefits from knowing the decision exists and has a
+ * home, which is what turns "this screen is broken" into "I should ask an
+ * admin". `SetNicheRpmButton` was deleted along with its last call site — a
+ * component with no consumers is a component the next reader has to work out
+ * the status of.
+ */
+function WhereToSetTheRate() {
+  return (
+    <p className="text-[11px] leading-relaxed text-subtle-foreground">
+      Set it from this card&rsquo;s &ldquo;&hellip;&rdquo; menu, under{" "}
+      {RPM_MENU_ITEM_LABEL}.
+    </p>
   );
 }

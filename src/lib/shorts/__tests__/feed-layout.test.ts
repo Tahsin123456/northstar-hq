@@ -68,18 +68,32 @@ describe("the Shorts grid", () => {
   });
 
   /**
-   * The research log and the saved board declare the same string. They are
-   * meant to be one grid — three card surfaces that read as one system rather
-   * than as three people's ideas of a card — and they drifted apart once
-   * already. Comparing against the literal in those files is what makes
-   * "we intended these to match" something that fails a build.
+   * =========================================================================
+   * THE THREE COPIES ARE NOW ONE IMPORT, AND THIS TEST SAYS SO
+   * =========================================================================
+   *
+   * This used to assert that the research log and the saved board each declared
+   * a literal EQUAL to this constant, which is the best a test can do while
+   * three files own three strings — it catches a drift after the fact rather
+   * than preventing one. Both pages now import the constant instead, so the
+   * property available is stronger and this asserts the stronger one: there is
+   * no second copy to drift.
+   *
+   * Checking for the ABSENCE of a literal matters more than checking for the
+   * import. Somebody adding a hand-rolled `grid-cols-2` beside a correct import
+   * is exactly the regression that would otherwise pass.
    */
-  it("matches the grid the notes log and the saved board already use", () => {
+  it("is imported by the notes log and the saved board, not re-declared", () => {
     for (const page of ["app/(app)/notes/page.tsx", "app/(app)/saved/page.tsx"]) {
-      const declared = source(page).match(/const CARD_GRID =\s*([\s\S]*?);/)?.[1] ?? "";
-      // Whitespace differs because prettier wraps one of them and not the
-      // other; the class list must not.
-      expect(declared.replace(/\s+/g, " ")).toContain(SHORTS_CARD_GRID);
+      const code = source(page);
+      expect(code, `${page} should import SHORTS_CARD_GRID`).toContain("SHORTS_CARD_GRID");
+      // No file outside `feed-layout` may spell the class list out. The one
+      // legitimate mention of these tokens in a page is inside a comment, and
+      // `utilityClasses` strips comments before this sees them.
+      expect(
+        utilityClasses(code).filter((klass) => /^grid-cols-\d/.test(klass)),
+        `${page} should not hand-roll grid columns`,
+      ).toEqual([]);
     }
   });
 });
@@ -160,19 +174,45 @@ describe("the Shorts card", () => {
 describe("the Shorts poster box", () => {
   const card = source("components/shorts/short-card.tsx");
   const feed = source("components/shorts/shorts-feed.tsx");
+  /**
+   * The poster and the card shell live here now, shared by all three grids.
+   *
+   * The owner asked for Notes and Saved to look "almost identical" to Winners,
+   * and three files agreeing about a class list is not a way to keep a promise
+   * like that — `SHORTS_CARD_GRID`'s own history is the evidence. So the card
+   * is one component and this file is where its shape is defined.
+   */
+  const frame = source("components/shorts/short-card-frame.tsx");
+  const notes = source("app/(app)/notes/page.tsx");
+  const saved = source("app/(app)/saved/page.tsx");
 
   /**
    * 9:16 IN BOTH BRANCHES. The box does not change shape when the portrait
    * source 404s and the wide fallback takes over — that image is letterboxed
    * into this same box instead. A box that changed shape as images resolved
    * would reflow the entire grid under the reader.
+   *
+   * THE SAVED BOARD IS IN THIS LIST NOW, and it is the reason the list grew.
+   * It drew `mqdefault` at `aspect-video` — the exact mistake this card had
+   * already made and fixed — for as long as the two cards were separate files
+   * that merely agreed. A wide box two thirds filled with YouTube's stretched
+   * pillarbox blur, in a grid the owner asked to be vertical.
    */
-  it("is a portrait box and not a landscape one", () => {
+  it("is a portrait box and not a landscape one, on every grid", () => {
     expect(SHORTS_POSTER_FRAME).toContain("aspect-[9/16]");
-    // The class the old tile used. Its reappearance in the card or the feed is
-    // the regression itself, not a style choice.
-    expect(utilityClasses(card)).not.toContain("aspect-video");
-    expect(utilityClasses(feed)).not.toContain("aspect-video");
+    // The class the old tiles used. Its reappearance on any of these surfaces
+    // is the regression itself, not a style choice.
+    for (const [name, code] of [
+      ["card", card],
+      ["feed", feed],
+      ["frame", frame],
+      ["notes", notes],
+      ["saved", saved],
+    ] as const) {
+      expect(utilityClasses(code), `${name} should not draw a 16:9 tile`).not.toContain(
+        "aspect-video",
+      );
+    }
   });
 
   /**
@@ -198,15 +238,96 @@ describe("the Shorts poster box", () => {
    * different shape than the answer makes the page settle by jumping, which is
    * the moment a reader loses their place.
    */
-  it("is the same box the loading skeleton draws", () => {
+  it("is the same box the loading skeleton draws, on every grid", () => {
     for (const [name, code] of [
-      ["card", card],
+      ["frame", frame],
       ["feed", feed],
+      // Both of these draw a Skeleton in the poster's place while their rows
+      // load, and both used to predict a shape their own card did not draw —
+      // the saved board a 16:9 strip, the notes log no poster at all. A
+      // skeleton that mispredicts makes the page settle by jumping, which is
+      // the moment a reader loses their place.
+      ["notes", notes],
+      ["saved", saved],
     ] as const) {
       // Used, not merely imported: the import line alone satisfied an earlier
       // version of this test and let a hand-rolled shape through beside it.
       const uses = code.split("SHORTS_POSTER_FRAME").length - 1;
       expect(uses, `${name} should import and use SHORTS_POSTER_FRAME`).toBeGreaterThan(1);
     }
+
+    // The card itself no longer names the constant, and that is the point of
+    // the refactor rather than a gap in this test: it renders `ShortPoster`,
+    // which is where the box is now drawn for all three grids.
+    expect(card).toContain("ShortPoster");
+  });
+});
+
+/**
+ * =========================================================================
+ * THREE GRIDS, ONE CARD
+ * =========================================================================
+ *
+ * The owner's first request: "Notes & Saved should have almost identical looks
+ * to the Winners & Outliers tabs." The grid was already shared; the CARD was
+ * three separate implementations that had each drifted in a different
+ * direction. These hold the parts of "identical" that a class list can express,
+ * and — more usefully — that the three surfaces reach them through one module
+ * rather than by agreeing.
+ */
+describe("the Notes and Saved cards", () => {
+  const notes = source("app/(app)/notes/page.tsx");
+  const saved = source("app/(app)/saved/page.tsx");
+
+  it("are built from the shared card rather than a copy of it", () => {
+    for (const [name, code] of [
+      ["notes", notes],
+      ["saved", saved],
+    ] as const) {
+      expect(code, `${name} should use the shared shell`).toContain("SHORT_CARD_SHELL");
+      expect(code, `${name} should use the shared poster`).toContain("ShortPoster");
+      expect(code, `${name} should use the shared title control`).toContain(
+        "ShortCardTitle",
+      );
+    }
+  });
+
+  /**
+   * THE SAVED BOARD WAS THE LAST GRID IN THE APP WHERE A SHORT OPENED A TAB.
+   *
+   * Both the frame and the title were anchors to youtube.com. A director
+   * working the save-and-revisit loop ended a session with thirty tabs and no
+   * idea which of them they had already judged — the exact failure the player
+   * dialog was introduced to end. The way out is not lost: it lives inside the
+   * player, where it is honest about being a link.
+   */
+  it("play their Shorts in the app, as Winners does", () => {
+    expect(saved).toContain("ShortPlayerDialog");
+    expect(notes).toContain("ShortPlayerDialog");
+    // No card on either surface may link a Short out directly any more.
+    expect(saved).not.toContain('target="_blank"');
+  });
+
+  /**
+   * A note about a channel, a niche, or nothing at all has no Short — roughly
+   * half the log — and the card still has to fill the poster box. Omitting it
+   * does not make the card shorter, because grid tracks stretch; it makes a
+   * card with 208px of dead space where its neighbours have a frame. The rule
+   * itself is tested properly in `note-poster.test.ts`; this holds that the
+   * card actually goes through it rather than re-deciding inline.
+   */
+  it("give a note with no Short the same box as one with a Short", () => {
+    expect(notes).toContain("notePosterFor");
+    /*
+     * THE PLATE'S CONTENTS, NAMED SPECIFICALLY.
+     *
+     * An earlier version of this line looked for `placeholder=` and was
+     * satisfied by the search box's `placeholder="Search notes…"` — it passed
+     * with the poster's placeholder deleted, which mutation testing caught. The
+     * assertion now names the prop AND what goes in it: the note's own type
+     * icon, which is the thing that makes a Short-less card read as a note
+     * about a channel rather than as a card whose image failed to load.
+     */
+    expect(notes).toContain("placeholder={<Icon");
   });
 });

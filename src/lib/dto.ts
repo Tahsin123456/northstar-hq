@@ -581,6 +581,18 @@ export interface OrganizationSettingsDTO {
   readonly snapshotIntervalMinutes: number;
   readonly shortsProbeEnabled: boolean;
   readonly autoRefreshEnabled: boolean;
+  /**
+   * What share of raw views YouTube pays a Short against, in basis points.
+   * 5,000 is 50.00%. See `OrganizationSettings.engagedViewShareBasisPoints`.
+   *
+   * HERE FOR THE EDITOR, NOT FOR THE READER. This payload is `settings.manage`,
+   * which is where the value is CHANGED. Every surface that PRICES views reads
+   * the same share off `NicheDTO.rpm` instead, where it is gated on
+   * `finance.view` and travels welded to the rate it scales — so a card can
+   * never project money with a share that arrived from somewhere else, or not
+   * at all.
+   */
+  readonly engagedViewShareBasisPoints: number;
   readonly baseCurrency: string;
   readonly companyName: string;
 }

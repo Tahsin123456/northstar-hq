@@ -20,6 +20,13 @@ const WINDOW = { startMs: 0, endMs: 1, days: 28 } as const;
 /** A payload that showed this form the stored range. */
 const SHOWN: NicheRpmResolution = {
   source: "manual",
+  // The org-wide engaged-view assumption rides on every resolution — see the
+  // field's own note for why it is delivered here rather than in the settings
+  // payload. It has no bearing on what this form SUBMITS, which is the range
+  // and nothing else, and that separation is worth having pinned: a patch that
+  // ever started carrying this value would be a settings write disguised as a
+  // niche write.
+  engagedViewShareBasisPoints: 5_000,
   range: { lowMinorPerMillion: 3_000, highMinorPerMillion: 6_000, currency: "USD" },
   // Already in the base currency, so the range in force and the range as typed
   // are the same object — the ordinary case.
@@ -32,6 +39,7 @@ const OVERRIDDEN: NicheRpmResolution = {
   source: "derived",
   rpmMinorPerMillion: 5_600,
   currency: "USD",
+  engagedViewShareBasisPoints: 5_000,
   evidence: { window: WINDOW, channels: [], viewsUsed: 1_000_000, revenueMinorUsed: 5_600 },
   supersededRange: {
     lowMinorPerMillion: 3_000,

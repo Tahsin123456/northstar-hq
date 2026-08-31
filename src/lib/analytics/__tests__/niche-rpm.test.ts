@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS,
+  ENGAGED_VIEW_SHARE_BASIS,
   MAX_RPM_MAJOR_PER_THOUSAND,
   RPM_REJECTION_EXPLANATION,
   RPM_MIN_EARNING_DAYS,
@@ -8,8 +10,13 @@ import {
   RPM_VIEW_BASIS,
   RPM_WINDOW_DAYS,
   calculateNicheValue,
+  engagedViews,
+  formatEngagedViewShare,
   formatRpmBounds,
   isRpmPoint,
+  normalizeEngagedViewShare,
+  rpmQuoteUnit,
+  viewsToPrice,
   judgeRpmChannel,
   maxRpmMinorPerMillion,
   missingRpmRangeHalf,
@@ -94,11 +101,28 @@ const NO_RANGE: NicheRpmRangeSource = {
   rpmCurrency: null,
 };
 
+/**
+ * The default engaged share, spelled here rather than imported, deliberately.
+ *
+ * A test that imports the constant it is checking asserts only that the code is
+ * self-consistent — it would keep passing if somebody changed 50% to 5%. The
+ * owner said the default is 50%, so 5,000 is written out and the constant is
+ * checked against it once, below.
+ */
+const HALF = 5_000;
+
 function resolve(
   manual: NicheRpmRangeSource,
   channels: readonly RpmChannelOutcome[],
+  engagedViewShareBasisPoints: number = HALF,
 ) {
-  return resolveNicheRpm({ manual, channels, window: WINDOW, baseCurrency: "USD" });
+  return resolveNicheRpm({
+    manual,
+    channels,
+    window: WINDOW,
+    baseCurrency: "USD",
+    engagedViewShareBasisPoints,
+  });
 }
 
 describe("the window a rate is measured over", () => {
@@ -462,6 +486,7 @@ describe("a niche nobody has priced", () => {
       ourViews: 1_000_000,
       competitorViews: 9_000_000,
       bounds: null,
+      engagedViewShareBasisPoints: HALF,
     });
     expect(value.trackedRevenue).toBeNull();
     expect(value.ourRevenue).toBeNull();
@@ -499,6 +524,7 @@ describe("a range entered in a currency that is not the base", () => {
       channels: [],
       window: WINDOW,
       baseCurrency: "EUR",
+      engagedViewShareBasisPoints: HALF,
       ratesToBase: new Map([["USD", 0.9]]),
     });
 
@@ -534,6 +560,7 @@ describe("a range entered in a currency that is not the base", () => {
       channels: [],
       window: WINDOW,
       baseCurrency: "EUR",
+      engagedViewShareBasisPoints: HALF,
       ratesToBase: new Map(),
     });
 
@@ -558,9 +585,19 @@ describe("a range entered in a currency that is not the base", () => {
 });
 
 describe("turning a rate into money", () => {
+  /**
+   * FULL ENGAGEMENT, so this block tests rounding and nothing else.
+   *
+   * 100% is the identity — every view is paid for — which reproduces exactly
+   * the arithmetic this module had before engaged views existed. Using it here
+   * keeps these cases about the thing they were written for; the share has its
+   * own suite below, where it is the subject rather than a confound.
+   */
+  const ALL = 10_000;
+
   it("keeps a range a range, rounding outward", () => {
     const bounds = rpmBounds(resolve(STORED_RANGE, []))!;
-    const money = projectRevenue(12_345_678, bounds);
+    const money = projectRevenue(12_345_678, bounds, ALL);
 
     // Floor the low end, ceil the high end. Rounding both to nearest would let
     // a genuine range collapse to a point on a small view count, claiming a
@@ -587,7 +624,7 @@ describe("turning a rate into money", () => {
 
     // Every one of these is a view count where floor and ceil disagree.
     for (const views of [12_345_678, 40_000_001, 7_777_777, 1, 999_999]) {
-      const money = projectRevenue(views, bounds);
+      const money = projectRevenue(views, bounds, ALL);
       expect(money.lowMinor).toBe(money.highMinor);
       expect(money.lowMinor).toBe(
         Math.round((views * bounds.lowMinorPerMillion) / RPM_VIEW_BASIS),
@@ -597,17 +634,22 @@ describe("turning a rate into money", () => {
     // The range case is untouched: it still rounds outward and still reads as
     // a range on the same view count.
     const range = rpmBounds(resolve(STORED_RANGE, []))!;
-    expect(projectRevenue(12_345_678, range).lowMinor).toBeLessThan(
-      projectRevenue(12_345_678, range).highMinor,
+    expect(projectRevenue(12_345_678, range, ALL).lowMinor).toBeLessThan(
+      projectRevenue(12_345_678, range, ALL).highMinor,
     );
   });
 
   it("produces integer minor units on both ends, never a float", () => {
     const bounds = rpmBounds(resolve(STORED_RANGE, []))!;
-    for (const views of [1, 7, 999, 1_337, 250_001, 98_765_432]) {
-      const money = projectRevenue(views, bounds);
-      expect(Number.isInteger(money.lowMinor)).toBe(true);
-      expect(Number.isInteger(money.highMinor)).toBe(true);
+    // The odd share is the interesting one: 47.5% of an odd view count is not
+    // an integer before rounding, so if the engaged step ever leaked a float
+    // into the multiplication this is where it would surface.
+    for (const share of [ALL, HALF, 4_750, 1]) {
+      for (const views of [1, 7, 999, 1_337, 250_001, 98_765_432]) {
+        const money = projectRevenue(views, bounds, share);
+        expect(Number.isInteger(money.lowMinor)).toBe(true);
+        expect(Number.isInteger(money.highMinor)).toBe(true);
+      }
     }
   });
 
@@ -617,24 +659,280 @@ describe("turning a rate into money", () => {
       ourViews: 2_000_000,
       competitorViews: 8_000_000,
       bounds,
+      engagedViewShareBasisPoints: ALL,
     });
 
     // Interval subtraction of the two projected totals would give
     // [lowTotal − highOurs, highTotal − lowOurs], which is far wider than
     // anybody means and can go negative even though both halves used the same
     // rate. The rate cancels, so it is applied after the subtraction.
-    expect(value.gapRevenue).toEqual(projectRevenue(8_000_000, bounds));
+    expect(value.gapRevenue).toEqual(projectRevenue(8_000_000, bounds, ALL));
     const naiveLow = value.trackedRevenue!.lowMinor - value.ourRevenue!.highMinor;
     expect(value.gapRevenue!.lowMinor).toBeGreaterThan(naiveLow);
   });
 
   it("reports a share of nothing as undefined rather than as zero", () => {
     const bounds = rpmBounds(resolve(STORED_RANGE, []))!;
-    const value = calculateNicheValue({ ourViews: 0, competitorViews: 0, bounds });
+    const value = calculateNicheValue({
+      ourViews: 0,
+      competitorViews: 0,
+      bounds,
+      engagedViewShareBasisPoints: HALF,
+    });
     expect(value.capturePercent).toBeNull();
     // A tracked niche with no views really is worth nothing, and that is a
     // measurement rather than a guess — zero views priced at any rate is zero.
     expect(value.trackedRevenue).toEqual({ lowMinor: 0, highMinor: 0, currency: "USD" });
+  });
+});
+
+/**
+ * =========================================================================
+ * ENGAGED VIEWS — THE 2x TRAP, PINNED IN BOTH DIRECTIONS
+ * =========================================================================
+ *
+ * YouTube pays a Short for ENGAGED views, not for the public view count, and
+ * the owner puts that share near half. The danger is not that the share is hard
+ * to apply; it is that the two rates in this module are quoted against
+ * DIFFERENT denominators, so one multiplication is right for one of them and
+ * wrong by exactly a factor of two for the other:
+ *
+ *   • A MANUAL range is typed per 1,000 engaged views. Not scaling it doubles
+ *     every money figure in the niche.
+ *   • A DERIVED rate is already money-over-raw-views — YouTube's settled money
+ *     over a raw snapshot delta. Scaling it HALVES a measurement.
+ *
+ * Both failures look completely plausible on screen: a niche worth $450 reading
+ * $900 or $225 is not obviously wrong to anybody who does not already know the
+ * right answer. So both directions are asserted, with the numbers written out
+ * rather than derived from the implementation.
+ */
+describe("engaged views", () => {
+  /**
+   * THE OWNER'S NUMBER, CHECKED AGAINST A LITERAL.
+   *
+   * "Engaged Views are usually around 50% of the total views you get, so set
+   * the default value to 50%." Asserted against 5,000 written out, so that
+   * changing the constant fails here rather than quietly re-defaulting every
+   * organization that has not touched the setting.
+   */
+  it("defaults to 50%, which is 5,000 basis points", () => {
+    expect(DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS).toBe(5_000);
+    expect(ENGAGED_VIEW_SHARE_BASIS).toBe(10_000);
+    expect(formatEngagedViewShare(DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS)).toBe("50%");
+    // A share nobody has configured resolves to the same thing, so a row
+    // written before this column existed prices identically to a fresh one.
+    expect(normalizeEngagedViewShare(undefined)).toBe(5_000);
+    expect(normalizeEngagedViewShare(null)).toBe(5_000);
+  });
+
+  it("takes the stated share of a raw view count, as whole views", () => {
+    expect(engagedViews(1_000_000, 5_000)).toBe(500_000);
+    expect(engagedViews(1_000_000, 10_000)).toBe(1_000_000);
+    expect(engagedViews(1_000_000, 4_750)).toBe(475_000);
+    // Rounded to nearest, and always an integer: half a view is not a thing,
+    // and a float here would sit directly upstream of a currency amount.
+    expect(engagedViews(999_999, 5_000)).toBe(500_000);
+    expect(Number.isInteger(engagedViews(7, 3_333))).toBe(true);
+  });
+
+  /**
+   * A share that cannot be trusted falls back to the default rather than
+   * clamping. A stored 0 is far more likely to be "this column was never really
+   * set" than "somebody meant nothing at all", and clamping it to the minimum
+   * would price a whole organization at a ten-thousandth of its value while
+   * looking configured.
+   */
+  it("refuses a share of nothing, and anything above 100%", () => {
+    expect(normalizeEngagedViewShare(0)).toBe(DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS);
+    expect(normalizeEngagedViewShare(-1)).toBe(DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS);
+    expect(normalizeEngagedViewShare(10_001)).toBe(DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS);
+    expect(normalizeEngagedViewShare(50.5)).toBe(DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS);
+    // 100% is the identity and is a coherent statement about the world, so it
+    // survives — it is how somebody turns the assumption off honestly.
+    expect(normalizeEngagedViewShare(10_000)).toBe(10_000);
+    expect(normalizeEngagedViewShare(1)).toBe(1);
+  });
+
+  it("marks a hand-entered rate as quoted against engaged views", () => {
+    const bounds = rpmBounds(resolve(STORED_RANGE, []))!;
+    expect(bounds.basis).toBe("engaged");
+    // 10,000,000 raw views, half of them engaged, at $0.03–$0.06 per 1,000
+    // engaged views: 5,000,000 × 3,000 ÷ 1e6 = 15,000 cents = $150.00.
+    expect(viewsToPrice(10_000_000, bounds, HALF)).toBe(5_000_000);
+    expect(projectRevenue(10_000_000, bounds, HALF)).toEqual({
+      lowMinor: 15_000,
+      highMinor: 30_000,
+      currency: "USD",
+    });
+    // NOT scaling it would be exactly double, which is the failure this exists
+    // to prevent. Written out rather than computed, so a broken implementation
+    // cannot agree with a broken expectation.
+    expect(projectRevenue(10_000_000, bounds, 10_000)).toEqual({
+      lowMinor: 30_000,
+      highMinor: 60_000,
+      currency: "USD",
+    });
+  });
+
+  /**
+   * THE ONE THAT MATTERS MOST, because it is the one a careless "apply the
+   * share everywhere" change breaks — and it breaks a MEASUREMENT.
+   *
+   * The healthy channel earns $56.00 over 1,000,000 raw views gained, so the
+   * derived rate is 5,600 minor per million: $0.056 per 1,000 RAW views. Its
+   * numerator is money YouTube actually paid, which is already net of Google's
+   * own engaged-view accounting, and its denominator is the raw public
+   * counter's delta. Pricing 10,000,000 raw views is 10e6 × 5,600 ÷ 1e6 =
+   * 56,000 cents = $560.00 — at ANY share, because the share must not touch it.
+   */
+  it("leaves a MEASURED rate alone, whatever the share is set to", () => {
+    const bounds = rpmBounds(resolve(NO_RANGE, [accepted(healthyChannel())]))!;
+    expect(bounds.basis).toBe("raw");
+    expect(bounds.lowMinorPerMillion).toBe(5_600);
+
+    for (const share of [1, 2_500, HALF, 7_500, 10_000]) {
+      // The multiplicand is the RAW count, untouched.
+      expect(viewsToPrice(10_000_000, bounds, share)).toBe(10_000_000);
+      expect(projectRevenue(10_000_000, bounds, share)).toEqual({
+        lowMinor: 56_000,
+        highMinor: 56_000,
+        currency: "USD",
+      });
+    }
+  });
+
+  /**
+   * The two paths agreeing is the point of the whole design.
+   *
+   * A niche measured at $0.056 per 1,000 raw views is the same market as one
+   * estimated at $0.112 per 1,000 ENGAGED views when half the views are
+   * engaged. Both must price 10,000,000 raw views at $560.00. If either path
+   * loses or gains its factor of two, this fails — and it fails in a way that
+   * says which one, because the other assertions above pin each side alone.
+   */
+  it("makes a measured rate and the equivalent estimate agree on the money", () => {
+    const derived = rpmBounds(resolve(NO_RANGE, [accepted(healthyChannel())]))!;
+    const equivalent = rpmBounds(
+      resolve(
+        {
+          rpmLowMinorPerMillion: 11_200,
+          rpmHighMinorPerMillion: 11_200,
+          rpmCurrency: "USD",
+        },
+        [],
+      ),
+    )!;
+
+    expect(projectRevenue(10_000_000, derived, HALF).lowMinor).toBe(56_000);
+    expect(projectRevenue(10_000_000, equivalent, HALF).lowMinor).toBe(56_000);
+  });
+
+  /**
+   * VIEW COUNTS STAY RAW. Engagement is a fact about how YouTube pays, not
+   * about how many people watched, and the strip prints these as reach.
+   * Halving them to make the arithmetic look self-evident would understate the
+   * niche on the one line that is not about money at all.
+   */
+  it("keeps the reported view counts and the capture share on raw views", () => {
+    const bounds = rpmBounds(resolve(STORED_RANGE, []))!;
+    const value = calculateNicheValue({
+      ourViews: 2_000_000,
+      competitorViews: 8_000_000,
+      bounds,
+      engagedViewShareBasisPoints: HALF,
+    });
+
+    expect(value.ourViews).toBe(2_000_000);
+    expect(value.competitorViews).toBe(8_000_000);
+    expect(value.trackedNicheViews).toBe(10_000_000);
+    // The share cancels exactly in ours ÷ total, so applying it would buy no
+    // information and cost two roundings.
+    expect(value.capturePercent).toBe(20);
+    // What was actually multiplied is reported separately, so a card can say so.
+    expect(value.pricedViews).toBe(5_000_000);
+    expect(value.basis).toBe("engaged");
+    expect(value.engagedViewShareBasisPoints).toBe(HALF);
+  });
+
+  /**
+   * =========================================================================
+   * THE VIEWS RECONCILE EXACTLY. THE MONEY IS BOUNDED, NOT EXACT — ON PURPOSE.
+   * =========================================================================
+   *
+   * `engaged(a) + engaged(b)` can differ from `engaged(a + b)` by one view,
+   * because each is rounded to nearest. So the two halves are converted
+   * SEPARATELY and summed rather than the total being converted once, and the
+   * priced view counts then reconcile exactly. That is the property worth
+   * having: the three money figures are all derived from view numbers that add
+   * up, so no card can show a niche whose parts describe a different niche from
+   * its total.
+   *
+   * THE MONEY STILL DOES NOT SUM EXACTLY, AND MUST NOT BE MADE TO. A range is
+   * rounded OUTWARD — floor the low end, ceil the high end — so flooring twice
+   * and adding loses up to a minor unit at the bottom, and ceiling twice and
+   * adding gains one at the top. The tracked total is rounded ONCE, which makes
+   * it strictly the tighter and more honest interval: it sits inside the sum of
+   * the parts rather than outside it. Forcing exact equality here would mean
+   * either rounding the total twice — inventing a spread out of arithmetic — or
+   * pricing the halves from the total, which is the interval subtraction
+   * `gapRevenue` exists to avoid. So the assertion is containment plus a
+   * one-unit bound, which is the true statement.
+   */
+  it("keeps the priced views reconciling, and the money tighter than its parts", () => {
+    const bounds = rpmBounds(resolve(STORED_RANGE, []))!;
+    // Both odd, so each half rounds up by half a view and a naive whole-total
+    // conversion would land one view away from the parts.
+    const value = calculateNicheValue({
+      ourViews: 2_000_001,
+      competitorViews: 8_000_001,
+      bounds,
+      engagedViewShareBasisPoints: HALF,
+    });
+
+    // Exact: the views that were priced are the views of the two halves.
+    expect(value.pricedViews).toBe(
+      engagedViews(2_000_001, HALF) + engagedViews(8_000_001, HALF),
+    );
+
+    const partsLow = value.ourRevenue!.lowMinor + value.gapRevenue!.lowMinor;
+    const partsHigh = value.ourRevenue!.highMinor + value.gapRevenue!.highMinor;
+
+    // Rounded once, so the total's interval is contained in the parts'.
+    expect(value.trackedRevenue!.lowMinor).toBeGreaterThanOrEqual(partsLow);
+    expect(value.trackedRevenue!.highMinor).toBeLessThanOrEqual(partsHigh);
+    // And the gap is rounding, not a discrepancy: at most one minor unit each
+    // end. Anything larger would mean the halves were priced on a different
+    // view basis from the total, which is the bug this shape prevents.
+    expect(value.trackedRevenue!.lowMinor - partsLow).toBeLessThanOrEqual(1);
+    expect(partsHigh - value.trackedRevenue!.highMinor).toBeLessThanOrEqual(1);
+  });
+
+  it("carries the organization's share on every resolution, sanitised once", () => {
+    // On the resolution rather than in a settings payload, because the money is
+    // projected in the browser and the settings read is behind a permission the
+    // finance reader does not need.
+    expect(resolve(STORED_RANGE, [], 4_750).engagedViewShareBasisPoints).toBe(4_750);
+    expect(resolve(NO_RANGE, []).engagedViewShareBasisPoints).toBe(HALF);
+    // A hostile stored value is made safe before it reaches any consumer, so no
+    // caller has to remember to sanitise a database column.
+    expect(resolve(STORED_RANGE, [], 0).engagedViewShareBasisPoints).toBe(
+      DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS,
+    );
+  });
+
+  /**
+   * The label cannot be shared between the two bases.
+   *
+   * Two figures wearing the identical unit while meaning different things is
+   * the same failure as an unlabelled currency — and here it would invite a
+   * reader to conclude a measurement is "twice" an estimate when it is the
+   * denominators that differ.
+   */
+  it("says which views each rate is quoted against", () => {
+    expect(rpmQuoteUnit("engaged")).toBe("per 1,000 engaged views");
+    expect(rpmQuoteUnit("raw")).toBe("per 1,000 views");
+    expect(rpmQuoteUnit("engaged")).not.toBe(rpmQuoteUnit("raw"));
   });
 });
 

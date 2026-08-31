@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Play, StickyNote } from "lucide-react";
+import { StickyNote } from "lucide-react";
 import type { FeedShort } from "@/hooks/use-shorts-feed";
 import {
   EM_DASH,
@@ -19,8 +19,15 @@ import { NicheChips } from "@/components/niches/niche-chip";
 import { ContentTypeControl } from "@/components/content-types/content-type-control";
 import { SaveShortButton } from "./save-short-button";
 import type { UnbenchmarkableReason } from "@/lib/analytics/outliers";
-import { SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
-import { posterSourceFor } from "@/lib/shorts/poster";
+import {
+  SHORT_CARD_ACTION_PLATE,
+  SHORT_CARD_BODY,
+  SHORT_CARD_FOOTER,
+  SHORT_CARD_META_ROW,
+  SHORT_CARD_SHELL,
+  ShortCardTitle,
+  ShortPoster,
+} from "./short-card-frame";
 import { cn } from "@/lib/utils";
 
 /**
@@ -122,44 +129,6 @@ export function OutlierMultiple({
 }
 
 /**
- * The Short's own frame, in the Short's own shape.
- *
- * EVERY DECISION IN HERE IS `posterSourceFor`'s — which of the two sources to
- * draw, at what intrinsic size, and how to fit it — and that is deliberate:
- * this component holds only the one piece that genuinely is React, the record
- * of which URL has already failed. The rule itself is a pure function so it can
- * be tested, for exactly the same reason `frameFor` is one. See that file for
- * why the portrait source is tried first and why the fallback is letterboxed
- * into an unchanged 9:16 box rather than cropped to fill it.
- */
-function PosterFrame({ videoId }: { videoId: string }) {
-  // WHICH source failed, not a boolean — see `posterSourceFor`. Keyed to the
-  // URL, so a card recycled onto a different Short considers it untried again.
-  const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
-  const poster = posterSourceFor(videoId, failedSrc);
-
-  return (
-    /* eslint-disable-next-line @next/next/no-img-element */
-    <img
-      src={poster.src}
-      alt=""
-      // The intrinsic size of whichever source is showing, so the browser gets
-      // the ratio right before a byte arrives rather than from the class alone.
-      width={poster.width}
-      height={poster.height}
-      loading="lazy"
-      decoding="async"
-      referrerPolicy="no-referrer"
-      // Only the portrait source has somewhere to fall back TO. Once the wide
-      // fallback fails as well there is nothing left to try, and the play badge
-      // drawn over this is what still says "video" on a blank frame.
-      onError={poster.isPortrait ? () => setFailedSrc(poster.src) : undefined}
-      className={cn("size-full bg-surface-sunken", poster.fit)}
-    />
-  );
-}
-
-/**
  * =========================================================================
  * ONE SHORT, AS A CARD
  * =========================================================================
@@ -247,55 +216,11 @@ export function ShortCard({
   const { video, channel } = short;
 
   return (
-    <Card
-      className={cn(
-        "group flex min-w-0 flex-col overflow-hidden transition-colors duration-150 hover:border-border-strong",
-        className,
-      )}
-    >
-      <div className="relative bg-surface-sunken">
-        {/*
-          A BUTTON, not a link, and that is a deliberate downgrade in semantics.
-          It no longer navigates anywhere — it opens a dialog in this document —
-          and dressing that up as an anchor would promise a middle-click and a
-          "copy link address" that do nothing. The outward link still exists,
-          inside the player, where it is honest about being one.
-
-          The whole frame is the target because a play affordance the size of an
-          icon is a poor thing to hit on a phone. Kept out of the tab order with
-          the title below as the accessible control: two tab stops onto one
-          action is noise for anybody on a keyboard.
-        */}
-        <button
-          type="button"
-          onClick={() => onPlayShort?.(short)}
-          disabled={!onPlayShort}
-          tabIndex={-1}
-          aria-hidden
-          // The button IS the 9:16 box, so the play badge below centres on the
-          // poster rather than on the card's full width. `SHORTS_POSTER_FRAME`
-          // is shared with the loading skeleton — see the note on it.
-          className={cn(
-            "relative block cursor-pointer disabled:cursor-default",
-            SHORTS_POSTER_FRAME,
-          )}
-        >
-          <PosterFrame videoId={video.youtubeVideoId} />
-
-          {/* Drawn rather than left to the image, which is the one part of this
-              that can fail: YouTube serves a placeholder or a 404 for a Short
-              that has been deleted or made private, and the badge is what still
-              says "this is a video" when the frame behind it is blank. */}
-          <span
-            aria-hidden
-            className="pointer-events-none absolute inset-0 flex items-center justify-center"
-          >
-            <span className="flex size-10 items-center justify-center rounded-full bg-black/45 opacity-80 backdrop-blur-sm transition-opacity group-hover:opacity-100">
-              <Play className="size-4 fill-white text-white" />
-            </span>
-          </span>
-        </button>
-
+    <Card className={cn(SHORT_CARD_SHELL, className)}>
+      <ShortPoster
+        videoId={video.youtubeVideoId}
+        onPlay={onPlayShort ? () => onPlayShort(short) : undefined}
+      >
         {rank !== undefined ? (
           // On the frame rather than in the body: the rank is the reason the
           // card is in this position, and in a grid the reading order is no
@@ -305,17 +230,13 @@ export function ShortCard({
           </span>
         ) : null}
 
-        {/* The actions sit on a token-coloured plate rather than bare on the
-            image: a ghost icon over an arbitrary video frame is legible on some
-            Shorts and invisible on others, and it has to work in both themes.
-
-            The plate reveals on hover EXCEPT when the Short carries notes —
+        {/* The plate reveals on hover EXCEPT when the Short carries notes —
             that is information about the Short rather than an affordance, and
             it has always been visible without hovering. Same rule as the saved
             board, so the two grids behave identically. */}
         <div
           className={cn(
-            "absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/90 p-0.5 backdrop-blur-sm transition-opacity",
+            SHORT_CARD_ACTION_PLATE,
             noteCount > 0
               ? "opacity-100"
               : "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
@@ -347,25 +268,15 @@ export function ShortCard({
 
           <SaveShortButton short={short} />
         </div>
-      </div>
+      </ShortPoster>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-2 p-3">
-        {/*
-          THE ACCESSIBLE PLAY CONTROL. The frame above is hidden from assistive
-          technology precisely so this one carries the whole action, with the
-          Short's own name in it rather than "play".
-        */}
-        <button
-          type="button"
-          onClick={() => onPlayShort?.(short)}
-          disabled={!onPlayShort}
+      <div className={SHORT_CARD_BODY}>
+        <ShortCardTitle
           title={video.title}
-          className="min-w-0 text-left text-[13px] font-medium leading-snug text-foreground transition-colors hover:text-accent focus:outline-none focus-visible:text-accent disabled:cursor-default"
-        >
-          <span className="line-clamp-2 break-words">{video.title}</span>
-        </button>
+          onPlay={onPlayShort ? () => onPlayShort(short) : undefined}
+        />
 
-        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-subtle-foreground">
+        <div className={SHORT_CARD_META_ROW}>
           <Link
             href={`/channels/${channel.id}`}
             className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
@@ -404,7 +315,7 @@ export function ShortCard({
           have to be allowed to stack, and the old `w-[112px]` block is exactly
           the kind of thing that would have pushed the page sideways instead.
         */}
-        <div className="mt-auto flex min-w-0 flex-wrap items-end justify-between gap-x-3 gap-y-1 border-t border-border pt-2">
+        <div className={SHORT_CARD_FOOTER}>
           <div className="flex min-w-0 flex-col gap-0.5">
             <OutlierMultiple
               multiple={short.outlierMultiple}

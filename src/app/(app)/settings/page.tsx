@@ -31,6 +31,15 @@ import type { MyProfileDTO, OrganizationSettingsDTO, PersonalSettingsDTO } from 
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 import { DATASET_KEY } from "@/hooks/use-dataset";
 import { THRESHOLD_PRESETS } from "@/lib/analytics/constants";
+import {
+  ENGAGED_VIEWS_GLOSS,
+  ENGAGED_VIEW_SHARE_IMPLAUSIBLE_ABOVE_BASIS_POINTS,
+  ENGAGED_VIEW_SHARE_IMPLAUSIBLE_BELOW_BASIS_POINTS,
+  MAX_ENGAGED_VIEW_SHARE_BASIS_POINTS,
+  MIN_ENGAGED_VIEW_SHARE_BASIS_POINTS,
+  formatEngagedViewShare,
+  normalizeEngagedViewShare,
+} from "@/lib/analytics/niche-rpm";
 import { formatCompactNumber, formatNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -510,6 +519,11 @@ function OrganizationSection({
         onChange={(patch) => update.mutate(patch)}
         saving={update.isPending}
       />
+      <EngagedViewsCard
+        settings={organization}
+        onChange={(patch) => update.mutate(patch)}
+        saving={update.isPending}
+      />
       <RefreshCard
         settings={organization}
         onChange={(patch) => update.mutate(patch)}
@@ -757,6 +771,194 @@ function DefaultsCard({
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * =========================================================================
+ * WHAT SHARE OF VIEWS YOUTUBE ACTUALLY PAYS FOR
+ * =========================================================================
+ *
+ * The owner's request in full: "Add an option for Engaged Views, since RPM is
+ * only calculated based on engaged views. Engaged Views are usually around 50%
+ * of the total views you get, so set the default value to 50%, but we should be
+ * able to change it."
+ *
+ * ITS OWN CARD RATHER THAN A FIELD IN "ANALYSIS DEFAULTS", because it is a
+ * different kind of thing. The threshold and the period are choices about how
+ * to LOOK at the data — change one and the same facts are shown differently.
+ * This is a claim about the outside world that multiplies every money figure in
+ * the product, and burying it under a heading about dashboard defaults would
+ * misrepresent how much it moves.
+ *
+ * WHOLE PERCENT IN THE BOX, BASIS POINTS ON THE WIRE. Nobody types "5000" and
+ * means half. The field takes a percentage with an optional decimal — 50, 47.5
+ * — and the conversion happens here, once, at the boundary. Storing percent
+ * instead would have been the simpler thing and cannot express 47.5%; storing a
+ * float would have put a binary fraction directly upstream of every currency
+ * amount, which the money rule forbids.
+ *
+ * THE PARSE IS ON DIGIT STRINGS, not `Number(text) * 100`. `47.5 * 100` is
+ * 4749.999999999999 in IEEE 754 and `Math.round` rescues that one — but the
+ * habit is what fails eventually, and this file has no business being the place
+ * a float first touches a money input. Splitting on the separator and padding
+ * the fraction to two digits is exact for every input by construction.
+ */
+function EngagedViewsCard({
+  settings,
+  onChange,
+  saving,
+}: {
+  settings: OrganizationSettingsDTO;
+  onChange: (patch: OrganizationPatch) => void;
+  saving: boolean;
+}) {
+  const [value, setValue] = React.useState(
+    basisPointsToPercentText(settings.engagedViewShareBasisPoints),
+  );
+  const [error, setError] = React.useState<string | null>(null);
+
+  const parsed = parsePercentToBasisPoints(value);
+  // The soft warning, shown while typing rather than on submit — following the
+  // RPM dialog's implausibility hint. A share outside 20–80% is far more likely
+  // to be a scale mistake (5 for "50%") than a considered belief, and saying so
+  // before the save costs nothing. It is a hint, not a rule: somebody who means
+  // it can still save it.
+  const implausible =
+    parsed !== null &&
+    (parsed < ENGAGED_VIEW_SHARE_IMPLAUSIBLE_BELOW_BASIS_POINTS ||
+      parsed > ENGAGED_VIEW_SHARE_IMPLAUSIBLE_ABOVE_BASIS_POINTS);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Engaged views</CardTitle>
+        <CardDescription>{ENGAGED_VIEWS_GLOSS}</CardDescription>
+      </CardHeader>
+
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="engaged-view-share">Engaged share of views (%)</Label>
+          <div className="flex gap-2">
+            <Input
+              id="engaged-view-share"
+              inputMode="decimal"
+              value={value}
+              invalid={Boolean(error)}
+              onChange={(event) => {
+                setValue(event.target.value);
+                setError(null);
+              }}
+              className="w-40"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={saving}
+              onClick={() => {
+                const basisPoints = parsePercentToBasisPoints(value);
+                if (basisPoints === null) {
+                  setError("Enter a percentage like 50 or 47.5.");
+                  return;
+                }
+                if (basisPoints < MIN_ENGAGED_VIEW_SHARE_BASIS_POINTS) {
+                  // The same refusal an RPM of nothing gets, for the same
+                  // reason: 0% says no view is ever engaged, which prices every
+                  // niche in the organization at nothing.
+                  setError(
+                    "0% would say no view is ever paid for, which prices every niche at nothing. Enter at least 0.01%.",
+                  );
+                  return;
+                }
+                if (basisPoints > MAX_ENGAGED_VIEW_SHARE_BASIS_POINTS) {
+                  setError(
+                    "Engaged views are a subset of views, so the share cannot be above 100%.",
+                  );
+                  return;
+                }
+                onChange({ engagedViewShareBasisPoints: basisPoints });
+              }}
+            >
+              Save
+            </Button>
+          </div>
+
+          {error ? (
+            <FieldHint tone="danger">{error}</FieldHint>
+          ) : implausible ? (
+            <FieldHint tone="danger">
+              That is outside the 20–80% range a Shorts channel normally sees. Check
+              you have not typed 5 for 50% — this number multiplies every money
+              figure in the app. Save it anyway if you mean it.
+            </FieldHint>
+          ) : (
+            <FieldHint>
+              Currently {formatEngagedViewShare(settings.engagedViewShareBasisPoints)}.
+              100% turns the assumption off — every view is treated as paid, which is
+              how the app behaved before this setting existed.
+            </FieldHint>
+          )}
+        </div>
+
+        {/* WHERE IT DOES AND DOES NOT APPLY, stated plainly, because the
+            asymmetry is the part that surprises people: a niche priced by hand
+            moves when this changes and a niche measured from Northstar's own
+            revenue does not. Somebody who edits this and watches one card move
+            while another sits still should find the reason here rather than
+            conclude the screen is broken. */}
+        <p className="rounded-lg border border-border bg-surface-sunken p-3.5 text-[12px] leading-relaxed text-muted-foreground">
+          This applies to niche RPM ranges entered by hand, which are quoted per
+          1,000 engaged views. It does NOT apply where Northstar operates a
+          monetized channel in the niche and the rate is measured from what that
+          channel actually earned — that figure is already net of engagement,
+          because the money in it is what YouTube really paid, so discounting it
+          again would halve a measurement.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Basis points -> the text the box shows. 5000 becomes "50", 4750 "47.5".
+ *
+ * Trailing zeros are trimmed for the same reason `rpmToInputText` trims them:
+ * the extra digits exist to hold a value, not to be typed past, and "50.00" in
+ * a percentage box invites somebody to think the precision means something.
+ */
+function basisPointsToPercentText(basisPoints: number): string {
+  const safe = normalizeEngagedViewShare(basisPoints);
+  const whole = Math.trunc(safe / 100);
+  const fraction = String(safe % 100).padStart(2, "0").replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : String(whole);
+}
+
+/**
+ * The text somebody typed -> basis points, or `null` when it cannot be read.
+ *
+ * ARITHMETIC ON DIGIT STRINGS, never `Number(text) * 100`. See the card's
+ * header: the float route happens to survive `Math.round` today and is the
+ * wrong habit directly upstream of a money multiplier. A comma is accepted as
+ * the separator alongside a dot, matching `parseRpmToMinorPerMillion`, because
+ * the same people type both.
+ */
+function parsePercentToBasisPoints(input: string): number | null {
+  const text = input.replace(/[\s%]/g, "");
+  if (!text || text.length > 12) return null;
+  if (!/^\d*[.,]?\d*$/.test(text)) return null;
+
+  const separator = text.includes(",") ? "," : ".";
+  const [whole = "", fraction = ""] = text.split(separator);
+  if (whole === "" && fraction === "") return null;
+
+  // Two digits past the point is exactly the basis-point scale. A third is
+  // rounded rather than truncated, so somebody typing 47.555 is not silently
+  // rounded downward.
+  const kept = fraction.slice(0, 2).padEnd(2, "0");
+  const dropped = fraction.slice(2);
+  let value = Number(`${whole === "" ? "0" : whole}${kept}`);
+  if (!Number.isFinite(value)) return null;
+  if (dropped.length > 0 && Number(dropped[0]) >= 5) value += 1;
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 function RefreshCard({

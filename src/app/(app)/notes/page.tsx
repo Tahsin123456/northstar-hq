@@ -43,6 +43,16 @@ import {
   VisibilityBadge,
 } from "@/components/notes/note-visibility";
 import { ShortPlayerDialog } from "@/components/shorts/short-player-dialog";
+import {
+  SHORT_CARD_ACTION_PLATE,
+  SHORT_CARD_BODY,
+  SHORT_CARD_META_ROW,
+  SHORT_CARD_SHELL,
+  ShortCardTitle,
+  ShortPoster,
+} from "@/components/shorts/short-card-frame";
+import { SHORTS_CARD_GRID, SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
+import { notePosterFor } from "@/lib/notes/note-poster";
 import { useSession } from "@/components/providers/session-provider";
 import { useDeleteNote, useUpdateNote } from "@/hooks/use-research";
 import { useDataset } from "@/hooks/use-dataset";
@@ -100,26 +110,21 @@ const SORT_QUERY: Record<SortChoice, Pick<NoteLogQuery, "sort" | "direction">> =
 };
 
 /**
- * THE GRID.
+ * THE GRID — IMPORTED NOW, NOT DECLARED HERE.
  *
- * A note is a paragraph, not a row of numbers, so the wide horizontal strip
- * this log used to draw spent most of a desktop screen on whitespace to the
- * right of a sentence and fit five notes in a viewport. Compact cards read the
- * same and fit twenty.
+ * This file used to carry its own copy of the class list, character-identical
+ * to the one in `feed-layout` and the one on the saved board. `feed-layout`'s
+ * own header names the outcome: "this is now the THIRD copy of the same class
+ * list ... They drifted apart once already." The owner's request that these
+ * screens look alike is the moment to stop having three, so the constant is
+ * imported and the local copy is gone.
  *
- * The columns come off Tailwind's own scale rather than invented breakpoints,
- * and they are counted against the MAIN COLUMN, not the window: the shell keeps
- * a 212px sidebar from `lg` up, so at `xl` the cards share roughly 1000px and
- * three of them are ~325px each — wide enough for two-thirds of a sentence per
- * line, which is where a clamped paragraph stops reading like a stack of
- * fragments. `grid-cols-1` at the bottom end is what guarantees the promise
- * that nothing ever scrolls sideways.
- *
- * One string, shared by the rows and by the skeleton that stands in for them,
- * so the loading state cannot settle into a different shape than the thing it
- * was predicting.
+ * Everything the local comment argued for still holds and now lives beside the
+ * constant: columns off Tailwind's own scale, counted against the MAIN COLUMN
+ * rather than the window, and `grid-cols-1` at the bottom end as the structural
+ * guarantee that nothing scrolls sideways.
  */
-const CARD_GRID = "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4";
+const CARD_GRID = SHORTS_CARD_GRID;
 
 export default function NotesPage() {
   const { data: dataset } = useDataset();
@@ -252,15 +257,22 @@ export default function NotesPage() {
       />
 
       {isLoading ? (
-        // Shaped like the card it replaces — badge, three lines of body, a
-        // byline — and laid out on the same grid, so the page does not reflow
-        // when the answer arrives.
+        // Shaped like the card it replaces — a 9:16 poster, a title, three
+        // lines of body, a byline — and laid out on the same grid, so the page
+        // does not reflow when the answer arrives. `SHORTS_POSTER_FRAME` is the
+        // same string the card draws, which is the whole reason it is a shared
+        // constant: a skeleton that predicts a different shape than the thing
+        // it stands in for makes the page settle by jumping.
         <div className={CARD_GRID}>
           {Array.from({ length: 6 }, (_, i) => (
-            <Card key={i} className="flex flex-col gap-3 p-4">
-              <Skeleton className="h-4 w-20" />
-              <SkeletonText lines={3} />
-              <Skeleton className="mt-1 h-3 w-2/3" />
+            <Card key={i} className="flex flex-col overflow-hidden">
+              <Skeleton className={cn(SHORTS_POSTER_FRAME, "rounded-none")} />
+              <div className="flex flex-col gap-2 p-3">
+                <Skeleton className="h-3.5 w-full" />
+                <Skeleton className="h-3 w-20" />
+                <SkeletonText lines={3} />
+                <Skeleton className="mt-1 h-3 w-2/3" />
+              </div>
             </Card>
           ))}
         </div>
@@ -507,12 +519,12 @@ function NoteCard({
   const [draft, setDraft] = React.useState(note.body);
   /*
    * A note has up to two Shorts on it and they are different things: the one it
-   * QUOTES from outside the tracker, drawn by `ExternalShortPreview` above the
-   * footer, and the tracked Short it is a note ABOUT, named in the footer. Both
-   * used to open a new tab; both now play here. The preview owns its own
-   * player, so this state is only ever the footer's.
+   * QUOTES from outside the tracker and the tracked Short it is a note ABOUT.
+   * `notePosterFor` decides which of them leads the card and whether the other
+   * still needs its own strip; this state belongs to whichever one ended up on
+   * the poster. The preview strip owns its own player for the other.
    */
-  const [playingTarget, setPlayingTarget] = React.useState(false);
+  const [playing, setPlaying] = React.useState(false);
   // Seeded from the note so opening the editor shows the Short it already
   // quotes. This card TOGGLES its form rather than unmounting it, so — like
   // `draft` above — it is re-seeded on the way in rather than on mount.
@@ -551,6 +563,14 @@ function NoteCard({
 
   const Icon = TYPE_ICON[note.targetType];
 
+  /*
+   * WHAT LEADS THE CARD. The whole of the owner's first request for this
+   * screen — "display them underneath the Short" — turns on this one call, and
+   * on the fact that it always answers. See `notePosterFor` for the four cases
+   * and for why a note with no Short still gets a poster-shaped box.
+   */
+  const poster = notePosterFor(note);
+
   // A general note is attached to nothing, so its footer holds only the byline
   // and date. Tested rather than left to render as an empty line: on a wide
   // strip an absent context row cost nothing, but on a card it is a visible
@@ -560,40 +580,63 @@ function NoteCard({
     Boolean(note.channelId || note.youtubeVideoId || note.niches.length > 0);
 
   /**
-   * EQUAL HEIGHT, AND HERE IS WHY.
+   * =========================================================================
+   * THE SAME CARD AS WINNERS, WITH A NOTE UNDER IT
+   * =========================================================================
    *
-   * `flex flex-col` with the body claiming the slack (`flex-1`) puts the footer
-   * on the floor of the card, and grid tracks stretch, so every card in a row
-   * ends at the same line and every byline in that row sits on it. That is the
-   * whole reason for the choice: this screen is scanned down the author and
-   * date column, and a byline that lands at a different height on each card is
-   * precisely the thing the brief calls a broken grid.
+   * WHAT CHANGED AND WHY. This card used to be inverted relative to what the
+   * owner asked for: it led with note metadata — a type badge and a visibility
+   * badge — and demoted the Short it was about to a text link in the footer.
+   * The Short is the object; the note is what somebody said about it. So the
+   * poster leads, exactly as it does on Winners and Outliers, and the note text
+   * sits underneath it.
    *
-   * The waste that usually comes with equal height is bounded rather than
-   * unbounded, because the body is clamped: a card can only ever be about five
-   * lines taller than its neighbour, so a row of one-line notes is a row of
-   * short cards, not a row of tall cards with holes in them. Nothing is padded
-   * to a minimum. Rows differ in height from each other; cards within a row do
-   * not, which is the alignment a reader can actually see.
+   * IT IS THE SHARED CARD, not a copy of it. The shell, the poster box, the
+   * title control and the meta row all come from `short-card-frame`, which the
+   * feed card uses too — so "almost identical" is now a structural property
+   * rather than two files that happen to agree today. The `p-4` this card used
+   * to carry moved inward to `SHORT_CARD_BODY`, because a poster cannot bleed
+   * to the edge of a padded card.
+   *
+   * EQUAL HEIGHT SURVIVES, AND STILL FOR THE SAME REASON. `flex flex-col` with
+   * the body claiming the slack puts the footer on the floor of the card, and
+   * grid tracks stretch, so every byline in a row sits on one line. This screen
+   * is scanned down the author and date column. The waste stays bounded because
+   * the body is still clamped to five lines — and the poster is a fixed height
+   * for every card including the ones with no Short, which is precisely why
+   * `ShortPoster` draws a plate rather than nothing.
    *
    * `min-w-0` is not cosmetic: a grid item defaults to `min-width: auto`, so a
    * 300-character unbroken word would widen the track past its share and push
    * the page into horizontal scroll. That, plus `break-words` on the body, is
-   * what makes the no-sideways-scrolling promise hold for real input.
+   * what makes the no-sideways-scrolling promise hold for real input. It is
+   * carried by `SHORT_CARD_SHELL` now.
    */
   return (
-    <Card className="group flex min-w-0 flex-col p-4">
-      <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <Badge variant="outline" size="md" className="shrink-0 gap-1.5">
-            <Icon className="size-3" />
-            {TYPE_LABELS[note.targetType]}
-          </Badge>
-          <VisibilityBadge visibility={note.visibility} />
-        </div>
-
+    <Card className={SHORT_CARD_SHELL}>
+      <ShortPoster
+        videoId={poster.youtubeVideoId}
+        // No play control where there is no Short. A disabled button would be
+        // an affordance that lies; the plate simply is not one.
+        onPlay={poster.youtubeVideoId ? () => setPlaying(true) : undefined}
+        // The note's own kind icon, on the plate, where the play badge would
+        // be. A channel note is a screen, a niche note is layers, a general
+        // note is a sticky note — the same icon the type badge below carries,
+        // so the two agree.
+        placeholder={<Icon />}
+      >
         {canEdit ? (
-          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+          // ON THE POSTER, on the same plate the feed puts its actions on,
+          // rather than in a header row above the card. That header row is what
+          // the poster replaced. Hover-gated exactly as the feed's is: these
+          // are affordances rather than information, and one of them deletes
+          // the note.
+          <div
+            className={cn(
+              SHORT_CARD_ACTION_PLATE,
+              "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
+            )}
+          >
             <NoteVisibilityToggle note={note} />
             <Button
               variant="ghost"
@@ -630,11 +673,49 @@ function NoteCard({
             </Button>
           </div>
         ) : null}
-      </div>
+      </ShortPoster>
+
+      {/* The player for whichever Short took the poster. Mounted only where
+          there is one, so a note about a niche does not carry a dialog it can
+          never open. */}
+      {poster.youtubeVideoId ? (
+        <ShortPlayerDialog
+          short={{
+            youtubeVideoId: poster.youtubeVideoId,
+            title: poster.title,
+            subtitle: poster.subtitle,
+          }}
+          open={playing}
+          onOpenChange={setPlaying}
+        />
+      ) : null}
+
+      <div className={SHORT_CARD_BODY}>
+        {/* THE SUBJECT, in the title slot the feed card puts a Short's title
+            in: the Short's own name where there is one, the channel or niche
+            otherwise. Never empty — see `notePosterFor`. */}
+        <ShortCardTitle
+          title={poster.title}
+          onPlay={poster.youtubeVideoId ? () => setPlaying(true) : undefined}
+        />
+
+        {/* The note's own metadata, demoted from the top of the card to the
+            meta row — the same row the feed card puts a channel, an "Own" badge
+            and a niche chip in. It is still all here; it is simply no longer
+            the first thing on the card. */}
+        <div className={SHORT_CARD_META_ROW}>
+          <Badge variant="outline" size="sm" className="shrink-0 gap-1.5">
+            <Icon className="size-3" />
+            {TYPE_LABELS[note.targetType]}
+          </Badge>
+          <VisibilityBadge visibility={note.visibility} />
+
+          {hasContext ? <NoteContext note={note} /> : null}
+        </div>
 
       {editing ? (
         <form
-          className="mt-3 flex flex-1 flex-col gap-2"
+          className="flex flex-1 flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             const body = draft.trim();
@@ -697,108 +778,46 @@ function NoteCard({
           </div>
         </form>
       ) : (
-        // The body claims the card's slack, which is what pins the footer to
-        // the floor. Clamped to five lines — enough that most notes are read in
-        // full on the card, and the ones that are not say so by trailing off
-        // rather than by being cut mid-glyph. The whole text stays available on
-        // hover, since there is nowhere else in this app to send a reader for
-        // it: a note has no page of its own.
-        <div className="mt-2.5 min-w-0 flex-1">
-          <p
-            className="line-clamp-5 break-words whitespace-pre-wrap text-[13px] leading-relaxed text-foreground"
-            title={note.body}
-          >
-            {note.body}
-          </p>
-        </div>
+        // THE NOTE, UNDERNEATH THE SHORT — the owner's request for this screen,
+        // in one element. Clamped to five lines: enough that most notes are
+        // read in full on the card, and the ones that are not say so by
+        // trailing off rather than by being cut mid-glyph. The whole text stays
+        // available on hover, since there is nowhere else in this app to send a
+        // reader for it — a note has no page of its own.
+        <p
+          className="line-clamp-5 min-w-0 break-words whitespace-pre-wrap text-[13px] leading-relaxed text-foreground"
+          title={note.body}
+        >
+          {note.body}
+        </p>
       )}
 
-      {/* The Short this note quotes from outside the tracker, when it quotes
-          one. The shared preview, not a card-sized copy of it: the composer,
-          the panel on a channel page and this log all draw the same attachment,
-          and it already renders nothing — no box, no divider, no gap — for the
-          overwhelming majority of notes that have none.
+      {/* The Short this note quotes from outside the tracker, WHEN IT IS NOT
+          ALREADY THE POSTER. That condition is the new half: a note whose only
+          Short is an external one now leads with it, so drawing the strip as
+          well would show the same Short twice. A note that is about a tracked
+          Short AND quotes an outside one still gets both — the tracked one on
+          the poster, the quoted one here — because they are the two halves of
+          the comparison that prompted the note.
 
-          It sits above the footer rather than inside it because it is part of
-          what the note SAYS, not part of who wrote it.
+          The shared preview, not a card-sized copy of it: the composer, the
+          panel on a channel page and this log all draw the same attachment.
 
           HIDDEN WHILE EDITING, and that is the whole point of the guard.
           Clearing the field is how a link is removed, and with the stored
           attachment still drawn underneath, the clear looked like it had done
           nothing — the thumbnail was right there, unchanged, until save. Two
           views of one value, one of them stale, is not a preview. */}
-      {editing ? null : <ExternalShortPreview note={note} className="mt-3" />}
+      {editing || !poster.hasSeparateExternalShort ? null : (
+        <ExternalShortPreview note={note} />
+      )}
 
-      {/* The floor of the card: what this was about, then who wrote it and
-          when. Two stacked lines rather than one wrapping one, so the byline is
-          always the last line of the card and the date is never the half that
-          gets truncated away. */}
-      <div className="mt-3 flex flex-col gap-1.5 border-t border-border pt-3 text-[11px]">
-        {hasContext ? (
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
-            {note.targetType === "video" && note.youtubeVideoId ? (
-              <>
-                {/* Plays in place rather than opening a tab, the same as every
-                    other Short in the app now. Still a control that says what
-                    it is about — the title is the note's context first and the
-                    play affordance second, which is why the icon stays a film
-                    frame rather than becoming a play triangle. */}
-                <button
-                  type="button"
-                  onClick={() => setPlayingTarget(true)}
-                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded text-muted-foreground transition-colors hover:text-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-ring)]"
-                  title={`Play ${note.targetLabel}`}
-                >
-                  <Video className="size-3 shrink-0" />
-                  <span className="truncate">{note.targetLabel}</span>
-                </button>
-
-                <ShortPlayerDialog
-                  short={{
-                    youtubeVideoId: note.youtubeVideoId,
-                    title: note.targetLabel,
-                    subtitle: note.channelName,
-                  }}
-                  open={playingTarget}
-                  onOpenChange={setPlayingTarget}
-                />
-              </>
-            ) : null}
-
-            {note.channelId ? (
-              <Link
-                href={`/channels/${note.channelId}`}
-                className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
-              >
-                <Avatar
-                  src={note.channelAvatarUrl}
-                  name={note.channelName ?? "?"}
-                  size={14}
-                />
-                <span className="truncate">{note.channelName}</span>
-              </Link>
-            ) : null}
-
-            {note.targetType === "niche" && note.niches[0] ? (
-              <Link
-                href={`/?niche=${encodeURIComponent(note.niches[0].id)}`}
-                className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
-              >
-                <span
-                  aria-hidden
-                  className="size-[6px] shrink-0 rounded-full"
-                  style={{ background: nicheColor(note.niches[0].colorIndex) }}
-                />
-                <span className="truncate">{note.niches[0].name}</span>
-              </Link>
-            ) : note.niches.length > 0 ? (
-              // One chip rather than two: the card is a third of the width the
-              // strip was, and a second chip pushes the "+n" onto its own line.
-              <NicheChips niches={note.niches} limit={1} size="sm" />
-            ) : null}
-          </div>
-        ) : null}
-
+      {/* The floor of the card: who wrote it and when. `mt-auto` pins it there
+          however long the note ran, which is what makes every byline in a row
+          sit on one line — the alignment this screen is scanned by. The context
+          row moved up into the meta row under the title, where the feed card
+          keeps the same class of fact. */}
+      <div className="mt-auto flex flex-col gap-1.5 border-t border-border pt-2.5 text-[11px]">
         {/* "Created by" in full, not a bare name. Next to a date a lone name
             reads as ambiguously as it looks — it could as easily be who the
             note is *about* as who wrote it.
@@ -827,7 +846,60 @@ function NoteCard({
           </span>
         </div>
       </div>
+      </div>
     </Card>
+  );
+}
+
+/**
+ * What the note is filed against, in the card's meta row.
+ *
+ * MOVED UP FROM THE FOOTER, and the move is the point. It used to sit above the
+ * byline in a footer that also held the Short — which meant the Short, the
+ * channel and the niche were all "context" at the bottom of a card whose top
+ * was two badges. Now the Short is the poster and this is the row of small
+ * facts under the title, which is exactly where the feed card puts a channel
+ * and a niche chip. Same information, same place, across two screens.
+ *
+ * The tracked Short is deliberately NOT repeated here: it is the poster and the
+ * title above, so a third mention would be the card saying one thing three
+ * times.
+ *
+ * Extracted rather than left inline because the card body is long and this is a
+ * self-contained question — "what was this about?" — with three independent
+ * answers that can each be absent.
+ */
+function NoteContext({ note }: { note: NoteWithContextDTO }) {
+  return (
+    <>
+      {note.channelId ? (
+        <Link
+          href={`/channels/${note.channelId}`}
+          className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
+        >
+          <Avatar src={note.channelAvatarUrl} name={note.channelName ?? "?"} size={14} />
+          <span className="max-w-[140px] truncate">{note.channelName}</span>
+        </Link>
+      ) : null}
+
+      {note.targetType === "niche" && note.niches[0] ? (
+        <Link
+          href={`/?niche=${encodeURIComponent(note.niches[0].id)}`}
+          className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
+        >
+          <span
+            aria-hidden
+            className="size-[6px] shrink-0 rounded-full"
+            style={{ background: nicheColor(note.niches[0].colorIndex) }}
+          />
+          <span className="truncate">{note.niches[0].name}</span>
+        </Link>
+      ) : note.niches.length > 0 ? (
+        // One chip rather than two: the card is a third of the width the strip
+        // was, and a second chip pushes the "+n" onto its own line.
+        <NicheChips niches={note.niches} limit={1} size="sm" />
+      ) : null}
+    </>
   );
 }
 

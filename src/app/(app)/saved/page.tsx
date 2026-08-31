@@ -5,7 +5,6 @@ import Link from "next/link";
 import {
   ArrowRight,
   Bookmark,
-  ExternalLink,
   FolderOpen,
   MoreHorizontal,
   Pencil,
@@ -56,6 +55,19 @@ import {
   ShortDetailDialog,
   type ShortDetailTarget,
 } from "@/components/shorts/short-detail-dialog";
+import {
+  ShortPlayerDialog,
+  type ShortPlayerTarget,
+} from "@/components/shorts/short-player-dialog";
+import {
+  SHORT_CARD_ACTION_PLATE,
+  SHORT_CARD_BODY,
+  SHORT_CARD_META_ROW,
+  SHORT_CARD_SHELL,
+  ShortCardTitle,
+  ShortPoster,
+} from "@/components/shorts/short-card-frame";
+import { SHORTS_CARD_GRID, SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
 import { useSession } from "@/components/providers/session-provider";
 import { useDataset } from "@/hooks/use-dataset";
 import { useEmployees } from "@/hooks/use-employees";
@@ -81,8 +93,9 @@ import {
   formatCompactNumber,
   formatDate,
   formatRelativeTime,
-  youtubeShortsUrl,
-  youtubeThumbnailUrl,
+  // `youtubeShortsUrl` and `youtubeThumbnailUrl` are both gone from this file:
+  // the poster is composed by `posterSourceFor` inside the shared frame, and
+  // the outward link now lives in the player dialog rather than on the card.
 } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -110,22 +123,15 @@ const SORT_QUERY: Record<SortChoice, Pick<SavedShortsQuery, "sort" | "direction"
 };
 
 /**
- * THE GRID.
+ * THE GRID — IMPORTED NOW, NOT DECLARED HERE.
  *
- * Identical to the notes log's, deliberately — the two screens are the two ends
- * of the same loop and a reader moving between them should not have to re-learn
- * where things are. Columns come off Tailwind's own scale, and they are counted
- * against the MAIN COLUMN rather than the window, since the shell holds a 212px
- * sidebar from `lg` up.
- *
- * `grid-cols-1` at the bottom end is what makes the no-horizontal-scrolling
- * promise structural rather than hopeful.
- *
- * One string, shared by the cards and by the skeleton that stands in for them,
- * so the loading state cannot settle into a different shape than the thing it
- * was predicting.
+ * It was always meant to be identical to the feed's and the notes log's: the
+ * three screens are one loop and a reader moving between them should not have
+ * to re-learn where things are. It was identical by copy-and-paste, which
+ * `feed-layout`'s header records had already failed once. One import, three
+ * consumers, no way to drift.
  */
-const CARD_GRID = "grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4";
+const CARD_GRID = SHORTS_CARD_GRID;
 
 export default function SavedPage() {
   // The dataset still supplies the FURNITURE around the board — the
@@ -148,6 +154,16 @@ export default function SavedPage() {
   const [activeCollection, setActiveCollection] = React.useState<string | null>(null);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [openShort, setOpenShort] = React.useState<SavedShortDTO | null>(null);
+  /*
+   * ONE PLAYER FOR THE PAGE, driven by whichever card was clicked.
+   *
+   * At the page rather than per card, matching the feed: a board can hold a
+   * hundred rows, and a dialog per row is a hundred Radix roots for a control
+   * only one of them will ever use. The null keeps the player unmounted, which
+   * is what stops a cross-origin iframe carrying on playing — see
+   * `ShortPlayerDialog` for why that is belt and braces rather than incidental.
+   */
+  const [playingShort, setPlayingShort] = React.useState<ShortPlayerTarget | null>(null);
   const [saverFilter, setSaverFilter] = React.useState<string>("all");
   const [dateFilter, setDateFilter] = React.useState<ResolvedDateFilter>({ id: "all" });
   const [sort, setSort] = React.useState<SortChoice>("newest");
@@ -308,7 +324,11 @@ export default function SavedPage() {
         <div className={CARD_GRID}>
           {Array.from({ length: 8 }, (_, i) => (
             <Card key={i} className="flex flex-col overflow-hidden">
-              <Skeleton className="aspect-video w-full rounded-none" />
+              {/* The SAME poster string the card draws, so the board does not
+                  settle by jumping when the rows arrive. This predicted a 16:9
+                  box while the card drew one too; both are 9:16 now, and they
+                  are one constant rather than two agreeing strings. */}
+              <Skeleton className={cn(SHORTS_POSTER_FRAME, "rounded-none")} />
               <div className="flex flex-col gap-2 p-3">
                 <Skeleton className="h-3.5 w-full" />
                 <Skeleton className="h-3 w-2/3" />
@@ -468,6 +488,13 @@ export default function SavedPage() {
                   resolution={contentTypeIndex.get(item.videoId) ?? EMPTY_RESOLUTION}
                   isMine={item.savedById === viewerId}
                   onOpenShort={() => setOpenShort(item)}
+                  onPlayShort={() =>
+                    setPlayingShort({
+                      youtubeVideoId: item.youtubeVideoId,
+                      title: item.title,
+                      subtitle: item.channelName,
+                    })
+                  }
                 />
               ))}
             </div>
@@ -476,6 +503,13 @@ export default function SavedPage() {
       )}
 
       <CreateCollectionDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <ShortPlayerDialog
+        short={playingShort}
+        open={playingShort !== null}
+        onOpenChange={(open) => {
+          if (!open) setPlayingShort(null);
+        }}
+      />
       <ShortDetailDialog
         short={detailTarget}
         open={openShort !== null}
@@ -608,7 +642,13 @@ function CollectionChip({
                 aria-label={
                   owner ? `Manage ${collection.name} (${owner})` : `Manage ${collection.name}`
                 }
-                className="absolute right-1 rounded p-0.5 text-subtle-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/chip:opacity-100 data-[state=open]:opacity-100"
+                // ALWAYS VISIBLE, the same change as the niche card's "…".
+                // It carried `opacity-0` plus three rules whose only job was to
+                // undo it, so deleting the group is the whole fix. A menu that
+                // appears only under a pointer is unreachable on a touch
+                // screen, and this one holds the only rename and the only
+                // delete a collection has.
+                className="absolute right-1 rounded p-0.5 text-subtle-foreground transition-colors hover:text-foreground"
               >
                 <MoreHorizontal className="size-3" />
               </button>
@@ -653,6 +693,7 @@ function SavedCard({
   resolution,
   isMine,
   onOpenShort,
+  onPlayShort,
 }: {
   item: SavedShortDTO;
   collections: readonly CollectionDTO[];
@@ -671,6 +712,15 @@ function SavedCard({
    */
   isMine: boolean;
   onOpenShort: () => void;
+  /**
+   * Plays it in the app, in the page's single player.
+   *
+   * SEPARATE FROM `onOpenShort` because they are two intentions with two
+   * dialogs — "let me watch it" against "let me file it" — exactly as the feed
+   * card splits them. Collapsing the two would mean every attempt to read a
+   * note started a video.
+   */
+  onPlayShort: () => void;
 }) {
   const unsave = useUnsaveShort();
   const clearOrphan = useRemoveOrphanedSave();
@@ -705,65 +755,40 @@ function SavedCard({
   const removing = unsave.isPending || clearOrphan.isPending;
 
   return (
-    <Card className="group flex min-w-0 flex-col overflow-hidden transition-colors duration-150 hover:border-border-strong">
-      {/* THE THUMBNAIL LEADS, and that is the argument for this card existing at
-          all. A saved Short is recognised by its frame long before its title —
-          you remember the face, the caption, the colour of the hook — so a grid
-          of frames is scannable in a way a grid of sentences is not. It takes
-          the full width and the actions ride on top of it instead of claiming a
-          column beside it.
+    <Card className={SHORT_CARD_SHELL}>
+      {/* =====================================================================
+          THE FRAME IS 9:16 NOW, AND IT PLAYS IN THE APP
+          =====================================================================
+          Two defects, both named in `short-card`'s own header as mistakes it
+          had already made and fixed, and both still standing here.
 
-          16:9 is what `youtubeThumbnailUrl` actually returns, so `object-cover`
-          never crops in practice: the frame is shown exactly as YouTube
-          generated it, and the ratio is declared so the card reserves its space
-          before the image loads rather than jumping when it arrives. */}
-      <div className="relative">
-        <a
-          href={youtubeShortsUrl(item.youtubeVideoId)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="block"
-          // The title below is the same link and is the accessible one. Two tab
-          // stops onto one destination is noise for anybody on a keyboard.
-          tabIndex={-1}
-          aria-hidden
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={youtubeThumbnailUrl(item.youtubeVideoId)}
-            alt=""
-            width={320}
-            height={180}
-            loading="lazy"
-            decoding="async"
-            referrerPolicy="no-referrer"
-            className="aspect-video w-full bg-surface-sunken object-cover"
-          />
-        </a>
+          THE ASPECT RATIO. This drew `mqdefault.jpg` at `aspect-video` and
+          argued that 16:9 is "what `youtubeThumbnailUrl` actually returns, so
+          `object-cover` never crops". True and beside the point: `mqdefault` is
+          320x180 whatever the video is, so for a Short it is the real frame
+          pillarboxed into a strip with stretched blur either side. Every tile
+          in a grid the owner asked to be VERTICAL was a wide box two thirds
+          filled with filler. `oardefault.jpg` is the same frame at 1080x1920
+          off the same id with no API call, and `posterSourceFor` handles the
+          404 when a sub-minute upload turns out not to be portrait.
 
-        {/* Says where the frame goes, since a bare image gives no clue that it
-            leaves the app. Decorative — the real affordance is the title link
-            and the whole thumbnail beneath it. */}
-        <span className="pointer-events-none absolute bottom-1.5 left-1.5 inline-flex items-center gap-1 rounded border border-border bg-surface/90 px-1.5 py-0.5 text-[10px] text-muted-foreground opacity-0 backdrop-blur-sm transition-opacity group-hover:opacity-100">
-          <ExternalLink className="size-2.5" />
-          YouTube
-        </span>
-
-        {/* The actions sit on a token-coloured plate rather than bare on the
-            image: a ghost icon over an arbitrary video frame is legible on some
-            Shorts and invisible on others, and it has to work in both themes.
-
-            The plate reveals on hover, EXCEPT when the Short carries notes —
+          THE DESTINATION. Every other Short in this app plays in a dialog; this
+          was the last grid where clicking one opened a tab. A director working
+          the save-and-revisit loop ended the session with thirty tabs and no
+          idea which they had judged. The way out to YouTube is not lost — it is
+          inside the player, where it is honest about being a link. */}
+      <ShortPoster videoId={item.youtubeVideoId} onPlay={onPlayShort}>
+        {/* The plate reveals on hover, EXCEPT when the Short carries notes —
             that is information about the row rather than an affordance, and it
             has always been visible without hovering. The remove button keeps
             its own hover gate inside, so a Short with notes shows the note
             marker at rest and the destructive control only on approach. */}
         <div
           className={cn(
-            "absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-border bg-surface/90 p-0.5 backdrop-blur-sm transition-opacity",
+            SHORT_CARD_ACTION_PLATE,
             noteCount > 0
               ? "opacity-100"
-              : "opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100",
+              : "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
           )}
         >
           <Tooltip>
@@ -823,25 +848,17 @@ function SavedCard({
             </Button>
           ) : null}
         </div>
-      </div>
+      </ShortPoster>
 
-      <div className="flex min-w-0 flex-1 flex-col p-3">
-        <a
-          href={youtubeShortsUrl(item.youtubeVideoId)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="min-w-0 text-[13px] font-medium leading-snug text-foreground transition-colors hover:text-accent"
-          title={item.title}
-        >
-          {/* Two lines, then trailing off. A title is the second thing read
-              here, after the frame, and clamping it is what keeps every card in
-              a row the same shape — the full text is one hover or one click
-              away. `break-words` is what stops a pasted title with no spaces in
-              it from widening the grid track. */}
-          <span className="line-clamp-2 break-words">{item.title}</span>
-        </a>
+      <div className={SHORT_CARD_BODY}>
+        {/* THE ACCESSIBLE PLAY CONTROL, and no longer a link out. The frame
+            above is hidden from assistive technology precisely so this one
+            carries the whole action with the Short's own name in it. Two lines,
+            then trailing off: clamping is what keeps every card in a row the
+            same shape, and the full text is one hover away. */}
+        <ShortCardTitle title={item.title} onPlay={onPlayShort} />
 
-        <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-subtle-foreground">
+        <div className={SHORT_CARD_META_ROW}>
           <Link
             href={`/channels/${item.channelId}`}
             className="inline-flex min-w-0 max-w-full items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
@@ -858,10 +875,14 @@ function SavedCard({
 
           <NicheChips niches={item.niches} limit={1} size="sm" />
 
+          {/* `revealOnHover` dropped, matching the feed card. It was there for
+              the dense table row this card replaced, where the control hid
+              among other people's columns; on a card it has room to simply be
+              there, and a classification control that appears only under a
+              pointer is one nobody uses on a touch screen. */}
           <ContentTypeControl
             videoId={item.videoId}
             resolution={resolution}
-            revealOnHover
             className="-ml-1"
           />
 

@@ -55,6 +55,55 @@ import { convertMinorBetween, minorUnitsFor, symbolFor } from "@/lib/finance/mon
  * Carrying a further factor of 1,000 makes the granularity $0.00001 per 1,000
  * views and keeps every step integral: `revenueMinor = views * rpm / 1000000`
  * is an exact division by a power of ten with no float anywhere.
+ *
+ * ---------------------------------------------------------------------------
+ * ENGAGED VIEWS, AND THE 2x TRAP THAT CUTS BOTH WAYS
+ * ---------------------------------------------------------------------------
+ * ENGAGED VIEWS, in plain terms: YouTube does not pay a Short for every view
+ * the public counter shows. It pays for the subset it calls ENGAGED — someone
+ * who actually watched rather than someone the feed scrolled past. That subset
+ * is smaller, and on this studio's experience it is somewhere near half.
+ *
+ * NOTHING ON THIS DEPLOYMENT CAN MEASURE IT. The Analytics data we can read
+ * gives money (`ChannelRevenueDay.estimatedRevenueMinor`) and raw public
+ * counters (`VideoSnapshot.viewCount`); engaged views appear in neither. So the
+ * share is an ASSUMPTION an admin sets, stored org-wide on
+ * `OrganizationSettings.engagedViewShareBasisPoints`, and it is named beside
+ * every figure it moves rather than applied silently.
+ *
+ * THE TWO RATES IN THIS FILE HAVE DIFFERENT BASES, and this is the single most
+ * dangerous fact in the module:
+ *
+ *   • A MANUAL range is quoted by a human per 1,000 ENGAGED views — that is
+ *     what the market quotes, and it is what the owner types. Multiplying it by
+ *     raw views DOUBLES the answer at a 50% share.
+ *   • A DERIVED rate is already money-per-RAW-view by construction. Its
+ *     numerator is what YouTube actually paid — the output of Google's own
+ *     engaged-view accounting, net of it — and its denominator is a raw
+ *     `VideoSnapshot` delta. Applying the share to it HALVES a MEASURED figure.
+ *
+ * Both errors are exactly 2x at 50%, in opposite directions, which is why the
+ * basis is a REQUIRED field on `RpmBounds` rather than a comment. Every
+ * construction site is a compile error until it states which kind of rate it
+ * is holding; a comment saying "remember to check" is the thing that fails.
+ *
+ * WHY THE DERIVED RATE IS NOT NORMALISED INTO ENGAGED UNITS INSTEAD. Dividing
+ * a measured rate by the share at the point it is computed would make the
+ * projected money invariant and let one basis survive — tempting, and wrong
+ * twice over. It would make the displayed RATE move whenever somebody edits an
+ * assumption, while that rate wears the "Measured" chip; and the derived
+ * numerator is CHANNEL-WIDE revenue including long-form and YouTube Premium,
+ * neither of which is paid against engaged views at all.
+ *
+ * THE SHARE IS APPLIED TO THE VIEWS, BEFORE THE RATE, never to the money after.
+ * They are algebraically identical, so the choice is decided by rounding and
+ * headroom, and both favour views-first: applying it to money would floor the
+ * low end, scale it, and floor again — rounding twice at two different scales,
+ * the exact pattern `convertRpmRangeToBase` already refuses — and `views × rpm`
+ * is already close enough to the exact-integer limit that a third factor is not
+ * free. Views-first also produces a number that can be printed: engaged views
+ * are a quantity the owner named, where a scaled sub-total is a figure nobody
+ * ever earned.
  */
 
 /** Views the STORED integer is quoted per. The scale of the two columns. */
@@ -104,6 +153,121 @@ export const RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND = 10;
 /** The largest storable rate for a currency, in minor units per 1,000,000 views. */
 export function maxRpmMinorPerMillion(currency: string): number {
   return MAX_RPM_MAJOR_PER_THOUSAND * 10 ** rpmDigitsFor(currency);
+}
+
+// ---------------------------------------------------------------------------
+// THE ENGAGED-VIEW SHARE
+// ---------------------------------------------------------------------------
+
+/**
+ * The scale the stored share is quoted on. Basis points — hundredths of one
+ * percent — so 100% is 10,000 and 50% is 5,000.
+ *
+ * NOT WHOLE PERCENT, which was the obvious choice and cannot express 47.5%.
+ * Not a float either: a binary fraction sitting directly upstream of every
+ * currency amount in the app is exactly the thing the money rule forbids. Basis
+ * points keep both downstream divisions exact powers of ten:
+ *
+ *     engagedViews = rawViews * shareBasisPoints / 10000
+ *     revenueMinor = engagedViews * rpmMinorPerMillion / 1000000
+ */
+export const ENGAGED_VIEW_SHARE_BASIS = 10_000;
+
+/**
+ * What the share is when nobody has changed it. 50.00%.
+ *
+ * The owner's own figure — "engaged views are usually around 50% of the total
+ * views you get" — which is why a default is honest here where it would not be
+ * for a threshold or an RPM. This is a number he supplied, not one the code
+ * invented to avoid rendering a blank. It is duplicated as the column default
+ * in `schema.prisma`; the two are the same fact and the migration comment says
+ * so.
+ */
+export const DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS = 5_000;
+
+/**
+ * Zero is refused, and this is the same rule as "an RPM of nothing is not an
+ * estimate".
+ *
+ * A share of zero asserts that no view is ever engaged, which collapses every
+ * priced niche to $0 — the fabricated zero this whole module exists to keep off
+ * a screen. One basis point is absurd but coherent; nothing is not.
+ */
+export const MIN_ENGAGED_VIEW_SHARE_BASIS_POINTS = 1;
+
+/**
+ * 100% is allowed, deliberately.
+ *
+ * It is the identity, it is a coherent statement about the world rather than a
+ * fabrication, and it is the value that reproduces the arithmetic this app had
+ * before engaged views existed — which makes it the honest way for somebody who
+ * disagrees with the whole idea to opt out. Above it is incoherent: engaged
+ * views are a subset of views, so a share over 100% claims a Short was paid for
+ * views nobody made.
+ */
+export const MAX_ENGAGED_VIEW_SHARE_BASIS_POINTS = ENGAGED_VIEW_SHARE_BASIS;
+
+/**
+ * Where the settings form starts warning rather than refusing.
+ *
+ * Following `RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND`: a hint, not a rule. A share
+ * outside roughly 20–80% is far more likely to be a scale mistake — somebody
+ * typing 5 for "50%" — than a considered belief about how YouTube pays.
+ */
+export const ENGAGED_VIEW_SHARE_IMPLAUSIBLE_BELOW_BASIS_POINTS = 2_000;
+export const ENGAGED_VIEW_SHARE_IMPLAUSIBLE_ABOVE_BASIS_POINTS = 8_000;
+
+/**
+ * A stored share, made safe to multiply by.
+ *
+ * DEFENSIVE RATHER THAN VALIDATING. The real bound is the Zod schema at the
+ * settings boundary; this is what stands between a hand-edited row, a restored
+ * backup or an older release's NULL and a money figure. Out-of-range falls back
+ * to the default rather than clamping to the nearest bound, because a stored 0
+ * is far more likely to be "this column was never really set" than "somebody
+ * meant nothing at all", and clamping a 0 to 1 basis point would price a whole
+ * niche at a ten-thousandth of its value while looking configured.
+ */
+export function normalizeEngagedViewShare(basisPoints: number | null | undefined): number {
+  if (typeof basisPoints !== "number" || !Number.isInteger(basisPoints)) {
+    return DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS;
+  }
+  if (
+    basisPoints < MIN_ENGAGED_VIEW_SHARE_BASIS_POINTS ||
+    basisPoints > MAX_ENGAGED_VIEW_SHARE_BASIS_POINTS
+  ) {
+    return DEFAULT_ENGAGED_VIEW_SHARE_BASIS_POINTS;
+  }
+  return basisPoints;
+}
+
+/**
+ * Raw views -> the views a Short is actually paid for.
+ *
+ * ONE ROUNDING, TO NEAREST, on a quantity of views rather than on money. The
+ * error it can introduce is at most half a view, which at a $0.045 rate is
+ * 0.00225 minor units — under a hundredth of a cent — and the outward rounding
+ * that keeps a range a range then happens exactly once, afterwards, on the
+ * final figure.
+ *
+ * The result is never larger than the input, so this can only ever IMPROVE the
+ * headroom of the `views × rate` product below.
+ */
+export function engagedViews(rawViews: number, shareBasisPoints: number): number {
+  const safeViews = Number.isFinite(rawViews) && rawViews > 0 ? Math.floor(rawViews) : 0;
+  const share = normalizeEngagedViewShare(shareBasisPoints);
+  return Math.round((safeViews * share) / ENGAGED_VIEW_SHARE_BASIS);
+}
+
+/** The share as a person reads it: "50%", "47.5%". */
+export function formatEngagedViewShare(basisPoints: number): string {
+  const share = normalizeEngagedViewShare(basisPoints);
+  // Display-only float: divided once at the last moment, formatted, never
+  // stored and never summed — the same rule the money formatter follows.
+  return `${(share / 100).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2,
+  })}%`;
 }
 
 /**
@@ -565,6 +729,27 @@ export type NicheRpmResolution =
       readonly source: "derived";
       readonly rpmMinorPerMillion: number;
       readonly currency: string;
+      /**
+       * The organization's engaged-view assumption, carried with the rate.
+       *
+       * ON THE RESOLUTION RATHER THAN IN ITS OWN PAYLOAD, and that is the whole
+       * delivery decision. The money is projected in the BROWSER, but
+       * `OrganizationSettings` is read behind `settings.manage` and its DTO
+       * lists its fields one by one — so the share would never reach a
+       * `finance.view` reader through any existing payload, and widening the
+       * organization read to fix that would hand an employee the sync cadence
+       * to deliver an assumption. This object is already `finance.view`-gated,
+       * so nothing new is disclosed, and the rate, its currency, its basis and
+       * the share that scales it travel as ONE object — no client can price
+       * views with a stale or missing share.
+       *
+       * Present on the derived branch too, even though a derived rate does not
+       * use it: the value is a property of the organization rather than of the
+       * rate, a surface may need to NAME it while showing a measured figure,
+       * and a field that appears on only some branches is one every caller has
+       * to narrow for before reading.
+       */
+      readonly engagedViewShareBasisPoints: number;
       readonly evidence: DerivedRpmEvidence;
       /**
        * A hand-entered range that this measurement is overriding.
@@ -580,6 +765,8 @@ export type NicheRpmResolution =
     }
   | {
       readonly source: "manual";
+      /** The organization's engaged-view assumption. See the derived branch. */
+      readonly engagedViewShareBasisPoints: number;
       /**
        * The range IN FORCE, in the organization's base currency.
        *
@@ -603,6 +790,8 @@ export type NicheRpmResolution =
     }
   | {
       readonly source: "none";
+      /** The organization's engaged-view assumption. See the derived branch. */
+      readonly engagedViewShareBasisPoints: number;
       readonly reason: NoRpmReason;
       readonly rejectedChannels: readonly RpmChannelOutcome[];
       /**
@@ -631,6 +820,16 @@ export interface NicheRpmInput {
    * either being silently reinterpreted.
    */
   readonly baseCurrency: string;
+  /**
+   * What share of raw views YouTube pays a Short against, in basis points.
+   *
+   * REQUIRED, not defaulted here. The value has a home — `OrganizationSettings`
+   * — and a caller that has not read it should say so at the type level rather
+   * than silently receive 50% and produce a money figure nobody configured.
+   * `normalizeEngagedViewShare` is what makes a hostile stored value safe; this
+   * is what makes a forgetful caller impossible.
+   */
+  readonly engagedViewShareBasisPoints: number;
   /**
    * The organization's configured rates INTO the base, keyed by source
    * currency. Absent or empty means none is configured.
@@ -720,6 +919,12 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
     (outcome): outcome is Extract<RpmChannelOutcome, { accepted: true }> => outcome.accepted,
   );
   const rejected = input.channels.filter((outcome) => !outcome.accepted);
+  // Normalised ONCE, here, so every branch below carries a share that is
+  // already safe to multiply by and no consumer has to remember to sanitise a
+  // number that arrived from a database column.
+  const engagedViewShareBasisPoints = normalizeEngagedViewShare(
+    input.engagedViewShareBasisPoints,
+  );
   const enteredRange = resolveManualRpmRange(input.manual);
   const range =
     enteredRange === null
@@ -745,6 +950,7 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
         source: "derived",
         rpmMinorPerMillion,
         currency: input.baseCurrency,
+        engagedViewShareBasisPoints,
         evidence: {
           window: input.window,
           channels: accepted.map((c) => ({ id: c.channelId, name: c.channelName })),
@@ -762,7 +968,13 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
 
   if (enteredRange !== null) {
     if (range !== null) {
-      return { source: "manual", range, enteredRange, rejectedChannels: rejected };
+      return {
+        source: "manual",
+        engagedViewShareBasisPoints,
+        range,
+        enteredRange,
+        rejectedChannels: rejected,
+      };
     }
     /*
      * A range that exists and cannot be used says so, rather than reading as
@@ -773,6 +985,7 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
      */
     return {
       source: "none",
+      engagedViewShareBasisPoints,
       reason: "manual_range_unconvertible",
       rejectedChannels: rejected,
       unconvertibleRange: enteredRange,
@@ -781,6 +994,7 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
 
   return {
     source: "none",
+    engagedViewShareBasisPoints,
     reason: input.channels.length === 0 ? "no_own_channel" : "own_channels_unusable",
     rejectedChannels: rejected,
     unconvertibleRange: null,
@@ -792,6 +1006,31 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
 // ---------------------------------------------------------------------------
 
 /**
+ * WHICH VIEWS A RATE IS QUOTED AGAINST.
+ *
+ * The single most important field in this half of the file, and the reason it
+ * exists at all. See the engaged-views section of the file header: a manual
+ * range is quoted per 1,000 ENGAGED views and a derived rate is already
+ * money-per-RAW-view, so the same multiplication applied to both is wrong by a
+ * factor of two in one direction or the other.
+ */
+export type RpmBasis =
+  /**
+   * The rate already accounts for engagement. Multiply it by RAW views.
+   *
+   * A derived rate: YouTube's settled money over a raw `VideoSnapshot` delta.
+   * Scaling this by the engaged-view share would halve a measurement.
+   */
+  | "raw"
+  /**
+   * The rate is quoted per 1,000 engaged views. Multiply it by ENGAGED views.
+   *
+   * A hand-entered range, which is how the market quotes a Shorts RPM and how
+   * the owner types one. Not scaling this would double the answer.
+   */
+  | "engaged";
+
+/**
  * The rate as an interval, whatever produced it.
  *
  * A derived point becomes the degenerate range `low === high` so that every
@@ -799,11 +1038,18 @@ export function resolveNicheRpm(input: NicheRpmInput): NicheRpmResolution {
  * it — a point renders as a single figure and never as "$0.045 – $0.045" — but
  * the arithmetic does not branch, which is what stops a derived figure and an
  * entered one being projected by two subtly different routines.
+ *
+ * `basis` IS THE ONE THING THAT MAY BRANCH, and it is required rather than
+ * optional for exactly that reason. The unification above quietly assumed the
+ * two rates shared a basis; they do not, and the compiler is now what says so.
+ * Every construction site — here, the tests, anything added later — fails to
+ * build until it states which kind of rate it is holding.
  */
 export interface RpmBounds {
   readonly lowMinorPerMillion: number;
   readonly highMinorPerMillion: number;
   readonly currency: string;
+  readonly basis: RpmBasis;
 }
 
 export function rpmBounds(resolution: NicheRpmResolution): RpmBounds | null {
@@ -812,6 +1058,10 @@ export function rpmBounds(resolution: NicheRpmResolution): RpmBounds | null {
       lowMinorPerMillion: resolution.rpmMinorPerMillion,
       highMinorPerMillion: resolution.rpmMinorPerMillion,
       currency: resolution.currency,
+      // ALREADY per raw view. Its numerator is money YouTube actually paid,
+      // which is net of Google's own engaged-view accounting, and its
+      // denominator is the raw public counter's delta.
+      basis: "raw",
     };
   }
   if (resolution.source === "manual") {
@@ -819,6 +1069,9 @@ export function rpmBounds(resolution: NicheRpmResolution): RpmBounds | null {
       lowMinorPerMillion: resolution.range.lowMinorPerMillion,
       highMinorPerMillion: resolution.range.highMinorPerMillion,
       currency: resolution.range.currency,
+      // Typed by a person, per 1,000 engaged views — the unit the market quotes
+      // a Shorts RPM in, and the unit the dialog's label now names.
+      basis: "engaged",
     };
   }
   return null;
@@ -860,8 +1113,9 @@ export interface ProjectedMoney {
  * (a hundred million views at a $1 rate is 10^11, and the exact-integer limit is
  * above 9 × 10^15).
  */
-export function projectRevenue(views: number, bounds: RpmBounds): ProjectedMoney {
-  const safeViews = Number.isFinite(views) && views > 0 ? Math.floor(views) : 0;
+function priceViews(payableViews: number, bounds: RpmBounds): ProjectedMoney {
+  const safeViews =
+    Number.isFinite(payableViews) && payableViews > 0 ? Math.floor(payableViews) : 0;
 
   if (isRpmPoint(bounds)) {
     const exact = Math.round((safeViews * bounds.lowMinorPerMillion) / RPM_VIEW_BASIS);
@@ -873,6 +1127,46 @@ export function projectRevenue(views: number, bounds: RpmBounds): ProjectedMoney
     highMinor: Math.ceil((safeViews * bounds.highMinorPerMillion) / RPM_VIEW_BASIS),
     currency: bounds.currency,
   };
+}
+
+/**
+ * THE ONE BRANCH ON BASIS, in the one place, so nothing else has to think about
+ * it.
+ *
+ * Raw views in, the views this particular rate may be multiplied by out. A
+ * `raw`-basis rate is handed the count unchanged because it already prices raw
+ * views; an `engaged`-basis rate is handed the engaged subset because that is
+ * what it was quoted against. Getting this backwards is a clean factor of two
+ * in either direction, which is why it is a single expression with a name
+ * rather than a condition repeated at three call sites.
+ */
+export function viewsToPrice(
+  rawViews: number,
+  bounds: RpmBounds,
+  engagedViewShareBasisPoints: number,
+): number {
+  if (bounds.basis === "raw") {
+    return Number.isFinite(rawViews) && rawViews > 0 ? Math.floor(rawViews) : 0;
+  }
+  return engagedViews(rawViews, engagedViewShareBasisPoints);
+}
+
+/**
+ * Raw views, priced.
+ *
+ * `engagedViewShareBasisPoints` IS REQUIRED, and that is the enforcement. This
+ * function used to take two arguments and every call site was correct by
+ * accident; making the share mandatory means a caller that has not thought
+ * about engagement cannot compile. It is IGNORED for a `raw`-basis rate — see
+ * `viewsToPrice` — so passing it is never a licence to scale, only a statement
+ * that the caller knows the question exists.
+ */
+export function projectRevenue(
+  views: number,
+  bounds: RpmBounds,
+  engagedViewShareBasisPoints: number,
+): ProjectedMoney {
+  return priceViews(viewsToPrice(views, bounds, engagedViewShareBasisPoints), bounds);
 }
 
 /**
@@ -888,7 +1182,7 @@ export function projectRevenue(views: number, bounds: RpmBounds): ProjectedMoney
  * to survive into every label, tooltip and export.
  */
 export const TRACKED_NICHE_VALUE_DEFINITION =
-  "Tracked niche revenue prices the Shorts views of the channels currently tracked for this niche at its RPM. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Note which views are priced: the lifetime views to date of the Shorts PUBLISHED in the selected period, exactly as the hit rate counts them. The period chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month.";
+  "Tracked niche revenue prices the Shorts views of the channels currently tracked for this niche at its RPM — revenue per 1,000 views. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Note which views are priced: the lifetime views to date of the Shorts PUBLISHED in the selected period, exactly as the hit rate counts them. The period chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. A hand-entered rate is applied to ENGAGED views only — the paid subset of the view count, set under Settings — while a rate measured from Northstar's own channel already accounts for engagement and is applied to the full count.";
 
 export interface NicheValue {
   readonly ourViews: number;
@@ -919,29 +1213,101 @@ export interface NicheValue {
    * after the subtraction rather than before it.
    */
   readonly gapRevenue: ProjectedMoney | null;
+  /**
+   * The views the money above was actually multiplied by, or `null` when no
+   * rate applies.
+   *
+   * Carried so a card can SAY what it priced. On an engaged-basis rate this is
+   * roughly half `trackedNicheViews`, and a screen that shows "45M tracked
+   * views" beside a figure derived from 22.5M of them owes the reader that
+   * sentence — an assumption a reader can dispute is worth more than a figure
+   * they can only believe.
+   */
+  readonly pricedViews: number | null;
+  /** Which views were priced. `null` when no rate applies. See `RpmBasis`. */
+  readonly basis: RpmBasis | null;
+  /** The share in force, echoed so a label can name it without a second read. */
+  readonly engagedViewShareBasisPoints: number;
 }
 
 export function calculateNicheValue(params: {
   readonly ourViews: number;
   readonly competitorViews: number;
   readonly bounds: RpmBounds | null;
+  /**
+   * Required, for the same reason it is required on `projectRevenue`. Ignored
+   * where the bounds are `raw`-basis.
+   */
+  readonly engagedViewShareBasisPoints: number;
 }): NicheValue {
   const ourViews = Math.max(0, Math.floor(params.ourViews));
   const competitorViews = Math.max(0, Math.floor(params.competitorViews));
   const trackedNicheViews = ourViews + competitorViews;
   const { bounds } = params;
+  const share = normalizeEngagedViewShare(params.engagedViewShareBasisPoints);
+
+  /*
+   * THE VIEW FIGURES ABOVE STAY RAW, ALWAYS.
+   *
+   * `ourViews`, `competitorViews` and `trackedNicheViews` are what the channels
+   * in this niche actually did, and the strip prints them as reach. Scaling
+   * them by the engaged share would understate the niche by half on a line that
+   * has nothing to do with money — engagement is a fact about how YouTube PAYS,
+   * not about how many people watched.
+   *
+   * `capturePercent` stays on raw views for a different reason: the share
+   * cancels exactly in ours ÷ total, so applying it buys no information and
+   * costs two roundings.
+   */
+  const capturePercent =
+    trackedNicheViews === 0 ? null : roundTo((ourViews / trackedNicheViews) * 100, 1);
+
+  if (bounds === null) {
+    return {
+      ourViews,
+      competitorViews,
+      trackedNicheViews,
+      capturePercent,
+      trackedRevenue: null,
+      ourRevenue: null,
+      gapRevenue: null,
+      pricedViews: null,
+      basis: null,
+      engagedViewShareBasisPoints: share,
+    };
+  }
+
+  /*
+   * THE TWO HALVES ARE CONVERTED SEPARATELY AND THEN ADDED, rather than the
+   * total being converted once.
+   *
+   * `engaged(a) + engaged(b)` can differ from `engaged(a + b)` by one view,
+   * because each is rounded to nearest. One view is nothing; a card on which
+   * "ours" plus "the gap" does not equal "the tracked niche" is not nothing —
+   * it is the kind of arithmetic that makes a reader stop trusting the whole
+   * strip. Summing the parts is what keeps the three figures reconcilable by
+   * eye, and it is the same reasoning that puts the rate AFTER the subtraction
+   * in `gapRevenue` rather than before it.
+   */
+  const ourPayable = viewsToPrice(ourViews, bounds, share);
+  const competitorPayable = viewsToPrice(competitorViews, bounds, share);
+  const trackedPayable = ourPayable + competitorPayable;
 
   return {
     ourViews,
     competitorViews,
     trackedNicheViews,
-    // `null` rather than 0 when nothing was published, matching
-    // `calculateMarketShare`: a share of nothing is undefined, not zero.
-    capturePercent:
-      trackedNicheViews === 0 ? null : roundTo((ourViews / trackedNicheViews) * 100, 1),
-    trackedRevenue: bounds === null ? null : projectRevenue(trackedNicheViews, bounds),
-    ourRevenue: bounds === null ? null : projectRevenue(ourViews, bounds),
-    gapRevenue: bounds === null ? null : projectRevenue(competitorViews, bounds),
+    capturePercent,
+    trackedRevenue: priceViews(trackedPayable, bounds),
+    ourRevenue: priceViews(ourPayable, bounds),
+    // Priced from the view DIFFERENCE and priced once, never as one projected
+    // total minus another: interval subtraction would widen the answer to
+    // [lowTotal − highOurs, highTotal − lowOurs] and can go negative even
+    // though both halves used the identical rate.
+    gapRevenue: priceViews(competitorPayable, bounds),
+    pricedViews: trackedPayable,
+    basis: bounds.basis,
+    engagedViewShareBasisPoints: share,
   };
 }
 
@@ -1061,6 +1427,37 @@ export function formatRpm(minorPerMillion: number, currency: string): string {
  */
 export const UNPRICED_NICHE_SHORT = "Not estimated";
 
+/**
+ * WHAT "ENGAGED VIEWS" MEANS, for somebody who has never met the phrase.
+ *
+ * First-use gloss, kept here with the other wording so no surface invents its
+ * own. Deliberately says what it is, why it is assumed rather than measured,
+ * and where to change it — those are the three questions a studio owner
+ * actually has when a number he recognises suddenly halves.
+ */
+export const ENGAGED_VIEWS_GLOSS =
+  "YouTube does not pay a Short for every view its public counter shows. It pays for ENGAGED views — the people who actually watched, rather than the ones the feed scrolled past — which is a smaller number, usually somewhere near half. YouTube does not report that number to this app, so it is an assumption an admin sets under Settings rather than something Northstar can measure. Every hand-entered RPM below is multiplied by that share of the views, because a rate quoted per 1,000 engaged views applied to raw views would overstate the money by roughly double.";
+
+/**
+ * The unit a rate is spoken in, which is NOT the same sentence for both rates.
+ *
+ * Two figures labelled identically that mean different things is the same
+ * failure as an unlabelled currency, and it is exactly what would happen here:
+ * a measured $0.045 and an entered $0.045 are quoted against different
+ * denominators and buy different amounts of money. So the label reads the basis
+ * rather than being a constant string.
+ */
+export function rpmQuoteUnit(basis: RpmBasis): string {
+  return basis === "engaged" ? "per 1,000 engaged views" : "per 1,000 views";
+}
+
+/** The unit spelled out for a screen reader or a tooltip, with the caveat. */
+export function rpmQuoteUnitLong(basis: RpmBasis): string {
+  return basis === "engaged"
+    ? "per 1,000 engaged views — the paid subset, not the public view count"
+    : "per 1,000 views, measured against the public view count";
+}
+
 /** Why a niche has no money figure, in words a studio owner can act on. */
 export const UNPRICED_NICHE_EXPLANATION =
   "Nobody has said what 1,000 views in this niche are worth, and Northstar has no monetized channel here whose own revenue could stand in. Until one of those exists there is no honest way to put a number on the niche — an empty figure here is a missing decision, not a niche worth nothing.";
@@ -1089,11 +1486,24 @@ export const TRACKED_NICHE_VALUE_LABEL = "Tracked niche revenue";
 
 /** How a derived rate is introduced, so nobody reads it as a guess. */
 export const DERIVED_RPM_EXPLANATION =
-  "Measured from what Northstar's own channels in this niche actually earned, over the last 28 settled days, divided by the views they gained in the same window. It overrides any range entered by hand.";
+  "Measured from what Northstar's own channels in this niche actually earned, over the last 28 settled days, divided by the views they gained in the same window. Because the money in that sum is what YouTube actually paid, this rate already accounts for engaged views and is applied to the full view count. It overrides any range entered by hand.";
 
 /** How an entered range is introduced, so nobody reads it as a measurement. */
 export const MANUAL_RPM_EXPLANATION =
   "An estimate somebody entered by hand, because no channel Northstar operates in this niche can supply a measured rate yet. Every money figure below is that estimate multiplied out, not a measurement.";
+
+/**
+ * Why an entered rate is not simply multiplied by the view count on the card.
+ *
+ * Named beside the money rather than hidden in a tooltip, because the figure it
+ * describes is half what a reader who has not met engaged views is expecting. A
+ * stated assumption can be argued with; a silently halved number reads as a
+ * bug. Takes the share as text so the sentence carries the actual value in
+ * force rather than a hard-coded 50%.
+ */
+export function engagedViewShareNote(shareText: string): string {
+  return `Priced against engaged views only — the paid subset of the view count, assumed to be ${shareText} of it under Settings.`;
+}
 
 /**
  * The lead-in to the per-channel reasons, wherever they are shown.

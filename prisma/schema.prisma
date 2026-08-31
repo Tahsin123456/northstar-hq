@@ -250,6 +250,78 @@ model OrganizationSettings {
   shortsProbeEnabled      Boolean @default(true)
   autoRefreshEnabled      Boolean @default(false)
 
+  /// What share of raw views YouTube actually pays a Short against, in BASIS
+  /// POINTS (hundredths of one percent). 5000 = 50.00%.
+  ///
+  /// WHY THIS EXISTS AT ALL. YouTube does not pay Shorts on the view count the
+  /// public sees. It pays on ENGAGED views, a strictly smaller number that no
+  /// API on this deployment reports: the Analytics data we can read gives money
+  /// (`ChannelRevenueDay.estimatedRevenueMinor`) and raw public counters
+  /// (`VideoSnapshot.viewCount`), and engaged views appear in neither. So the
+  /// ratio cannot be measured here — it can only be assumed, and the owner's
+  /// working assumption is "usually around 50%". Without this column, a rate
+  /// quoted per 1,000 engaged views and then multiplied by raw views overstates
+  /// earnings by roughly 2x. That is not a rounding error in a money figure
+  /// somebody plans against; it is the difference between a niche paying for
+  /// itself and not.
+  ///
+  /// UNITS, because getting the scale wrong here is silent and costs a factor
+  /// of 100. Basis points, not percent and not a fraction. 50% is 5000, 47.5%
+  /// is 4750, 100% is 10000. Whole percent was the obvious choice and is wrong:
+  /// it cannot express 47.5%, and the granularity somebody wants from an
+  /// assumption they are deliberately tuning is finer than the integer. Basis
+  /// points also keep every downstream step integral and float-free, which the
+  /// money rule in this schema requires:
+  ///   engagedViews  = rawViews * shareBasisPoints / 10000
+  ///   revenueMinor  = engagedViews * rpmMinorPerMillion / 1000000
+  /// Both are exact divisions by a power of ten. A float share would have put a
+  /// binary fraction directly upstream of every currency amount in the app.
+  ///
+  /// SCOPE: organization-wide, not per niche. This is a rule of thumb about how
+  /// YouTube pays, not a property of the GTA niche versus the finance niche,
+  /// and nothing in this system can ever measure it per niche. A per-niche
+  /// column could only be filled with guesses while implying a precision no
+  /// data source supports, and would land as twenty empty boxes on day one. It
+  /// sits beside `defaultThreshold` and `defaultPeriodDays` because it is the
+  /// same class of value: one shared analysis assumption the team argues about
+  /// once. A per-niche override remains available later as a strictly additive
+  /// nullable column on `Niche` where null means "inherit this".
+  ///
+  /// NOT NULL, DEFAULT 5000 — and this is the one place in this file where a
+  /// default is the honest choice rather than the lazy one. Everywhere else
+  /// (`hitThreshold`, `hitPaymentMinor`, the RPM range) null means "nobody has
+  /// told us", and defaulting would launder a guess into a claim. Here the
+  /// owner supplied the number himself, so 50% is a CONFIGURED value on his
+  /// authority, not one the code invented. A nullable share would additionally
+  /// make every manual money figure unrenderable on deploy until somebody
+  /// visited Settings — switching off a working feature to honour a convention
+  /// that does not apply. The honesty obligation is discharged in the UI
+  /// instead, by naming the assumption next to the money ("at 50% engaged
+  /// views"): a reader can dispute a stated assumption, but not a blank.
+  ///
+  /// RANGE: 1..10000, enforced in Zod at the boundary rather than by a CHECK,
+  /// per this file's portability contract. Zero is REFUSED — it asserts that no
+  /// view is ever engaged, which collapses every priced niche to $0, and a
+  /// fabricated zero is precisely what the RPM module exists to keep off a
+  /// screen. 10000 (100%) is ALLOWED: it is the identity, it is a coherent
+  /// statement about the world rather than a fabrication, and it is the value
+  /// that reproduces the pre-engaged-views arithmetic exactly, which makes it
+  /// the honest way to opt out. Above 10000 is incoherent — engaged views are a
+  /// subset of views. The consequence, worth stating plainly: 100% and "never
+  /// configured" are indistinguishable in this column. That is acceptable here
+  /// only because both produce identical, correct arithmetic, unlike the RPM
+  /// case where unset and zero produce opposite sentences.
+  ///
+  /// APPLIES TO THE MANUAL RATE ONLY. `Niche.rpmLowMinorPerMillion` is entered
+  /// per 1,000 ENGAGED views, so it needs this share. A rate DERIVED from an
+  /// own channel's reported revenue is already money-over-RAW-views by
+  /// construction — its numerator is what YouTube actually paid, net of its own
+  /// engaged-view accounting, and its denominator is raw `VideoSnapshot`
+  /// deltas. Applying this share to a derived rate would HALVE a measured
+  /// figure. The two rates carry different bases and the resolver must say
+  /// which; this column is not a licence to scale every rate it meets.
+  engagedViewShareBasisPoints Int @default(5000)
+
   /// ISO 4217 code that consolidated financial totals are reported in.
   /// Individual entries always keep their own currency; see FinanceEntry.
   baseCurrency String @default("USD")

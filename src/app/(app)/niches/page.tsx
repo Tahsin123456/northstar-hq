@@ -53,6 +53,7 @@ import {
 } from "@/components/niches/niche-threshold-status";
 import {
   NicheRpmDialog,
+  RPM_MENU_ITEM_LABEL,
   useCanConfigureRpm,
 } from "@/components/niches/niche-rpm-dialog";
 import { NicheValueStrip } from "@/components/niches/niche-value-strip";
@@ -410,11 +411,26 @@ function NicheCard({
           <div className="relative z-10">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
+                {/*
+                  ALWAYS VISIBLE, at the owner's request, and the fix is the
+                  deletion rather than an addition.
+
+                  This carried `opacity-0` plus three rules that each existed
+                  only to undo it on hover, on focus and while the menu was
+                  open. Remove the `opacity-0` and all three become dead, so
+                  the whole group goes and the Button's own variant styling is
+                  what shows. There is nothing left to reveal, which is why no
+                  focus or open handling has to be re-added.
+
+                  This menu is now also the ONLY way into the RPM dialog — the
+                  inline "Set RPM range" links were removed from the money strip
+                  — so a control that only appeared under a pointer would have
+                  made pricing a niche unreachable on a touch screen.
+                */}
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   aria-label={`Actions for ${niche.name}`}
-                  className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
                 >
                   <MoreHorizontal />
                 </Button>
@@ -434,10 +450,15 @@ function NicheCard({
                     pair of permissions. The hit rule says what counts as a win
                     here; the RPM says what the market pays for views, which is
                     a fact about the outside world. */}
+                {/* THE ONLY ENTRY POINT NOW. The money strip below used to
+                    carry its own inline "Set RPM range" links; they are gone,
+                    so this item is what the strip's sentence points at. Its
+                    label is imported rather than typed, so the two cannot
+                    drift. */}
                 {canConfigureRpm ? (
                   <DropdownMenuItem onSelect={() => setRpmOpen(true)}>
                     <DollarSign />
-                    RPM range
+                    {RPM_MENU_ITEM_LABEL}
                   </DropdownMenuItem>
                 ) : null}
                 {/* There was a "Niche settings" item here, and a second link to

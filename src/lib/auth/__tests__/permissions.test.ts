@@ -60,6 +60,78 @@ describe("role catalogue", () => {
   });
 });
 
+/**
+ * =========================================================================
+ * "$ AMOUNTS SHOULD ONLY BE VISIBLE TO ADMINS"
+ * =========================================================================
+ *
+ * The owner's sixth request, stated as an invariant over the ROLE TABLE rather
+ * than over a list of roles somebody remembered to write down.
+ *
+ * WHY THIS EXISTS ALONGSIDE THE `analystRoles` CASES BELOW. Those enumerate the
+ * five non-admin roles by hand, which is exactly right for asserting what each
+ * one may not do — and useless as a guarantee about the NEXT role. A role added
+ * to `ROLES` tomorrow with `finance.view` in its permission list would pass
+ * every one of them, because it is not in the array. This derives its subjects
+ * from `ROLES` itself, so a new role is in scope the moment it exists.
+ *
+ * THE QUALIFICATION THE OWNER SHOULD HEAR, and it is why this test is worded
+ * about ROLES rather than about people. `finance.view` is deliberately
+ * grantable — the permission table's own header names that as the point, "what
+ * lets a Channel Director be given Finance access" — so an admin can hand niche
+ * money to a Head of Shorts with one checkbox, and `effectivePermissions` is
+ * role UNION grants. "Only Admins see money" is therefore true of the roles as
+ * shipped and is NOT enforced against a deliberate, audited grant. That is the
+ * existing design of this app and is left alone; what is pinned here is that no
+ * DEFAULT carries it, which is the half that could regress silently.
+ */
+describe("money is an Admin capability by default", () => {
+  /** Every permission that puts a currency amount, or a rate, on a screen. */
+  const MONEY_PERMISSIONS = [
+    "finance.view",
+    "finance.manage",
+    "payroll.view",
+    "payroll.manage",
+  ] as const;
+
+  it("gives no shipped role but Admin any way to see money", () => {
+    for (const role of ROLES) {
+      if (role === "admin") continue;
+      const held = new Set(roleDefinition(role).permissions);
+      for (const permission of MONEY_PERMISSIONS) {
+        expect(
+          held.has(permission),
+          `${role} must not hold ${permission} by default`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  /**
+   * The niche RPM read is gated on `finance.view` and the WRITE additionally on
+   * `settings.manage` — so a role holding `settings.manage` without
+   * `finance.view` would be a writer who cannot read what is there, which is
+   * how the hit payment was once destroyed by a form seeded from a withheld
+   * null. No shipped role is in that position, and this says so.
+   */
+  it("gives no shipped role but Admin the settings key that prices a niche", () => {
+    for (const role of ROLES) {
+      if (role === "admin") continue;
+      expect(
+        new Set(roleDefinition(role).permissions).has("settings.manage"),
+        `${role} must not hold settings.manage by default`,
+      ).toBe(false);
+    }
+  });
+
+  /** Admin holds both halves, or nothing above could be configured at all. */
+  it("gives Admin both halves of the RPM decision", () => {
+    const admin = new Set(roleDefinition("admin").permissions);
+    expect(admin.has("finance.view")).toBe(true);
+    expect(admin.has("settings.manage")).toBe(true);
+  });
+});
+
 describe("what each role may NOT do", () => {
   const analystRoles = [
     "head_of_shorts",
