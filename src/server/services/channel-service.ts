@@ -499,7 +499,8 @@ export async function refreshStaleChannels(
   for (const row of tracked) {
     const result = await syncChannel(row.channelId, {
       ...syncOptions,
-      hitWindowHours: windows.get(row.channelId) ?? null,
+      hitWindowHours: windows.get(row.channelId)?.shortsWindowHours ?? null,
+      longformWindowHours: windows.get(row.channelId)?.longformWindowHours ?? null,
       // Per channel and immediately before the request, for the same reasons as
       // the scheduled sweep: the source is a per-channel fact, and a token
       // resolved at the top of a long loop can expire before the end of it.

@@ -37,7 +37,11 @@ import type {
   YouTubeCredential,
   YouTubeVideo,
 } from "./youtube";
-import { snapshotBucket, snapshotIntervalMinutes } from "@/lib/sync/snapshot-cadence";
+import {
+  hitWindowForVideo,
+  snapshotBucket,
+  snapshotIntervalMinutes,
+} from "@/lib/sync/snapshot-cadence";
 
 /**
  * =========================================================================
@@ -100,6 +104,16 @@ export interface SyncOptions {
    * a channel would depend on which path last touched it.
    */
   readonly hitWindowHours?: number | null;
+  /**
+   * The window judging this channel's LONG-FORM videos, or null when it has no
+   * longform-format niche with a complete rule — which is every channel until
+   * an organization creates one, so omitting it (as every pre-format caller
+   * does) is exactly today's behaviour: long-form stays on the flat interval.
+   * Only `classification: "not_short"` videos ever read it; an uncertain video
+   * is paced by neither window. Same contract as `hitWindowHours` above:
+   * resolved by the caller, identical from both sync paths.
+   */
+  readonly longformWindowHours?: number | null;
   readonly trigger?: "manual" | "auto" | "initial";
   /** Re-run classification even for already-confident videos. */
   readonly forceReclassify?: boolean;
@@ -368,7 +382,10 @@ export async function syncChannel(
     // inside its window is sampled densely and one past it is barely sampled at
     // all. See `@/lib/sync/snapshot-cadence` for what that costs in rows.
     const baseIntervalMinutes = options.snapshotIntervalMinutes ?? 360;
-    const hitWindowHours = options.hitWindowHours ?? null;
+    const channelWindows = {
+      shortsWindowHours: options.hitWindowHours ?? null,
+      longformWindowHours: options.longformWindowHours ?? null,
+    };
 
     const latestSnapshots = await prisma.video.findMany({
       where: { youtubeVideoId: { in: discoveredIds } },
@@ -422,10 +439,18 @@ export async function syncChannel(
     // Snapshots run after the upsert so brand-new videos already have a row.
     const persisted = await prisma.video.findMany({
       where: { youtubeVideoId: { in: discoveredIds } },
-      // `isShort` comes back because the cadence depends on it: only a Short is
-      // judged by a window, so only a Short gets the dense schedule. Long-form
-      // keeps the organization's flat interval exactly as before.
-      select: { id: true, youtubeVideoId: true, publishedAt: true, isShort: true },
+      // `isShort` AND `classification` come back because the cadence depends
+      // on both: a Short is paced by the shorts window, a positively-identified
+      // long-form video by the longform window (null until a longform niche
+      // exists, i.e. the flat interval — exactly as before), and an uncertain
+      // video by neither. See `hitWindowForVideo` in the cadence module.
+      select: {
+        id: true,
+        youtubeVideoId: true,
+        publishedAt: true,
+        isShort: true,
+        classification: true,
+      },
     });
     const rowIdByVideoId = new Map(persisted.map((v) => [v.youtubeVideoId, v]));
 
@@ -445,7 +470,7 @@ export async function syncChannel(
       const intervalMs =
         snapshotIntervalMinutes({
           ageHours,
-          windowHours: row.isShort ? hitWindowHours : null,
+          windowHours: hitWindowForVideo(row, channelWindows),
           baseIntervalMinutes,
         }) * MS_PER_MINUTE;
 

@@ -12,6 +12,11 @@ import {
   type NicheHitRule,
   type WindowObservation,
 } from "@/lib/analytics/hit-rate";
+import {
+  NICHE_FORMATS,
+  toNicheFormat,
+  type NicheFormat,
+} from "@/lib/niches/niche-format";
 
 /**
  * =========================================================================
@@ -54,6 +59,17 @@ import {
  * nothing here reads a cookie — the scheduler has no session and a single
  * session-dependent call would make this throw 401 in production while passing
  * every test that happened to run signed in.
+ *
+ * TWO PASSES PER CHANNEL SINCE FORMATS, ONE PER FORMAT. The shorts pass is the
+ * service as it always was: every `isShort: true` video on every tracked,
+ * active channel, judged by the governing rule among the channel's
+ * SHORTS-format niches — and with every niche in the organization format
+ * "shorts" (every organization, until somebody creates a longform niche) that
+ * candidate set is the full set and the pass is byte-identical to the
+ * pre-format service. The longform pass judges `classification: "not_short"`
+ * videos by the governing rule among the channel's LONGFORM-format niches, and
+ * runs ONLY for channels filed under at least one longform niche — see
+ * `TrackedChannelRules.hasLongformNiche` for why that guard is load-bearing.
  */
 
 /** Keeps SQLite transactions a sane size, as in `channel-sync`. */
@@ -63,6 +79,15 @@ export interface HitEvaluationSummary {
   readonly organizationId: string;
   /** Shorts on tracked, active channels that were looked at. */
   readonly shortsConsidered: number;
+  /**
+   * Long-form videos looked at by the longform pass.
+   *
+   * A NEW counter beside `shortsConsidered` rather than a rename of it, because
+   * the existing name is what the sync summaries and their readers already key
+   * on. Zero until an organization creates a longform-format niche — the pass
+   * that produces it does not run at all before then.
+   */
+  readonly longformConsidered: number;
   readonly created: number;
   readonly updated: number;
   /** Re-decided and identical. The number that should dominate a steady state. */
@@ -220,6 +245,15 @@ function verdictToFields(verdict: HitVerdict, nicheId: string): EvaluationFields
  * channel is filed under. Where both are looking at the same set they land on
  * the same niche, which is why a payslip can quote the evaluation's threshold
  * and have it match what the dashboard shows.
+ *
+ * SINCE FORMATS, "one rule per channel" became "one rule per channel PER
+ * FORMAT": the caller pre-filters `channelNicheIds` to a single format's
+ * niches before asking, so a Long Form GTA's 900-hour rule can never win the
+ * ranking over the Shorts GTA's week and judge a Short by the wrong clock.
+ * This function itself is unchanged — with every niche in the organization
+ * format "shorts", which is every organization until somebody creates a
+ * longform niche, the filtered candidate set IS the full set and the answer is
+ * byte-identical to what it always was.
  */
 export function resolveChannelRule(
   channelNicheIds: readonly string[],
@@ -235,7 +269,48 @@ export function resolveChannelRule(
 
 interface TrackedChannelRules {
   readonly channelId: string;
-  readonly governing: NicheHitRule | null;
+  /** The governing rule for each format's videos on this channel, or null. */
+  readonly governingByFormat: Readonly<Record<NicheFormat, NicheHitRule | null>>;
+  /**
+   * Whether this channel is filed under ANY longform-format niche — ruled,
+   * half-configured or blank.
+   *
+   * THE LOAD-BEARING GUARD for the whole deploy: the longform pass runs only
+   * where this is true. Long-form videos on a pure-Shorts channel therefore
+   * never gain an evaluation row and keep the `hit: null` the dataset payload
+   * documents for them (dataset-service builds the DTO from the absent row).
+   * Membership — not a complete rule — is the test, mirroring the shorts side:
+   * a channel filed under a half-written shorts niche already gets unscoreable
+   * rows for its Shorts, so a channel deliberately filed under a longform niche
+   * gets the same honest "unknown, no rule" for its long-form videos rather
+   * than silence.
+   */
+  readonly hasLongformNiche: boolean;
+}
+
+/**
+ * Which formats' passes a run should execute.
+ *
+ * A full run executes both. A run narrowed to specific niches — a rule edit's
+ * re-evaluation — executes only the formats those niches belong to: this is
+ * how `reevaluateHitsForNiche` threads the changed niche's format through, so
+ * editing a Long Form rule re-runs the longform pass over that niche's
+ * channels instead of pointlessly re-deciding every Short beside it. An id
+ * that matches no niche contributes nothing; if none match, both passes stay
+ * on — the channel filter already made the run a no-op, and defaulting wide
+ * cannot invent work that filter refused.
+ */
+function passesFor(
+  nicheIds: readonly string[] | undefined,
+  formatByNicheId: ReadonlyMap<string, NicheFormat>,
+): ReadonlySet<NicheFormat> {
+  if (!nicheIds || nicheIds.length === 0) return new Set(NICHE_FORMATS);
+  const formats = new Set<NicheFormat>();
+  for (const nicheId of nicheIds) {
+    const format = formatByNicheId.get(nicheId);
+    if (format !== undefined) formats.add(format);
+  }
+  return formats.size > 0 ? formats : new Set(NICHE_FORMATS);
 }
 
 /**
@@ -256,7 +331,7 @@ export async function evaluateHitsForOrganization(
   const [niches, tracked] = await Promise.all([
     prisma.niche.findMany({
       where: { organizationId },
-      select: { id: true, hitThreshold: true, hitWindowHours: true },
+      select: { id: true, format: true, hitThreshold: true, hitWindowHours: true },
     }),
     prisma.trackedChannel.findMany({
       where: {
@@ -277,21 +352,40 @@ export async function evaluateHitsForOrganization(
   // lifetime comparison wearing the new vocabulary, and `resolveHitRule` is the
   // one place that judgement is made.
   const ruleByNicheId = new Map<string, HitRule>();
+  // Every niche's format, ruled or not: the longform-pass guard is about
+  // MEMBERSHIP, and a half-written longform niche still means somebody opted
+  // this channel into Long Form.
+  const formatByNicheId = new Map<string, NicheFormat>();
   for (const niche of niches) {
+    formatByNicheId.set(niche.id, toNicheFormat(niche.format));
     const rule = resolveHitRule(niche);
     if (rule !== null) ruleByNicheId.set(niche.id, rule);
   }
 
-  const channels: TrackedChannelRules[] = tracked.map((row) => ({
-    channelId: row.channelId,
-    governing: resolveChannelRule(
-      row.niches.map((assignment) => assignment.nicheId),
-      ruleByNicheId,
-    ),
-  }));
+  const channels: TrackedChannelRules[] = tracked.map((row) => {
+    const nicheIds = row.niches.map((assignment) => assignment.nicheId);
+    // `toNicheFormat`'s fail-closed default applies through the map: an id the
+    // niche query somehow did not return reads as "shorts", never as a way
+    // into the longform pass.
+    const idsOfFormat = (format: NicheFormat) =>
+      nicheIds.filter((id) => (formatByNicheId.get(id) ?? "shorts") === format);
+    const longformNicheIds = idsOfFormat("longform");
+
+    return {
+      channelId: row.channelId,
+      governingByFormat: {
+        shorts: resolveChannelRule(idsOfFormat("shorts"), ruleByNicheId),
+        longform: resolveChannelRule(longformNicheIds, ruleByNicheId),
+      },
+      hasLongformNiche: longformNicheIds.length > 0,
+    };
+  });
+
+  const passes = passesFor(options.nicheIds, formatByNicheId);
 
   const counters = {
     shortsConsidered: 0,
+    longformConsidered: 0,
     created: 0,
     updated: 0,
     unchanged: 0,
@@ -301,15 +395,32 @@ export async function evaluateHitsForOrganization(
   const byOutcome: Record<HitOutcome, number> = { hit: 0, miss: 0, pending: 0, unknown: 0 };
 
   for (const channel of channels) {
-    const result = await evaluateChannel(organizationId, channel, nowMs, options.videoIds);
-    counters.shortsConsidered += result.shortsConsidered;
-    counters.created += result.created;
-    counters.updated += result.updated;
-    counters.unchanged += result.unchanged;
-    counters.frozen += result.frozen;
-    counters.unscoreable += result.unscoreable;
-    for (const outcome of ["hit", "miss", "pending", "unknown"] as const) {
-      byOutcome[outcome] += result.byOutcome[outcome];
+    for (const format of NICHE_FORMATS) {
+      if (!passes.has(format)) continue;
+      // THE GUARD: no longform niche, no longform pass, no rows — see
+      // `TrackedChannelRules.hasLongformNiche`. The shorts pass has no such
+      // gate, exactly as before: every Short on a tracked channel gets a row,
+      // unscoreable ones included.
+      if (format === "longform" && !channel.hasLongformNiche) continue;
+
+      const result = await evaluateChannel(
+        organizationId,
+        channel.channelId,
+        format,
+        channel.governingByFormat[format],
+        nowMs,
+        options.videoIds,
+      );
+      if (format === "shorts") counters.shortsConsidered += result.videosConsidered;
+      else counters.longformConsidered += result.videosConsidered;
+      counters.created += result.created;
+      counters.updated += result.updated;
+      counters.unchanged += result.unchanged;
+      counters.frozen += result.frozen;
+      counters.unscoreable += result.unscoreable;
+      for (const outcome of ["hit", "miss", "pending", "unknown"] as const) {
+        byOutcome[outcome] += result.byOutcome[outcome];
+      }
     }
   }
 
@@ -322,7 +433,8 @@ export async function evaluateHitsForOrganization(
 }
 
 interface ChannelEvaluationResult {
-  shortsConsidered: number;
+  /** Videos of THIS pass's format that were looked at. */
+  videosConsidered: number;
   created: number;
   updated: number;
   unchanged: number;
@@ -331,14 +443,28 @@ interface ChannelEvaluationResult {
   byOutcome: Record<HitOutcome, number>;
 }
 
+/**
+ * One channel, one FORMAT's videos, one governing rule.
+ *
+ * THE TWO PASSES ARE DISJOINT BY CONSTRUCTION, which is what makes running
+ * this twice per channel safe against `VideoHitEvaluation`'s unique
+ * (organizationId, videoId). The shorts pass selects `isShort: true`; the
+ * longform pass selects `classification: "not_short"` — and a video is a
+ * Short XOR positively long-form XOR uncertain, so no video can match both
+ * selections and have the two passes race an upsert on the same row. An
+ * uncertain video matches NEITHER and is never evaluated at all, the same
+ * conservative asymmetry `isVideoOfFormat` documents.
+ */
 async function evaluateChannel(
   organizationId: string,
-  channel: TrackedChannelRules,
+  channelId: string,
+  format: NicheFormat,
+  governing: NicheHitRule | null,
   nowMs: number,
   videoIds: readonly string[] | undefined,
 ): Promise<ChannelEvaluationResult> {
   const result: ChannelEvaluationResult = {
-    shortsConsidered: 0,
+    videosConsidered: 0,
     created: 0,
     updated: 0,
     unchanged: 0,
@@ -347,11 +473,17 @@ async function evaluateChannel(
     byOutcome: { hit: 0, miss: 0, pending: 0, unknown: 0 },
   };
 
-  const windowHours = channel.governing?.rule.windowHours ?? null;
+  const windowHours = governing?.rule.windowHours ?? null;
 
   const videoWhere = {
-    channelId: channel.channelId,
-    isShort: true,
+    channelId,
+    // The format filter IS `isVideoOfFormat`, expressed as a where clause. It
+    // is deliberately NOT `isShort: false` on the longform side — that would
+    // sweep every uncertain video into Long Form, the exact inflation the
+    // Shorts filter was built to prevent.
+    ...(format === "shorts"
+      ? { isShort: true as const }
+      : { classification: "not_short" as const }),
     ...(videoIds && videoIds.length > 0 ? { id: { in: [...videoIds] } } : {}),
   };
 
@@ -377,7 +509,7 @@ async function evaluateChannel(
   });
 
   if (videos.length === 0) return result;
-  result.shortsConsidered = videos.length;
+  result.videosConsidered = videos.length;
 
   const existingRows = await prisma.videoHitEvaluation.findMany({
     // Organization first. `Video` is a globally deduplicated row and the
@@ -419,20 +551,20 @@ async function evaluateChannel(
 
   for (const video of videos) {
     const fields =
-      channel.governing === null
+      governing === null
         ? unscoreableFields()
         : verdictToFields(
             evaluateHit({
               publishedAtMs: video.publishedAt.getTime(),
-              rule: channel.governing.rule,
+              rule: governing.rule,
               lifetimeViews: Number(video.viewCount),
               observations: toObservations(video.snapshots),
               nowMs,
             }),
-            channel.governing.nicheId,
+            governing.nicheId,
           );
 
-    if (channel.governing === null) result.unscoreable += 1;
+    if (governing === null) result.unscoreable += 1;
     else result.byOutcome[fields.outcome] += 1;
 
     const decision = decideWrite(existingByVideoId.get(video.id) ?? null, fields);
@@ -495,6 +627,12 @@ function toHitOutcome(value: string): HitOutcome {
  * would mean a dashboard showing one definition and a payslip quoting another.
  * `decideWrite` handles the thaw — a changed rule is the one thing that
  * reopens a settled verdict.
+ *
+ * THE CHANGED NICHE'S FORMAT RIDES ALONG FOR FREE: `passesFor` reads it off
+ * the niche list the run loads anyway, so editing a longform niche's rule
+ * re-runs the longform pass over its channels and leaves their Shorts'
+ * verdicts untouched — and vice versa. No second query, no format parameter
+ * for a caller to get wrong.
  */
 export async function reevaluateHitsForNiche(
   organizationId: string,

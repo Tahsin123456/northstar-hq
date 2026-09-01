@@ -106,9 +106,14 @@ function videoSelect(organizationId: string) {
      * list it will always find one of.
      *
      * SELECTED FOR EVERY VIDEO, including long-form, because filtering by
-     * `isShort` here would save nothing: long-form has no evaluation row, so
-     * the join returns empty for it either way, and a second condition would
-     * only be one more thing that could disagree with the evaluator.
+     * `isShort` here would save nothing: a long-form video on a channel with
+     * no longform-format niche — every channel, until an organization creates
+     * one — has no evaluation row (the evaluator's longform pass only runs
+     * where such a niche exists), so the join returns empty for it either
+     * way and it ships with `hit: null`. Where a longform niche DOES exist
+     * its channels' long-form videos carry real verdicts, and this select
+     * ships them through the same join. A second condition here would only
+     * be one more thing that could disagree with the evaluator.
      */
     hitEvaluations: {
       where: { organizationId },

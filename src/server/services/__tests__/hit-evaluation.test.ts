@@ -30,6 +30,12 @@ interface NicheRow {
   id: string;
   hitThreshold: number | null;
   hitWindowHours: number | null;
+  /**
+   * Absent on the pre-format fixtures ON PURPOSE: the service must read a row
+   * with no recognisable format as "shorts", so every fixture written before
+   * the column existed keeps exercising the shorts pass unchanged.
+   */
+  format?: string;
 }
 
 interface TrackedRow {
@@ -48,6 +54,8 @@ interface VideoRow {
   publishedAt: Date;
   viewCount: bigint;
   snapshots: SnapshotRow[];
+  isShort: boolean;
+  classification: string;
 }
 
 interface EvaluationRow {
@@ -64,7 +72,12 @@ interface EvaluationRow {
 }
 
 interface VideoFindManyArgs {
-  where: { channelId: string; isShort: boolean; id?: { in: string[] } };
+  where: {
+    channelId: string;
+    isShort?: boolean;
+    classification?: string;
+    id?: { in: string[] };
+  };
   select: { snapshots: { where: { videoAgeHours: { lte: number } } } };
 }
 
@@ -118,6 +131,18 @@ vi.mock("@/server/db", () => ({
         const maxAgeHours = args.select.snapshots.where.videoAgeHours.lte;
         return mocks.store.videos
           .filter((video) => video.channelId === args.where.channelId)
+          // The format clauses are honoured because they are load-bearing now:
+          // the shorts pass filters `isShort: true`, the longform pass filters
+          // `classification: "not_short"`, and an uncertain video must match
+          // NEITHER — the disjointness the unique constraint depends on.
+          .filter(
+            (video) => args.where.isShort === undefined || video.isShort === args.where.isShort,
+          )
+          .filter(
+            (video) =>
+              args.where.classification === undefined ||
+              video.classification === args.where.classification,
+          )
           .filter((video) => !args.where.id || args.where.id.in.includes(video.id))
           .map((video) => ({
             id: video.id,
@@ -152,6 +177,21 @@ const { evaluateHitsForOrganization, decideWrite, resolveChannelRule } = await i
 const GTA: NicheRow = { id: "niche_gta", hitThreshold: 1_000_000, hitWindowHours: 168 };
 /** A lower bar on a tighter clock, for the two-niches case. */
 const TLOU: NicheRow = { id: "niche_tlou", hitThreshold: 500_000, hitWindowHours: 48 };
+/**
+ * The Long Form GTA: a separate niche, a separate rule, a month-long clock.
+ *
+ * Its threshold is deliberately LOWER than the Shorts GTA's. If the per-format
+ * candidate pre-filter were ever dropped, `pickGoverningRule`'s lowest-bar
+ * ranking would hand this niche the channel's SHORTS — so the mixed-format
+ * test below, which pins the Shorts verdict to `niche_gta`, fails loudly on
+ * exactly that mutation instead of passing by coincidence.
+ */
+const LONGFORM_GTA: NicheRow = {
+  id: "niche_gta_longform",
+  hitThreshold: 500_000,
+  hitWindowHours: 720,
+  format: "longform",
+};
 
 function video(overrides: Partial<VideoRow> & { id: string }): VideoRow {
   return {
@@ -159,8 +199,23 @@ function video(overrides: Partial<VideoRow> & { id: string }): VideoRow {
     publishedAt: PUBLISHED,
     viewCount: BigInt(0),
     snapshots: [],
+    // The default fixture is a Short, as every fixture in this file was before
+    // formats existed — which is what keeps those tests pinning the shorts
+    // pass byte-for-byte.
+    isShort: true,
+    classification: "short",
     ...overrides,
   };
+}
+
+/** A positively-identified long-form video. Never `!isShort` — see below. */
+function longformVideo(overrides: Partial<VideoRow> & { id: string }): VideoRow {
+  return video({ isShort: false, classification: "not_short", ...overrides });
+}
+
+/** A video the classifier could not resolve. Belongs to NEITHER format. */
+function uncertainVideo(overrides: Partial<VideoRow> & { id: string }): VideoRow {
+  return video({ isShort: false, classification: "uncertain", ...overrides });
 }
 
 function stored(videoId: string): EvaluationRow | undefined {
@@ -443,6 +498,142 @@ describe("scope", () => {
     expect(stored("vid_1")?.outcome).toBe("miss");
     // Theirs is untouched, which is the other half of the same guarantee.
     expect(mocks.store.evaluations.get(mocks.key(OTHER_ORG, "vid_1"))?.outcome).toBe("hit");
+  });
+});
+
+describe("formats: each pass judges only its own population", () => {
+  beforeEach(() => {
+    mocks.store.niches = [GTA, LONGFORM_GTA];
+    mocks.store.tracked = [{ channelId: "chan_1", nicheIds: [GTA.id, LONGFORM_GTA.id] }];
+    mocks.store.videos = [
+      // A Short, seen over the SHORTS bar inside the shorts window.
+      video({
+        id: "vid_short",
+        viewCount: BigInt(9_000_000),
+        snapshots: [{ viewCount: BigInt(1_050_000), videoAgeHours: 2 }],
+      }),
+      // A long-form video still under the LONGFORM bar today: a certain miss
+      // against the 720-hour rule, and no business near the shorts rule.
+      longformVideo({ id: "vid_long", viewCount: BigInt(300_000) }),
+      // Unresolvable. In neither format, judged by neither pass.
+      uncertainVideo({ id: "vid_uncertain", viewCount: BigInt(9_000_000) }),
+    ];
+  });
+
+  it("judges the Short by the shorts rule and the long-form video by the longform rule", async () => {
+    const summary = await evaluateHitsForOrganization(ORG_ID, { nowMs: LONG_AFTER });
+
+    expect(summary.shortsConsidered).toBe(1);
+    expect(summary.longformConsidered).toBe(1);
+    expect(summary.created).toBe(2);
+    expect(summary.byOutcome).toEqual({ hit: 1, miss: 1, pending: 0, unknown: 0 });
+
+    // The Short's verdict, pinned whole. `nicheId: niche_gta` is the assertion
+    // that would fail if the longform niche's lower bar ever leaked into the
+    // shorts candidate list — see `LONGFORM_GTA`'s own comment.
+    const short = stored("vid_short");
+    expect(short?.outcome).toBe("hit");
+    expect(short?.nicheId).toBe(GTA.id);
+    expect(short?.thresholdApplied).toBe(1_000_000);
+    expect(short?.windowHoursApplied).toBe(168);
+
+    // The long-form verdict, judged by its OWN format's rule and clock.
+    const long = stored("vid_long");
+    expect(long?.outcome).toBe("miss");
+    expect(long?.nicheId).toBe(LONGFORM_GTA.id);
+    expect(long?.thresholdApplied).toBe(500_000);
+    expect(long?.windowHoursApplied).toBe(720);
+    expect(long?.windowClosesAt?.getTime()).toBe(at(720));
+  });
+
+  it("writes nothing for an uncertain video, ever", async () => {
+    await evaluateHitsForOrganization(ORG_ID, { nowMs: LONG_AFTER });
+
+    // Not a verdict, not an unscoreable row — nothing. An uncertain video is
+    // in neither format, so the sum of the two passes is allowed to be smaller
+    // than the library and the gap IS the uncertainty.
+    expect(stored("vid_uncertain")).toBeUndefined();
+  });
+
+  it("re-runs only the changed niche's format after a rule edit", async () => {
+    await evaluateHitsForOrganization(ORG_ID, { nowMs: LONG_AFTER });
+    expect(stored("vid_long")?.outcome).toBe("miss");
+    mocks.upsert.mockClear();
+
+    // An admin drops the Long Form bar under what the video actually did. The
+    // narrowed run must re-decide the LONGFORM pass and not so much as
+    // consider the Shorts beside it.
+    mocks.store.niches = [
+      GTA,
+      { ...LONGFORM_GTA, hitThreshold: 250_000 },
+    ];
+
+    const summary = await evaluateHitsForOrganization(ORG_ID, {
+      nowMs: LONG_AFTER,
+      nicheIds: [LONGFORM_GTA.id],
+    });
+
+    expect(summary.shortsConsidered).toBe(0);
+    expect(summary.longformConsidered).toBe(1);
+    expect(summary.updated).toBe(1);
+    // 300K is over the new 250K bar, the window shut unobserved: the certain
+    // miss honestly becomes "we cannot say when", under the new rule.
+    expect(stored("vid_long")?.outcome).toBe("unknown");
+    expect(stored("vid_long")?.thresholdApplied).toBe(250_000);
+    // The Short's frozen verdict was not rewritten by the longform edit.
+    expect(mocks.upsert).toHaveBeenCalledTimes(1);
+    expect(stored("vid_short")?.thresholdApplied).toBe(1_000_000);
+  });
+});
+
+describe("formats: the longform pass does not exist until a longform niche does", () => {
+  it("writes no row for long-form videos on a pure-Shorts channel — today's state", async () => {
+    mocks.store.niches = [GTA];
+    mocks.store.tracked = [{ channelId: "chan_1", nicheIds: [GTA.id] }];
+    mocks.store.videos = [
+      video({ id: "vid_short", viewCount: BigInt(40_000) }),
+      // Ten million lifetime views and no longform niche anywhere: the guard
+      // is what keeps this at `hit: null` in the dataset payload rather than
+      // an unscoreable "unknown" row nobody asked for.
+      longformVideo({ id: "vid_long", viewCount: BigInt(10_000_000) }),
+      uncertainVideo({ id: "vid_uncertain", viewCount: BigInt(10_000_000) }),
+    ];
+
+    const summary = await evaluateHitsForOrganization(ORG_ID, { nowMs: LONG_AFTER });
+
+    // The identity pin: with zero longform niches the run IS the pre-format
+    // run. One Short considered, one row written, nothing else touched.
+    expect(summary.shortsConsidered).toBe(1);
+    expect(summary.longformConsidered).toBe(0);
+    expect(summary.created).toBe(1);
+    expect(summary.unscoreable).toBe(0);
+    expect(summary.byOutcome).toEqual({ hit: 0, miss: 1, pending: 0, unknown: 0 });
+    expect(mocks.upsert).toHaveBeenCalledTimes(1);
+
+    expect(stored("vid_short")?.outcome).toBe("miss");
+    expect(stored("vid_long")).toBeUndefined();
+    expect(stored("vid_uncertain")).toBeUndefined();
+  });
+
+  it("writes an unscoreable row once a channel is opted in, even with half a rule", async () => {
+    // Membership, not a complete rule, is the gate — mirroring how a Short on
+    // a channel under a half-written shorts niche is recorded as unscoreable
+    // rather than skipped. Somebody deliberately filed this channel under a
+    // Long Form niche; the honest answer for its videos is "no usable rule",
+    // not silence.
+    mocks.store.niches = [
+      GTA,
+      { id: "niche_lf_half", hitThreshold: 500_000, hitWindowHours: null, format: "longform" },
+    ];
+    mocks.store.tracked = [{ channelId: "chan_1", nicheIds: [GTA.id, "niche_lf_half"] }];
+    mocks.store.videos = [longformVideo({ id: "vid_long", viewCount: BigInt(10_000_000) })];
+
+    const summary = await evaluateHitsForOrganization(ORG_ID, { nowMs: LONG_AFTER });
+
+    expect(summary.longformConsidered).toBe(1);
+    expect(summary.unscoreable).toBe(1);
+    expect(stored("vid_long")?.outcome).toBe("unknown");
+    expect(stored("vid_long")?.thresholdApplied).toBeNull();
   });
 });
 

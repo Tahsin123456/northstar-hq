@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   densePhaseHours,
+  hitWindowForVideo,
   isInsideWindow,
   snapshotBucket,
   SNAPSHOT_GRID_MS,
@@ -147,6 +148,57 @@ describe("what it costs", () => {
 
     expect(oldFlatRowsPerDay).toBe(4);
     expect(newRowsPerDay).toBe(1);
+  });
+});
+
+describe("hitWindowForVideo — which window paces which video", () => {
+  const SHORT = { isShort: true, classification: "short" };
+  const LONGFORM = { isShort: false, classification: "not_short" };
+  const UNCERTAIN = { isShort: false, classification: "uncertain" };
+
+  const BOTH = { shortsWindowHours: WEEK, longformWindowHours: 720 };
+  /** Every channel until an organization creates a longform niche. */
+  const SHORTS_ONLY = { shortsWindowHours: WEEK, longformWindowHours: null };
+
+  it("paces a Short by the shorts window and long-form by the longform window", () => {
+    expect(hitWindowForVideo(SHORT, BOTH)).toBe(WEEK);
+    expect(hitWindowForVideo(LONGFORM, BOTH)).toBe(720);
+    // And the maths downstream is untouched: a not_short row inside a 720-hour
+    // window gets in-window cadence, exactly as a Short in its own window does.
+    expect(
+      snapshotIntervalMinutes({ ageHours: 100, windowHours: 720, baseIntervalMinutes: BASE }),
+    ).toBe(360);
+  });
+
+  it("never paces an uncertain video by either window", () => {
+    // `!isShort` would have caught it on the longform side and spent dense
+    // sampling on a video no verdict will ever be gathered for. Uncertain is
+    // in NEITHER format: flat organization interval, always.
+    expect(hitWindowForVideo(UNCERTAIN, BOTH)).toBeNull();
+    expect(hitWindowForVideo(UNCERTAIN, SHORTS_ONLY)).toBeNull();
+    expect(
+      snapshotIntervalMinutes({
+        ageHours: 2,
+        windowHours: hitWindowForVideo(UNCERTAIN, BOTH),
+        baseIntervalMinutes: BASE,
+      }),
+    ).toBe(BASE);
+  });
+
+  it("keeps long-form on the flat interval while no longform niche exists — today", () => {
+    // The identity pin for the cadence half of the deploy: with the longform
+    // window null (its value everywhere until a longform niche is created),
+    // a not_short row resolves to null — the exact windowHours the pre-format
+    // branch (`row.isShort ? hitWindowHours : null`) handed the same row.
+    expect(hitWindowForVideo(LONGFORM, SHORTS_ONLY)).toBeNull();
+    expect(hitWindowForVideo(SHORT, SHORTS_ONLY)).toBe(WEEK);
+    expect(
+      snapshotIntervalMinutes({
+        ageHours: 2,
+        windowHours: hitWindowForVideo(LONGFORM, SHORTS_ONLY),
+        baseIntervalMinutes: BASE,
+      }),
+    ).toBe(BASE);
   });
 });
 

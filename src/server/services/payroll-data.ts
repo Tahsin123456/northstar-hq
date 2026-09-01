@@ -3,6 +3,7 @@ import "server-only";
 import { prisma } from "@/server/db";
 import { HOUR_MS, type HitOutcome } from "@/lib/analytics/hit-rate";
 import { toNicheKind } from "@/lib/niches/niche-kind";
+import { toNicheFormat, type NicheFormat } from "@/lib/niches/niche-format";
 import type {
   PayrollEmployee,
   PayrollHitEvidence,
@@ -263,13 +264,25 @@ async function loadEmployeeMembers(
  * the employee's rate for the price, and adding one would recreate the bug that
  * paid bonuses against numbers nobody had chosen.
  */
-async function loadNiches(organizationId: string): Promise<PayrollNiche[]> {
+/**
+ * A niche as THIS module holds it: the engine's shape, plus its format.
+ *
+ * The format is deliberately NOT on the engine's `PayrollNiche` — the engine
+ * is content-agnostic and must stay so. It is consumed entirely inside
+ * `loadShorts`, where it narrows each video's `nicheIds` to the channel's
+ * SAME-FORMAT niches before the engine ever sees them; handing the narrowed
+ * lists over is what keeps the format rule out of the money code.
+ */
+type LoadedPayrollNiche = PayrollNiche & { readonly format: NicheFormat };
+
+async function loadNiches(organizationId: string): Promise<LoadedPayrollNiche[]> {
   const rows = await prisma.niche.findMany({
     where: { organizationId },
     select: {
       id: true,
       name: true,
       kind: true,
+      format: true,
       hitPaymentMinor: true,
       hitThreshold: true,
       hitWindowHours: true,
@@ -282,6 +295,9 @@ async function loadNiches(organizationId: string): Promise<PayrollNiche[]> {
     // Anything unrecognised reads as "production", which over-counts visibly
     // rather than silently removing a niche from the run.
     kind: toNicheKind(row.kind),
+    // Same treatment, same direction: an unreadable format reads as "shorts",
+    // the product that exists, never as a way into a list nobody has built.
+    format: toNicheFormat(row.format),
   }));
 }
 
@@ -528,7 +544,9 @@ async function loadOwnedChannels(organizationId: string): Promise<OwnedChannel[]
 }
 
 /**
- * Shorts on an owned channel that could resolve inside the period.
+ * Videos on an owned channel that could resolve inside the period — the
+ * channel's Shorts, and since formats its positively-identified long-form
+ * videos too.
  *
  * THE RANGE IS NOT THE PERIOD, AND THAT IS THE WHOLE CHANGE. A hit is paid in
  * the period its window CLOSED in, not the one it was published in, so a
@@ -544,6 +562,14 @@ async function loadOwnedChannels(organizationId: string): Promise<OwnedChannel[]
  * Short's `windowClosesAt` per niche and keeps the ones landing inside the
  * period, so this query only has to be a superset and never has to be exact.
  *
+ * WHICH VIDEOS, UNDER FORMATS: `isShort: true` OR `classification:
+ * "not_short"` — and NEVER the uncertain remainder. An uncertain video belongs
+ * to neither format, no niche can judge it, and letting it in through a
+ * `!isShort` complement is exactly the inflation `isVideoOfFormat` exists to
+ * make unwritable. The OR is deliberately unconditional rather than gated on
+ * "does a longform niche exist", because the narrowing below makes the extra
+ * rows provably inert — see THE MONEY EDIT.
+ *
  * `isAvailable` is deliberately not filtered on. A Short that cleared its
  * window in August and was taken down in September was still a hit in August,
  * and the person who made it is still owed for it.
@@ -557,7 +583,7 @@ async function loadShorts(
   organizationId: string,
   ownedChannels: readonly OwnedChannel[],
   period: PayrollPeriodWindow,
-  niches: readonly PayrollNiche[],
+  niches: readonly LoadedPayrollNiche[],
 ): Promise<PayrollShort[]> {
   if (ownedChannels.length === 0) return [];
 
@@ -566,15 +592,24 @@ async function loadShorts(
 
   const publishedAt = publishedRangeFor(period, niches);
 
+  // One predicate, used identically by both queries below, so the evaluations
+  // can never cover a different population than the videos they judge.
+  const formatWhere = { OR: [{ isShort: true }, { classification: "not_short" }] };
+
   const [videos, evaluations] = await Promise.all([
     prisma.video.findMany({
-      where: { channelId: { in: channelIds }, isShort: true, publishedAt },
+      where: { channelId: { in: channelIds }, ...formatWhere, publishedAt },
       select: {
         id: true,
         title: true,
         channelId: true,
         viewCount: true,
         publishedAt: true,
+        // Both classification columns come back so each video can be tagged
+        // with its format, which is what decides WHICH of the channel's niches
+        // may judge it below.
+        isShort: true,
+        classification: true,
       },
     }),
     // Scoped by organization first, then narrowed through the relation with the
@@ -588,7 +623,7 @@ async function loadShorts(
     prisma.videoHitEvaluation.findMany({
       where: {
         organizationId,
-        video: { channelId: { in: channelIds }, isShort: true, publishedAt },
+        video: { channelId: { in: channelIds }, ...formatWhere, publishedAt },
       },
       select: {
         videoId: true,
@@ -628,11 +663,55 @@ async function loadShorts(
     ]),
   );
 
+  /*
+   * THE MONEY EDIT: each video's candidate niches are the channel's SAME-FORMAT
+   * niches, worked out once per channel per format rather than per video.
+   *
+   * The engine attributes a hit with `pickGoverningRule` over `short.nicheIds`
+   * narrowed to the employee's assignments (`judgeShort`, payroll-engine.ts) —
+   * it has no format concept, so whatever ids arrive here ARE the candidate
+   * list. Hand a long-form video the channel's Shorts niches and a Long Form
+   * hit gets judged by a Shorts rule and paid at a Shorts rate; the narrowing
+   * below is the one line standing between those two prices.
+   *
+   * THE IDENTITY ARGUMENT, for an organization with zero longform niches
+   * (every organization today): the `not_short` arm of the query loads videos
+   * whose nicheIds narrow to [] — there are no longform niches to match. The
+   * engine was READ to confirm what it does with an empty list: `judgeShort`
+   * builds its candidates by iterating `short.nicheIds` (payroll-engine.ts
+   * ~925), so an empty list yields no candidates, `pickGoverningRule` returns
+   * null, and both `calculateEmployeePayroll` (~1129) and `runScope` (~1423)
+   * `continue` past the video — it earns nothing, is reported nowhere (the
+   * skipped-niche and unresolved buckets are keyed off `short.nicheIds` and a
+   * judged verdict respectively), and moves no total by a minor unit. That is
+   * the "unattributable" behaviour this narrowing relies on, and it is why the
+   * OR arm needs no existence gate.
+   */
+  const formatById = new Map(niches.map((niche) => [niche.id, niche.format]));
+  const formatNicheIds = new Map(
+    ownedChannels.map((channel) => {
+      // A niche id the loader somehow did not return reads as "shorts" — the
+      // same fail-closed direction `toNicheFormat` takes, and never a way for
+      // a long-form video to acquire a judge by accident.
+      const idsOf = (format: NicheFormat) =>
+        channel.nicheIds.filter((id) => (formatById.get(id) ?? "shorts") === format);
+      return [
+        channel.channelId,
+        { shorts: idsOf("shorts"), longform: idsOf("longform") } as const,
+      ];
+    }),
+  );
+
   const shorts: PayrollShort[] = [];
 
   for (const video of videos) {
     const channel = channelById.get(video.channelId);
     if (!channel) continue;
+
+    // The query admits exactly two populations — `isShort: true` and
+    // `classification: "not_short"` — so this tag is total over what can reach
+    // it, and `isShort` wins the (data-impossible) case of a row claiming both.
+    const format: NicheFormat = video.isShort ? "shorts" : "longform";
 
     shorts.push({
       // The internal Video id, which is what `videoId` means everywhere else in
@@ -647,7 +726,10 @@ async function loadShorts(
       // threshold. Converted once, here, at the edge.
       views: Number(video.viewCount),
       publishedAtMs: video.publishedAt.getTime(),
-      nicheIds: channel.nicheIds,
+      // THE NARROWED LIST, not the channel's full one — see THE MONEY EDIT
+      // above. With every niche format "shorts", the shorts list IS the full
+      // list, so today's Shorts arrive with exactly the ids they always did.
+      nicheIds: formatNicheIds.get(video.channelId)?.[format] ?? [],
       // Not a claim this module is making on trust: the query above loaded only
       // owned, active channels, so every row that reaches here is one. The
       // engine re-checks the flag anyway, which is how a future caller that

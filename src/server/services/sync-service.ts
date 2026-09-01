@@ -24,6 +24,7 @@ import {
   type RevenueSyncSummary,
 } from "./youtube-revenue-service";
 import { resolveHitRule, HOUR_MS, type HitRule } from "@/lib/analytics/hit-rate";
+import { toNicheFormat, type NicheFormat } from "@/lib/niches/niche-format";
 import { isInsideWindow } from "@/lib/sync/snapshot-cadence";
 
 /**
@@ -238,31 +239,58 @@ export async function buildSyncOptions(
 }
 
 /**
- * The hit window that judges each channel's Shorts, in hours.
+ * The hit windows a channel's videos are judged over, per format, in hours.
  *
- * Null for a channel filed under no niche, or under none with BOTH halves of a
- * rule — which is not a defect to work around but the state most of this
- * tracker is in until an admin finishes configuring it. The snapshot cadence
- * reads null as "no window", falls back to the organization's flat interval,
- * and nothing about the old behaviour changes for those channels.
+ * BOTH FORMATS AT ONCE, because the snapshot cadence now has two populations
+ * to schedule: a channel's Shorts are sampled to the governing rule among its
+ * SHORTS-format niches, and its long-form videos to the governing rule among
+ * its LONGFORM-format ones.
+ */
+export interface ChannelHitWindows {
+  /**
+   * Null for a channel filed under no shorts niche, or under none with BOTH
+   * halves of a rule — which is not a defect to work around but the state most
+   * of this tracker is in until an admin finishes configuring it. The snapshot
+   * cadence reads null as "no window", falls back to the organization's flat
+   * interval, and nothing about the old behaviour changes for those channels.
+   */
+  readonly shortsWindowHours: number | null;
+  /**
+   * Null when the channel has no longform-format niche or its rule is
+   * incomplete — which is EVERY channel until an organization creates a
+   * longform niche, so every existing row keeps exactly the cadence it has
+   * today. Only `classification: "not_short"` videos ever read this; an
+   * uncertain video is judged by neither format and stays on the flat
+   * interval whatever this says.
+   */
+  readonly longformWindowHours: number | null;
+}
+
+const NO_WINDOWS: ChannelHitWindows = { shortsWindowHours: null, longformWindowHours: null };
+
+/**
+ * The hit windows that judge each channel's videos, per format, in hours.
  *
  * The choice among several niches is `resolveChannelRule`, which is the
- * evaluator's — and through it the analytics engine's `pickGoverningRule`. It
- * has to be: sampling a channel densely for seven days and then judging it on a
- * 48-hour rule would collect the wrong evidence, so the cadence and the verdict
- * must be reading the same clock.
+ * evaluator's — and through it the analytics engine's `pickGoverningRule` —
+ * applied to one format's niches at a time, exactly as the evaluator now
+ * applies it. It has to be: sampling a channel densely for seven days and then
+ * judging it on a 48-hour rule would collect the wrong evidence, so the
+ * cadence and the verdict must be reading the same clock — per format.
  */
 export async function resolveChannelHitWindows(
   organizationId: string,
   channelIds: readonly string[],
-): Promise<Map<string, number | null>> {
-  const windows = new Map<string, number | null>(channelIds.map((id) => [id, null]));
+): Promise<Map<string, ChannelHitWindows>> {
+  const windows = new Map<string, ChannelHitWindows>(
+    channelIds.map((id) => [id, NO_WINDOWS]),
+  );
   if (channelIds.length === 0) return windows;
 
   const [niches, tracked] = await Promise.all([
     prisma.niche.findMany({
       where: { organizationId },
-      select: { id: true, hitThreshold: true, hitWindowHours: true },
+      select: { id: true, format: true, hitThreshold: true, hitWindowHours: true },
     }),
     prisma.trackedChannel.findMany({
       where: { organizationId, isActive: true, channelId: { in: [...channelIds] } },
@@ -271,17 +299,29 @@ export async function resolveChannelHitWindows(
   ]);
 
   const ruleByNicheId = new Map<string, HitRule>();
+  const formatByNicheId = new Map<string, NicheFormat>();
   for (const niche of niches) {
+    formatByNicheId.set(niche.id, toNicheFormat(niche.format));
     const rule = resolveHitRule(niche);
     if (rule !== null) ruleByNicheId.set(niche.id, rule);
   }
 
   for (const row of tracked) {
-    const governing = resolveChannelRule(
-      row.niches.map((assignment) => assignment.nicheId),
-      ruleByNicheId,
-    );
-    windows.set(row.channelId, governing?.rule.windowHours ?? null);
+    const nicheIds = row.niches.map((assignment) => assignment.nicheId);
+    // Candidates pre-filtered to one format before the ranking runs, mirroring
+    // the evaluator: a Long Form rule's weeks-long window must never stretch
+    // the schedule the Shorts verdict depends on, nor the reverse. With every
+    // niche format "shorts" the shorts set is the full set — today's answer,
+    // byte for byte — and the longform set is empty, which is null.
+    const governingOf = (format: NicheFormat) =>
+      resolveChannelRule(
+        nicheIds.filter((id) => (formatByNicheId.get(id) ?? "shorts") === format),
+        ruleByNicheId,
+      );
+    windows.set(row.channelId, {
+      shortsWindowHours: governingOf("shorts")?.rule.windowHours ?? null,
+      longformWindowHours: governingOf("longform")?.rule.windowHours ?? null,
+    });
   }
 
   return windows;
@@ -305,9 +345,11 @@ export async function buildChannelSyncOptions(
     resolveChannelHitWindows(organizationId, [channelId]),
     credentialForChannelRow(organizationId, channelId),
   ]);
+  const channelWindows = windows.get(channelId);
   return {
     ...base,
-    hitWindowHours: windows.get(channelId) ?? null,
+    hitWindowHours: channelWindows?.shortsWindowHours ?? null,
+    longformWindowHours: channelWindows?.longformWindowHours ?? null,
     credential,
   };
 }
@@ -385,6 +427,8 @@ interface DueChannel {
   readonly lastFetchedAt: Date | null;
   /** The window judging this channel's Shorts, passed straight to the sync. */
   readonly hitWindowHours: number | null;
+  /** The window judging its long-form videos, or null — see `ChannelHitWindows`. */
+  readonly longformWindowHours: number | null;
   /** At least one Short on this channel is still inside its window. */
   readonly hasOpenWindow: boolean;
 }
@@ -394,18 +438,30 @@ interface DueChannel {
  *
  * One query for the whole tracker rather than one per channel: the widest
  * window in the organization bounds what could possibly still be open, and the
- * per-channel clock is then applied in memory. Long-form is excluded because a
- * window only judges Shorts.
+ * per-channel clock is then applied in memory.
+ *
+ * SHORTS-ONLY, DELIBERATELY, AND STAYING THAT WAY UNDER FORMATS. This set
+ * exists to tighten the CHANNEL refresh interval to hourly, because a Short's
+ * dense phase asks for hourly readings and a sweep that reaches the channel
+ * every six hours cannot supply them. A long-form window is weeks long and its
+ * dense phase is capped at 24 six-hourly-to-hourly readings out of hundreds of
+ * hours — the organization's ordinary interval already reaches the channel
+ * often enough to take them, so an open LONGFORM window earns no tighter
+ * refresh. Widening this to longform would put every channel with a Long Form
+ * video less than a month old on the hourly schedule and spend real quota
+ * buying readings the longform verdict does not need. The longform CADENCE is
+ * still honoured per video in `channel-sync` whenever the channel is synced;
+ * this is only about how often the channel itself is visited.
  */
 async function findChannelsWithOpenWindows(
-  windowByChannelId: ReadonlyMap<string, number | null>,
+  windowByChannelId: ReadonlyMap<string, ChannelHitWindows>,
   nowMs: number,
 ): Promise<Set<string>> {
   const open = new Set<string>();
 
-  const windowed = [...windowByChannelId.entries()].filter(
-    (entry): entry is [string, number] => entry[1] !== null && entry[1] > 0,
-  );
+  const windowed = [...windowByChannelId.entries()]
+    .map(([channelId, windows]) => [channelId, windows.shortsWindowHours] as const)
+    .filter((entry): entry is readonly [string, number] => entry[1] !== null && entry[1] > 0);
   if (windowed.length === 0) return open;
 
   const widestWindowHours = Math.max(...windowed.map(([, hours]) => hours));
@@ -421,7 +477,13 @@ async function findChannelsWithOpenWindows(
 
   for (const video of recent) {
     if (open.has(video.channelId)) continue;
-    if (isInsideWindow(video.publishedAt.getTime(), windowByChannelId.get(video.channelId) ?? null, nowMs)) {
+    if (
+      isInsideWindow(
+        video.publishedAt.getTime(),
+        windowByChannelId.get(video.channelId)?.shortsWindowHours ?? null,
+        nowMs,
+      )
+    ) {
       open.add(video.channelId);
     }
   }
@@ -470,7 +532,8 @@ async function findDueChannels(
       youtubeChannelId: row.channel.youtubeChannelId,
       label: row.label ?? row.channel.title,
       lastFetchedAt: row.channel.lastFetchedAt,
-      hitWindowHours: windowByChannelId.get(row.channelId) ?? null,
+      hitWindowHours: windowByChannelId.get(row.channelId)?.shortsWindowHours ?? null,
+      longformWindowHours: windowByChannelId.get(row.channelId)?.longformWindowHours ?? null,
       hasOpenWindow: openWindowChannelIds.has(row.channelId),
     }))
     .filter((channel) => {
@@ -662,6 +725,7 @@ export async function runScheduledSync(
       result = await syncChannel(channel.channelId, {
         ...syncOptions,
         hitWindowHours: channel.hitWindowHours,
+        longformWindowHours: channel.longformWindowHours,
         credential: await resolveChannelCredential(organizationId, channel.youtubeChannelId),
       });
     } catch (caught) {

@@ -1,4 +1,5 @@
 import { HOUR_MS } from "@/lib/analytics/hit-rate";
+import { isVideoOfFormat, type VideoFormatSource } from "@/lib/niches/niche-format";
 
 /**
  * =========================================================================
@@ -155,6 +156,45 @@ export function snapshotIntervalMinutes(input: SnapshotCadenceInput): number {
     case "after-window":
       return Math.max(base, AFTER_WINDOW_INTERVAL_MINUTES);
   }
+}
+
+/**
+ * The two windows a channel carries under formats, in hours.
+ *
+ * Structural rather than an import of the sync service's shape, for the same
+ * reason everything in this file is: the cadence is isomorphic and the server
+ * is only one of its callers.
+ */
+export interface ChannelFormatWindows {
+  /** The governing window among the channel's SHORTS-format niches, or null. */
+  readonly shortsWindowHours: number | null;
+  /** The governing window among its LONGFORM-format niches, or null. */
+  readonly longformWindowHours: number | null;
+}
+
+/**
+ * Which window judges THIS video — and therefore paces its snapshots.
+ *
+ * The dispatch is `isVideoOfFormat`, not a complement: a Short reads the
+ * shorts window, a positively-identified long-form video reads the longform
+ * window, and an UNCERTAIN video reads NEITHER — null, the flat organization
+ * interval — because no verdict will ever be gathered for it and dense
+ * sampling would be storage spent on a question nobody will ask. Before any
+ * longform niche exists `longformWindowHours` is always null, so a long-form
+ * video resolves to null exactly as it always did: this function changes
+ * nothing about any existing row until somebody opts a channel into Long Form.
+ *
+ * The maths downstream (`snapshotIntervalMinutes`) is untouched — it already
+ * scales with whatever window it is handed, and this only decides which one
+ * that is.
+ */
+export function hitWindowForVideo(
+  video: VideoFormatSource,
+  windows: ChannelFormatWindows,
+): number | null {
+  if (isVideoOfFormat(video, "shorts")) return windows.shortsWindowHours;
+  if (isVideoOfFormat(video, "longform")) return windows.longformWindowHours;
+  return null;
 }
 
 /**
