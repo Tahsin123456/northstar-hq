@@ -33,6 +33,7 @@ import {
   blankBonusNote,
   explainBlankBonus,
   missingRuleSentence,
+  noNicheLinesSentence,
   unrecordedRuleSentence,
 } from "@/lib/payroll/earnings-copy";
 import { formatMoneyTrimmed } from "@/lib/finance/money";
@@ -479,7 +480,37 @@ function EarningsView({ earnings }: { earnings: MyEarningsDTO }) {
                     // other and must not describe the same zero differently.
                     earnings.noMeasurableNiche
                     ? blankBonusNote(earnings.byNiche)
-                    : "no hits yet"
+                    : // PAYMENT, NOT COUNTING — the zero beside it is a bonus of
+                      // zero, and that is all this figure proves. `hitCount` is
+                      // the number of hits that were PAID: the engine writes no
+                      // `PayrollHit` for a hit in a niche with no price, exactly
+                      // so a zero-value row cannot enter the paid ledger. So the
+                      // owner's own case reaches this line as a zero for somebody
+                      // who HAD a hit, and the words "no hits" told him he did
+                      // not — contradicting the page's own definition of the word
+                      // a few cards lower, which is about reaching a threshold
+                      // inside a window and says nothing about payment, and
+                      // contradicting the notice directly beneath this card,
+                      // which says a Short of his may well have done exactly
+                      // that.
+                      //
+                      // "no hit bonus" is true in every case that reaches here,
+                      // on either basis, and needs no data the record lacks.
+                      //
+                      // "yet" only while the number can still change — the rule
+                      // `NicheHitLine` already follows three rows lower, and it
+                      // was missing here. On a settled month it promises a bonus
+                      // that is never coming, and this is the note directly under
+                      // the total, which is where somebody stops reading.
+                      earnings.basis === "estimate"
+                      ? "no hit bonus yet"
+                      : // Pointed at the paragraph that answers it rather than
+                        // left for the reader to find. `unpaidNicheCount` is the
+                        // count of those very notices, so the row cannot promise
+                        // an explanation that is not there.
+                        earnings.unpaidNicheCount > 0
+                        ? "no hit bonus — see below"
+                        : "no hit bonus"
               }
             />
 
@@ -890,9 +921,21 @@ function HitsCard({ earnings }: { earnings: MyEarningsDTO }) {
         </div>
 
         {earnings.byNiche.length === 0 ? (
+          /*
+            THE FALSE SENTENCE THAT USED TO LIVE HERE. This block hardcoded "You
+            are not on any niche yet" for any empty breakdown — and on a settled
+            month the breakdown is rebuilt from stored hit rows, which the engine
+            never writes for a hit it could not price. So the one person who most
+            needed an explanation, somebody who had won a hit in an unpriced
+            niche, was told the opposite of the reason and sent to fix an
+            assignment that was never wrong.
+
+            `assignedNicheCount` is what tells "no niche assigned" apart from
+            "no hit was paid". The words are `earnings-copy.ts`'s, like every
+            other sentence on this page, so they can be pinned by a test.
+          */
           <p className="rounded-lg border border-border bg-surface-sunken px-3.5 py-3 text-[13px] leading-relaxed text-muted-foreground">
-            You are not on any niche yet, so there is nothing to count hits in.
-            An administrator adds you to one on your employee page.
+            {noNicheLinesSentence(earnings.assignedNicheCount, earnings.basis)}
           </p>
         ) : (
           <div className="flex flex-col gap-px">

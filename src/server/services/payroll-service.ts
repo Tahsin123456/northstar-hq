@@ -22,12 +22,17 @@ import {
   previousPeriod,
   type NichePayrollGap,
   type PayrollCalculation,
+  type PayrollNiche,
   type PayrollPeriodWindow,
   type QualifyingHit,
   type SkippedNiche,
   type UnresolvedShorts,
 } from "@/lib/payroll/payroll-engine";
-import { loadPayrollInputs } from "./payroll-data";
+import {
+  settledGapSentence,
+  type EarningsNicheGapSource,
+} from "@/lib/payroll/earnings-copy";
+import { loadAssignedNiches, loadPayrollInputs } from "./payroll-data";
 import { getOrgSettings, getScope } from "./user-service";
 
 /**
@@ -786,6 +791,56 @@ export interface MyEarningsDTO {
   readonly hits: readonly PayrollHitDTO[];
 
   /**
+   * How many niches this person is on RIGHT NOW. Their own, and only a count.
+   *
+   * WHY A COUNT AND NOT A DERIVATION FROM `byNiche`. On a finalized month
+   * `byNiche` is rebuilt from stored `PayrollHit` rows, and the engine writes
+   * no hit row for a hit it could not price — so somebody on one unpriced niche
+   * arrives with an EMPTY breakdown and the card rendered "You are not on any
+   * niche yet, so there is nothing to count hits in. An administrator adds you
+   * to one on your employee page." He was on a niche. He had won a hit. The
+   * page told him the opposite of the reason he was owed an explanation and
+   * sent him to fix a field that was never wrong.
+   *
+   * An empty breakdown means "no hit was PAID", which is a different claim from
+   * "no niche is assigned", and nothing on the DTO could tell them apart. This
+   * is the field that does — see `noNicheLinesSentence`.
+   *
+   * A count, deliberately: no names, no rules, no rates. The names of the
+   * niches that are missing a setting reach the reader through `notices`, which
+   * is scoped to their own assignment.
+   */
+  readonly assignedNicheCount: number;
+
+  /**
+   * How many of the notices below are niche-gap disclosures. Finalized only.
+   *
+   * WHY THE ROW UNDER THE TOTAL NEEDS THIS. `hitCount` is the count of hits
+   * that were PAID — the engine writes no `PayrollHit` for a hit it could not
+   * price — so the owner's own case arrives here as `hitCount: 0` for somebody
+   * who had a hit. The note beside "Extra money from hits" used to render the
+   * bare word "no hits" off that zero, which is an affirmative claim the record
+   * cannot support: by this page's own definition three cards lower ("a Short
+   * that reached the view count its niche counts as a win, within that niche's
+   * window") he HAD one. It also contradicted the notice directly beneath it.
+   *
+   * The truthful claim is about payment, and the note says that now. This count
+   * is what lets it also point at the paragraph that explains the zero, rather
+   * than leaving the reader to notice it. It is `settledNicheGaps`' own length —
+   * already computed to build the notices, needing nothing durable and no
+   * second derivation that could disagree with them.
+   *
+   * A COUNT OF THEIR OWN NICHES. No names, no rules, no rates; the names reach
+   * the reader through `notices`, which is scoped to their own assignment.
+   *
+   * ZERO ON THE ESTIMATE PATH, and not by omission: a live month has
+   * `skippedNiches`, `noMeasurableNiche` and per-line `ruleMissing` to say the
+   * same thing in more detail, and a second count beside them would be one more
+   * way for two parts of one screen to disagree.
+   */
+  readonly unpaidNicheCount: number;
+
+  /**
    * Their own Shorts that could not be counted, and the niches responsible.
    *
    * Empty on a finalized record: that figure is a document, and what today's
@@ -947,12 +1002,25 @@ export async function getMyEarnings(options: {
       // The rule each of these hits was judged under, recovered for display.
       // The figures themselves are read verbatim and are not touched by it —
       // see `loadHitWindowsForRecords`.
-      const [windows, rates] = await Promise.all([
+      const [windows, rates, assignedNiches] = await Promise.all([
         loadHitWindowsForRecords(organizationId, [stored]),
         // And the rate each line was paid at, recovered under the same rule and
         // the same guard — see `recoverNicheRates`. The figures themselves are
         // untouched by either.
         recoverNicheRates(organizationId, [stored]),
+        // THE NICHES THIS PERSON IS ON, WHICH THE STORED RECORD CANNOT SAY.
+        //
+        // A record is the list of hits that PAID. The engine deliberately never
+        // writes a hit row for one it could not price — a zero-value row would
+        // enter the paid ledger and make that Short unpayable forever — so a
+        // niche with no price leaves no trace on the document at all, and until
+        // now the screen fell through to "you are not on any niche yet".
+        //
+        // Their own assignment, by the session's user id. Nothing here changes
+        // a figure: it decides which sentences the page may say. See
+        // `loadAssignedNiches` for what may be claimed from a read of today's
+        // configuration about a month that is already settled.
+        loadAssignedNiches(organizationId, userId),
       ]);
       return fromStoredRecord(
         window,
@@ -961,6 +1029,7 @@ export async function getMyEarnings(options: {
         stored,
         windows,
         rates.get(stored) ?? uniformRates(stored.hitPaymentMinor),
+        assignedNiches,
       );
     }
 
@@ -1079,6 +1148,13 @@ async function calculateMyEarnings(
     totalMinor: calculation.totalMinor,
     currency: calculation.currency,
     byNiche,
+    // `byNiche` rather than `employee.nicheIds`, because a niche deleted since
+    // the assignment was made has no name and no rule and is dropped from the
+    // lines — counting it would promise the reader a row that is not there.
+    assignedNicheCount: byNiche.length,
+    // A live month says this through `skippedNiches`, `noMeasurableNiche` and
+    // each line's own `ruleMissing`. See `MyEarningsDTO.unpaidNicheCount`.
+    unpaidNicheCount: 0,
     hits: calculation.hits.map((hit) => ({
       videoId: hit.videoId,
       videoTitle: hit.title,
@@ -1382,6 +1458,74 @@ function formatCount(count: number, singular: string, plural: string): string {
   return `${count.toLocaleString("en-US")} ${count === 1 ? singular : plural}`;
 }
 
+/**
+ * Niches this person is on that cannot pay a hit, on a month already settled.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * THE ONE GUARD THAT MAKES THIS HONEST
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A niche that CONTRIBUTED A LINE to the stored record is excluded, whatever it
+ * is missing today. A line exists only because a hit in that niche was paid,
+ * which means the niche had all three settings when the month was frozen — so
+ * a gap in it now is a fact about today and has nothing to say about this
+ * payslip. Without the guard, an admin who removes GTA's price in November
+ * would put "GTA has no hit payment set" onto every settled payslip back to
+ * January, next to lines showing GTA hits that were paid in full.
+ *
+ * With it, the niches that survive are exactly the ones that paid this person
+ * nothing here AND cannot pay a hit now — which is the population the sentence
+ * describes and the only one it claims anything about. It still cannot claim a
+ * COUNT of their Shorts: nothing durable stores that, and re-deriving it would
+ * be the retroactive recalculation this service refuses. See
+ * `settledGapSentence` for the line between what may and may not be said.
+ *
+ * A WATCHLIST NICHE IS NOT A GAP and is absent from this list. Nobody is paid
+ * for one and there is no setting to fill in, so reporting it would send
+ * somebody after a number that should not exist.
+ */
+function settledNicheGaps(
+  assignedNiches: readonly PayrollNiche[],
+  paidLines: readonly MyEarningsNicheLineDTO[],
+): { readonly nicheName: string; readonly gap: NichePayrollGap; readonly line: EarningsNicheGapSource }[] {
+  const paidNicheIds = new Set(
+    paidLines.map((line) => line.nicheId).filter((id): id is string => id !== null),
+  );
+
+  const gaps: {
+    nicheName: string;
+    gap: NichePayrollGap;
+    line: EarningsNicheGapSource;
+  }[] = [];
+
+  for (const niche of assignedNiches) {
+    if (niche.kind === "watchlist") continue;
+    if (paidNicheIds.has(niche.id)) continue;
+
+    // The same two tests `buildAssignedNicheLines` runs on the estimate path,
+    // through the same function, so one niche cannot be described as missing a
+    // window on one screen and a price on the other.
+    const missingRule = missingHitRuleHalf(niche);
+    const missingPayment = niche.hitPaymentMinor === null || niche.hitPaymentMinor <= 0;
+    if (missingRule === null && !missingPayment) continue;
+
+    gaps.push({
+      nicheName: niche.name,
+      gap: { rule: missingRule, payment: missingPayment },
+      line: {
+        nicheName: niche.name,
+        thresholdApplied: niche.hitThreshold,
+        windowHoursApplied: niche.hitWindowHours,
+        thresholdSource: "unconfigured",
+        ruleMissing: { rule: missingRule, payment: missingPayment },
+      },
+    });
+  }
+
+  // Stable by name. These sentences are read one after another and a list that
+  // reshuffles between requests reads as though it changed.
+  return gaps.sort((a, b) => a.nicheName.localeCompare(b.nicheName));
+}
+
 /** A finalized record, exactly as it was written. */
 function fromStoredRecord(
   window: EarningsWindow,
@@ -1390,15 +1534,42 @@ function fromStoredRecord(
   record: StoredRecord,
   windows: ReadonlyMap<string, StoredHitWindow>,
   rates: RecoveredRates,
+  /**
+   * The niches this person is on today. Read for its SENTENCES, never for a
+   * figure — every amount below still comes verbatim off the stored record.
+   */
+  assignedNiches: readonly PayrollNiche[],
 ): MyEarningsDTO {
   // `toRecordDTO` is the same mapper the admin screens use — including the
   // per-niche regrouping — so a payslip and this screen cannot disagree about
   // a figure that is, by then, a fact.
   const dto = toRecordDTO(record, windows, rates);
+  const byNiche = toFinalizedNicheLines(dto.byNiche);
 
   const notices: string[] = [
     `${window.label} is finalized. These are the figures recorded at the time and they do not change, even as views keep climbing.`,
   ];
+
+  // THE SENTENCE THAT WAS MISSING, AND THE REASON THIS WORK EXISTS.
+  //
+  // A hit in a niche with no price earns nothing. That is correct — the engine
+  // refuses to invent a rate — and it was said to admins on four screens and to
+  // nobody else. The person it actually happened to saw their base salary, no
+  // bonus, and not one word about why, on the one screen built to answer that
+  // question. From their side the honest reading is "I was shorted".
+  //
+  // Placed second, directly under the "these figures are final" line, because
+  // together they are the whole answer: this is what you were paid, and this is
+  // why it is not more.
+  // Computed ONCE and used twice: these sentences, and the count the row under
+  // the total reads to decide whether to point at them. A second call, or a
+  // second derivation of "did anything go unpaid", is a second chance for the
+  // headline and the paragraph beneath it to disagree.
+  const gaps = settledNicheGaps(assignedNiches, byNiche);
+  for (const { line, gap } of gaps) {
+    notices.push(settledGapSentence(line, gap, window.label));
+  }
+
   if (dto.paymentStatus === "paid") {
     notices.push("This period has been marked paid.");
   }
@@ -1425,8 +1596,16 @@ function fromStoredRecord(
     adjustmentReason: dto.adjustmentReason,
     totalMinor: dto.totalMinor,
     currency: dto.currency,
-    byNiche: toFinalizedNicheLines(dto.byNiche),
+    byNiche,
     hits: dto.hits,
+    // Their own assignment, and the only reason it is on a settled DTO: an
+    // empty `byNiche` means "no hit was paid", and without this the page could
+    // not tell that apart from "no niche is assigned" — which is what it used
+    // to guess, wrongly. See `MyEarningsDTO.assignedNicheCount`.
+    assignedNicheCount: assignedNiches.length,
+    // The notices pushed above, counted — never re-derived. See
+    // `MyEarningsDTO.unpaidNicheCount`.
+    unpaidNicheCount: gaps.length,
     // All three empty, and not by omission. A frozen record is what was owed;
     // what today's niche configuration would skip, and what is still waiting on
     // a window, are facts about today, and attaching them to a settled figure
@@ -1471,6 +1650,11 @@ async function emptyEarnings(
     currency: settings.baseCurrency,
     byNiche: [],
     hits: [],
+    // Nobody on payroll, or no line in a frozen run. Either way this screen has
+    // no assignment to describe, and the notice above already says which.
+    assignedNicheCount: 0,
+    // No assignment, so no niche of theirs to disclose a gap in.
+    unpaidNicheCount: 0,
     // Nobody on payroll, or no line in a frozen run. Either way there was no
     // bonus to lose to a half-written rule or an open window, and the notice
     // already says which.
@@ -1923,6 +2107,14 @@ export async function finalizePeriod(
 
   const period = periodForMonth(year, month);
 
+  // `unpaidNicheGaps` IS DROPPED HERE, KNOWINGLY. This freezes a month; it does
+  // not announce one. The admin's send is a separate, deliberate action in a
+  // later request — broadcasting every colleague's pay as a side effect of
+  // pressing "finalize" would be a worse surprise than the one this costs — and
+  // by then the fact is gone, because nothing stores it. The consequence is
+  // written out in full on `EmployeeNicheGap`: an admin-initiated Telegram
+  // message carries no gap lines, first send or re-send. Anybody tempted to
+  // close that here should read the paragraph before reaching for the engine.
   await finalizePeriodForOrganization({
     organizationId,
     period,
@@ -1935,12 +2127,85 @@ export async function finalizePeriod(
   return getPeriodForOrganization(organizationId, period);
 }
 
+/**
+ * One person, one niche that earned them nothing, and which setting is why.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS LEAVES THE FINALIZATION AT ALL
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The engine computes this per employee — `PayrollCalculation.skippedNiches` is
+ * that person's niches, that person's Shorts — and then it is discarded.
+ * `writeRecords` stores a `PayrollRecord` and its `PayrollHit` rows and nothing
+ * else, `PayrollRecord` has no column for it, and the schema is not ours to
+ * change. So by the time anything reads the period back the fact is gone: the
+ * frozen branch of `buildPeriodDTO` hardcodes `skippedNiches: []`, and BOTH
+ * Telegram entry points refuse to send anything but a finalized period. The
+ * message was therefore built, on every send that has ever happened, from a DTO
+ * in which this was structurally empty.
+ *
+ * Carrying it out of the run is the only route that does not need a column and
+ * does not re-derive a settled month from today's configuration. It is handed
+ * straight to `sendPayrollNotification` by the caller that does both.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * EXACTLY ONE SEND CARRIES THIS, AND IT IS NOT THE ADMIN'S
+ * ─────────────────────────────────────────────────────────────────────────────
+ * `src/app/api/cron/payroll/route.ts` is the only caller in the codebase that
+ * holds a run and a send in one request, so it is the only send whose message
+ * mentions a gap. Every admin-initiated send goes through
+ * `POST /api/admin/payroll/notify` → `sendPayrollNotificationForMonth`, which
+ * resolves a month to a row and has no run to take this from — so it passes
+ * none, and `options.unpaidNicheGaps ?? []` renders a message with no gap lines.
+ *
+ * THAT INCLUDES AN ADMIN'S FIRST SEND, not merely a re-send. Finalizing and
+ * announcing are two separate admin actions in two separate requests:
+ * `finalizePeriod` runs the engine and returns a `PayrollPeriodDTO`, the fact
+ * dies with the request, and the notify call that follows minutes later starts
+ * from a frozen period in which it is structurally absent. An organization that
+ * finalizes by hand therefore never sees a gap line in Telegram at all. Saying
+ * "a re-send carries no gap lines" understates it and the sentence was wrong.
+ *
+ * WHY IT IS LEFT THAT WAY. The two honest alternatives both cost more than the
+ * silence: putting the fact somewhere durable means a schema change, and
+ * re-deriving it at send time means running the engine over TODAY's niches and
+ * announcing the result as though it described the month that was frozen —
+ * which is the retroactive recalculation this service refuses everywhere else.
+ * A `[]` here always means "this call has nothing to add", never "nothing was
+ * skipped", and nothing downstream may read it as the second.
+ *
+ * WHAT THE ADMIN STILL HAS. The gap is not hidden from them — `skippedNiches`
+ * reaches the payroll screen, the history screen and the finalize dialog before
+ * they ever press send. What is missing is only its appearance in the message
+ * the team's chat receives, which is the employee-facing half of the fix.
+ *
+ * COUNTS AND NAMES, NEVER MONEY — the rule the whole payroll audit family
+ * follows, and the one the engine forces here anyway: an unpriced hit has no
+ * price, so there is no amount to carry even if this wanted to.
+ */
+export interface EmployeeNicheGap {
+  readonly userId: string;
+  readonly nicheName: string;
+  /** Which of the niche's three settings were absent AT THE RUN. */
+  readonly missing: NichePayrollGap;
+  /** Distinct Shorts of this person's the gap cost. See `SkippedNiche`. */
+  readonly shortCount: number;
+}
+
 export interface OrganizationFinalizeResult {
   readonly periodId: string;
   /** True when the period was already frozen and this call changed nothing. */
   readonly alreadyFinalized: boolean;
   /** Headcount on the run. Never an amount. */
   readonly employeeCount: number;
+  /**
+   * Per-employee niches that paid nothing, as they were at the moment of the
+   * run. Empty on an already-finalized period — see `EmployeeNicheGap`.
+   *
+   * PERISHABLE. Nothing stores it, so it is only worth anything to a caller
+   * that sends in the same request. The scheduled job is the only one that
+   * does; `finalizePeriod` deliberately drops it, having nowhere to put it.
+   */
+  readonly unpaidNicheGaps: readonly EmployeeNicheGap[];
 }
 
 /**
@@ -1979,7 +2244,11 @@ export async function finalizePeriodForOrganization(options: {
     const employeeCount = await prisma.payrollRecord.count({
       where: { periodId: existing.id },
     });
-    return { periodId: existing.id, alreadyFinalized: true, employeeCount };
+    // No run happened, so there is no report from one. Empty here says "this
+    // call has nothing to add", never "nothing was skipped" — the difference
+    // matters, because inventing the second by re-running the engine over
+    // today's niches is exactly what this branch exists to refuse.
+    return { periodId: existing.id, alreadyFinalized: true, employeeCount, unpaidNicheGaps: [] };
   }
 
   if (Date.now() < period.endsAtMs && !options.force) {
@@ -2120,7 +2389,25 @@ export async function finalizePeriodForOrganization(options: {
     },
   );
 
-  return { periodId, alreadyFinalized: false, employeeCount: run.calculations.length };
+  return {
+    periodId,
+    alreadyFinalized: false,
+    employeeCount: run.calculations.length,
+    // Flattened from the calculations rather than from `run.skippedNiches`, and
+    // the difference is load-bearing. The run-level list is computed over the
+    // UNION of every bonus-eligible niche and carries no identity, so it cannot
+    // say whose Shorts these were; the per-employee lists were each computed
+    // against one person's own assignments and their own hits, which is the
+    // only scope a line under somebody's name may claim.
+    unpaidNicheGaps: run.calculations.flatMap((calculation) =>
+      calculation.skippedNiches.map((skipped) => ({
+        userId: calculation.userId,
+        nicheName: skipped.nicheName,
+        missing: skipped.missing,
+        shortCount: skipped.shortCount,
+      })),
+    ),
+  };
 }
 
 /**

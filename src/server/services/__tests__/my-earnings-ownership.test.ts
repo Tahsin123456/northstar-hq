@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => ({
     grants: [] as string[],
   },
   loadPayrollInputs: vi.fn(),
+  loadAssignedNiches: vi.fn(),
   findPeriod: vi.fn(),
   findRecord: vi.fn(),
 }));
@@ -90,7 +91,13 @@ vi.mock("../user-service", () => ({
   getOrgSettings: async () => ORG_SETTINGS,
 }));
 
-vi.mock("../payroll-data", () => ({ loadPayrollInputs: mocks.loadPayrollInputs }));
+vi.mock("../payroll-data", () => ({
+  loadPayrollInputs: mocks.loadPayrollInputs,
+  // The finalized path reads the caller's own niche assignment to decide which
+  // sentences it may say about a settled month — it never touches a figure. The
+  // disclosure it drives has its own file: `earnings-gap-disclosure.test.ts`.
+  loadAssignedNiches: mocks.loadAssignedNiches,
+}));
 
 vi.mock("@/server/audit/audit-service", () => ({ recordAudit: vi.fn() }));
 
@@ -178,6 +185,7 @@ beforeEach(() => {
   mocks.actor.grants = [];
   mocks.findPeriod.mockResolvedValue(null);
   mocks.findRecord.mockResolvedValue(null);
+  mocks.loadAssignedNiches.mockResolvedValue([]);
   mocks.loadPayrollInputs.mockImplementation(
     async (_org: string, _period: unknown, options: { onlyUserId?: string } = {}) =>
       inputsFor(options.onlyUserId ?? SAM),

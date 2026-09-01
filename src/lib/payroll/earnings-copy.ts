@@ -31,7 +31,16 @@
 
 import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { formatNumber } from "@/lib/format";
-import type { NichePayrollGap } from "./payroll-engine";
+import { describeNicheGap, type NichePayrollGap } from "./payroll-engine";
+
+/**
+ * Whether the figure these sentences explain can still move.
+ *
+ * Structural rather than an import of `MyEarningsDTO["basis"]`, for the reason
+ * `EarningsNicheGapSource` below is structural: a pure `lib` module does not
+ * reach into `server/services` for a type.
+ */
+export type EarningsBasis = "estimate" | "finalized";
 
 /**
  * The fields these sentences read off `MyEarningsNicheLineDTO`.
@@ -117,6 +126,126 @@ export function missingRuleSentence(
   // that still could not be paid for, so an employee told only about the rule
   // would be back a month later with the same zero.
   return `${sentence}, and nobody has said what one hit here would be worth either — so nothing in this niche can be counted, and nothing in it could be paid for. An administrator sets ${gap.rule === "both" ? "all three" : "both"}.`;
+}
+
+/**
+ * =========================================================================
+ * THE SETTLED MONTH — the sentence that was missing entirely
+ * =========================================================================
+ *
+ * WHAT WENT WRONG. `missingRuleSentence` and everything around it are reached
+ * only from the ESTIMATE path. On a FINALIZED month the earnings DTO is rebuilt
+ * from stored `PayrollHit` rows, and the engine deliberately never writes one
+ * for a hit it could not price — a zero-value row would enter the paid ledger
+ * and make that Short unpayable forever. So the niche vanished from the payslip
+ * entirely, the page fell through to its empty state, and somebody who had won
+ * a hit was told "You are not on any niche yet". Not silence: the opposite of
+ * the reason they were owed an explanation, plus a pointer to the wrong field.
+ *
+ * WHAT THIS SENTENCE MAY CLAIM, AND WHAT IT MAY NOT.
+ *
+ *   MAY — that the niche is missing a named setting, which is a fact about the
+ *         niche today and is read off the same `NichePayrollGap` the admin
+ *         screens read; that a hit in a niche with no price earns nothing,
+ *         which is the engine's rule and is not month-specific; that the month
+ *         is settled and does not move.
+ *
+ *   MAY NOT — a COUNT of the person's own Shorts, and this is the sharp one.
+ *         The engine knows that number at calculation time and nothing durable
+ *         stores it, so on a settled month it is not recoverable without
+ *         re-running the engine over today's configuration — which is the
+ *         retroactive recalculation the payroll service refuses everywhere. A
+ *         made-up "1 of your Shorts" on a payslip is a worse failure than the
+ *         silence it replaces. The conditional form carries the meaning without
+ *         the claim: any Short of yours that reached the bar earned nothing.
+ *
+ *   MAY NOT — an AMOUNT, in either direction. There is no rate; "you would have
+ *         earned X" is not derivable and inventing one would be the app
+ *         deciding a payment it has no basis for.
+ *
+ *   MAY NOT — the word "yet", or anything else that promises the figure will
+ *         change. It will not. What a setting completed today changes is a
+ *         later period, and the sentence says exactly that instead.
+ */
+export function settledGapSentence(
+  line: EarningsNicheGapSource,
+  gap: NichePayrollGap,
+  periodLabel: string,
+): string {
+  // The same phrase `estimateNotices` builds, through the same function the
+  // payroll screen and the finalize dialog use. An employee told "no hit
+  // payment" and an admin told "no hit window" about one niche cannot sort it
+  // out between them.
+  const lacks = `has no ${describeNicheGap(gap)} set`;
+
+  // The one clause every version ends on: this is a setting, not a verdict on
+  // the work, and the salary is untouched. Said on a settled month because that
+  // is the month somebody has already been paid for and counted.
+  const reassurance =
+    "It is not about your work, and your normal pay is unaffected.";
+
+  if (gap.rule === null) {
+    // A PAYMENT GAP. The niche measures perfectly — saying "nothing could be
+    // counted" here would understate what happened, because the counting is
+    // exactly what did happen and the win was real.
+    const bar =
+      line.thresholdApplied === null || line.windowHoursApplied === null
+        ? `reached what ${line.nicheName} counts as a hit`
+        : `reached ${formatNumber(line.thresholdApplied)} views within ${formatHitWindow(line.windowHoursApplied)} of going live`;
+
+    return `${line.nicheName} ${lacks}, so a hit in it earns nothing — any Short of yours in ${line.nicheName} that ${bar} while ${periodLabel} was open earned no bonus for it. ${periodLabel} is settled and its figures do not change. ${reassurance} An administrator sets what a hit in this niche is worth; setting it now counts towards later periods, not this one.`;
+  }
+
+  // A RULE GAP. Nothing was measured, so there is no win to acknowledge and the
+  // sentence must not imply one.
+  return `${line.nicheName} ${lacks}, so nothing in it can count as a hit — no Short of yours in ${line.nicheName} was measured against a hit rule while ${periodLabel} was open. ${periodLabel} is settled and its figures do not change. ${reassurance} An administrator completes the rule; once it is set, Shorts in this niche count towards later periods, not this one.`;
+}
+
+/**
+ * What the hit breakdown says when there is not one line to draw.
+ *
+ * THE FALSE SENTENCE THIS REPLACES. The card used to render one string for an
+ * empty breakdown — "You are not on any niche yet, so there is nothing to count
+ * hits in. An administrator adds you to one on your employee page." — which is
+ * true for somebody with no assignments and flatly false for everybody else who
+ * simply has no PAID hit in the period. That is a large group: anybody who
+ * missed, and — the case this whole change is about — anybody whose only hit
+ * was in a niche with no price on it, since the engine writes no hit row for
+ * one of those. Both were sent to an employee page to fix an assignment that
+ * was never wrong.
+ *
+ * The count is the caller's OWN assignment count and nothing else. No names, no
+ * rates, nobody else's anything.
+ */
+export function noNicheLinesSentence(
+  assignedNicheCount: number,
+  basis: EarningsBasis,
+): string {
+  if (assignedNicheCount === 0) {
+    return "You are not on any niche yet, so there is nothing to count hits in. An administrator adds you to one on your employee page.";
+  }
+
+  // TWO DIFFERENCES BETWEEN THE BRANCHES, AND BOTH MATTER.
+  //
+  // "yet" only while the number can still change — the rule the rest of this
+  // page already follows. On a settled month it would promise a hit that is
+  // never coming.
+  //
+  // COUNTED vs PAID. On a settled month the only thing the record proves is
+  // that no hit was PAID: an empty breakdown is rebuilt from stored `PayrollHit`
+  // rows and the engine writes none for a hit it could not price. Whether one
+  // was COUNTED is precisely what nothing durable stores — `settledGapSentence`
+  // refuses to claim it in either direction, and this sentence used to claim it
+  // in the negative, forty lines below a notice telling the same reader that a
+  // Short of theirs may well have reached the bar. Two sentences on one screen
+  // that cannot both be true is the guessing this whole change exists to end.
+  //
+  // On a live month "counted" is right and is not a claim about the past: the
+  // estimate recalculates on every read, so a hit that has not been counted yet
+  // is exactly what the reader is looking at.
+  return basis === "estimate"
+    ? "No hit has been counted for you in this period yet, so there is nothing to break down here. Anything above explains why."
+    : "No hit was paid to you in this period, so there is nothing to break down here. Anything above explains why.";
 }
 
 /**

@@ -23,7 +23,13 @@
  */
 
 import { formatMoney, formatMoneyTrimmed } from "@/lib/finance/money";
-import { payDateFor, type PayrollPeriodWindow } from "./payroll-engine";
+import {
+  describeNicheGap,
+  payDateFor,
+  periodLabel,
+  type NichePayrollGap,
+  type PayrollPeriodWindow,
+} from "./payroll-engine";
 
 /**
  * Telegram's hard cap on a single `sendMessage` body, in UTF-16 code units.
@@ -76,6 +82,42 @@ export interface PayrollMessageNiche {
   readonly bonusMinor: number | null;
 }
 
+/**
+ * A niche that cost this person money without appearing in their bonus.
+ *
+ * THE SILENCE THIS FIELD EXISTS TO BREAK. A hit pays only when its niche has
+ * all three of a threshold, a window and a price. Miss any one of them and the
+ * engine — correctly — pays nothing, and until now the message said nothing
+ * either: the person's block rendered name, base salary and total, three lines
+ * with nothing wrong on any of them and no mention that a Short had reached the
+ * bar and earned zero. The owner read exactly that, checked it against a hit he
+ * knew about, and could not tell whether the tool was wrong or the payment was.
+ *
+ * NO AMOUNT, EVER. An unpriced hit has no price by definition, so "would have
+ * earned X" is not derivable and must not be invented — the engine's refusal to
+ * price it is correct and this is a disclosure, not a payment. The count is the
+ * only figure here, and it is exact for the ONE NICHE it is printed against.
+ *
+ * NOT SUMMABLE ACROSS NICHES, not even within one person. A rule gap counts a
+ * Short once in every half-configured niche it is filed under, so adding two of
+ * these together can exceed the number of Shorts involved — see `SkippedNiche`.
+ * Anything that needs one figure for a person counts NICHES; see
+ * `formatEmployeeLine`, which used to get this wrong.
+ *
+ * The two gaps are counted over different populations and the wording has to
+ * keep them apart — see the engine's `SkippedNiche.shortCount`. A PAYMENT gap
+ * counts Shorts this niche judged as HITS and could not price: the question was
+ * asked and the answer was yes. A RULE gap counts Shorts published in the month
+ * that nothing could judge, so they are not hits and must never be called that.
+ */
+export interface PayrollMessageGap {
+  readonly nicheName: string;
+  /** Which of the niche's three settings are absent. See `NichePayrollGap`. */
+  readonly missing: NichePayrollGap;
+  /** Distinct Shorts of THIS person's that this gap cost. Never an amount. */
+  readonly shortCount: number;
+}
+
 export interface PayrollMessageEmployee {
   readonly name: string;
   /** Already resolved to a label ("Head of Shorts"), never a raw role id. */
@@ -94,6 +136,25 @@ export interface PayrollMessageEmployee {
   readonly totalMinor: number;
   readonly currency: string;
   readonly byNiche: readonly PayrollMessageNiche[];
+  /**
+   * Niches that produced no money for this person because a setting is absent.
+   *
+   * SEPARATE FROM `byNiche` BECAUSE IT IS NOT A NICHE LINE. A `byNiche` entry
+   * is a bonus that was paid; the null-rate branch on one means "this settled
+   * record could not be broken down by niche", which is a different and
+   * unrelated claim. Folding a gap in there would make one line mean two
+   * things, and it would collide with the record's own stored total.
+   *
+   * Empty is the ordinary case and also the honest case where the fact is not
+   * available: only a send that follows the finalization it is announcing holds
+   * the per-employee gaps, because nothing durable stores them. In practice
+   * that is the scheduled monthly job alone — an admin-initiated send addresses
+   * a month rather than a run and arrives here empty, whether it is the first
+   * send or a re-send. See `EmployeeNicheGap` in the payroll service for the
+   * full account. An empty array says the message has nothing to add, never
+   * that nothing was skipped.
+   */
+  readonly unpaidNiches: readonly PayrollMessageGap[];
 }
 
 export interface PayrollMessageInput {
@@ -170,6 +231,101 @@ function header(input: PayrollMessageInput): string {
   return [`${company} — Monthly Payroll`, formatPayDate(input.period)].join("\n");
 }
 
+/**
+ * One niche that earned this person nothing, and which setting is why.
+ *
+ * TWO SHAPES, BECAUSE THE TWO GAPS STOPPED AT DIFFERENT POINTS. The payment
+ * line says "hits" and means it — those Shorts were measured against a real bar
+ * inside a real window and won. The rule line must not: nothing in that niche
+ * was ever judged, so its count is Shorts published in the month, and calling
+ * them hits would claim a verdict that was never reached.
+ *
+ * The missing setting is named through `describeNicheGap`, the engine's own
+ * composition, which is what the payroll screen, the finalize dialog and the
+ * employee's own notices already use. An owner reading "no hit payment" here
+ * and "no hit window" on the screen about the same niche would have no way to
+ * know which field to open.
+ *
+ * NO MONEY ON EITHER LINE. There is no rate — that is the whole problem — so
+ * there is no figure to state and nothing to multiply.
+ */
+function formatGapLine(gap: PayrollMessageGap): string {
+  const lacks = `no ${describeNicheGap(gap.missing)} set`;
+
+  if (gap.missing.rule === null) {
+    // A PAYMENT GAP: judged, won, unpaid.
+    //
+    // "hits:" whatever the count, matching the paid niche lines above it
+    // exactly. Those never singularise either, and a block where one line reads
+    // "GTA hit:" and the next "RDR hits:" invites the reader to look for a
+    // difference in meaning that is not there.
+    return `${gap.nicheName} hits: ${gap.shortCount} — not paid, ${lacks}`;
+  }
+
+  // A RULE GAP: never judged. Not hits, and the line does not say hits.
+  const shorts = gap.shortCount === 1 ? "Short" : "Shorts";
+  return `${gap.nicheName}: ${gap.shortCount} ${shorts} not counted, ${lacks}`;
+}
+
+/**
+ * The explanation the per-employee lines above are otherwise cryptic without.
+ *
+ * Written for the owner, who is the only reader of this chat and the only
+ * person who can close any of these gaps. It names the three settings in plain
+ * words rather than field names, says where they live, and — the part the app
+ * must not decide — hands back the question of whether to make anything up to
+ * the people listed. It also refuses to imply the month will re-pay itself: a
+ * finalized period does not move, and a price set today counts from the next
+ * one.
+ *
+ * The middle sentence is `skipped-niches-notice.tsx`'s, word for word. The
+ * admin screen and this message are two renderings of one fact and there is no
+ * version of them disagreeing that is not a bug.
+ */
+function gapNotice(input: PayrollMessageInput): string {
+  return [
+    "Some Shorts earned nothing this month.",
+    "A hit bonus needs three things from a niche: a view threshold, a window to reach it in, and what one hit is worth.",
+    "You set those under Niches.",
+    "Nobody's salary is affected — only the hit bonus.",
+    `${periodLabel(input.period)} is final either way: a setting completed now counts towards later periods, and whether to make anything up to the people above is your call.`,
+  ].join(" ");
+}
+
+/**
+ * The same fact in the few characters the summarised ladder can spare.
+ *
+ * A DISCLOSURE THAT DISAPPEARS AS THE TEAM GROWS IS THE BUG THIS WHOLE CHANGE
+ * IS ABOUT. Step 2 of `buildPayrollMessage` drops every per-niche line, which
+ * would take the gap lines with it, so the fact needs a form that survives to
+ * the floor of the message.
+ *
+ * COUNTS A NICHE, NOT A SHORT, AND THAT IS DELIBERATE. Summing `shortCount`
+ * across people would double-count a Short two colleagues share a niche and a
+ * channel on, and an inflated number in a payroll announcement is worse than a
+ * smaller true one. Distinct niche names is a figure this function can actually
+ * prove.
+ *
+ * NO FREE TEXT. `MAX_COMPANY_CHARS` bounds the header and footer so the floor
+ * of the message is arithmetic rather than an assumption; interpolating a niche
+ * name here would put an unbounded string back into it.
+ */
+function shortGapNotice(input: PayrollMessageInput): string {
+  const niches = new Set<string>();
+  for (const employee of input.employees) {
+    for (const gap of employee.unpaidNiches) niches.add(gap.nicheName);
+  }
+  const count = niches.size;
+  return `Hit bonuses went unpaid on this run: ${count} ${
+    count === 1 ? "niche is" : "niches are"
+  } missing a setting. The full breakdown is on the payroll screen.`;
+}
+
+/** True when anybody on the run had a Short a niche setting cost them. */
+function hasGaps(input: PayrollMessageInput): boolean {
+  return input.employees.some((employee) => employee.unpaidNiches.length > 0);
+}
+
 function footer(input: PayrollMessageInput): string {
   const company = clip(input.companyName, MAX_COMPANY_CHARS);
   return `Total ${company} Payroll: ${formatPayAmount(input.totalMinor, input.currency)}`;
@@ -204,6 +360,13 @@ export function formatEmployeeBlock(employee: PayrollMessageEmployee): string {
     lines.push(`${niche.nicheName} hits: ${niche.hitCount} × ${rate} = ${bonus}`);
   }
 
+  // DIRECTLY UNDER THE LINES THAT DID PAY, and above the total, because that is
+  // where the money stops adding up. A reader who gets as far as "Total" has
+  // already formed the belief this block exists to correct.
+  for (const gap of employee.unpaidNiches) {
+    lines.push(formatGapLine(gap));
+  }
+
   // Shown on its own line rather than folded into the total, for the same
   // reason the column is separate in the database: a hand-made correction
   // should be visible as one, not disguised as a computed figure.
@@ -229,7 +392,38 @@ function formatEmployeeLine(employee: PayrollMessageEmployee): string {
   const total = formatPayAmount(employee.totalMinor, employee.currency);
   const hits = employee.byNiche.reduce((sum, niche) => sum + niche.hitCount, 0);
   const hitPart = hits > 0 ? ` (${hits} hit${hits === 1 ? "" : "s"})` : "";
-  return `${name} — ${role}: ${total}${hitPart}`;
+
+  // The gap survives the loss of the per-niche detail, in the shortest form
+  // that is still true — and the figure is NICHES, not Shorts.
+  //
+  // SUMMING `shortCount` HERE WOULD DOUBLE-COUNT, AND IT IS THIS PERSON'S OWN
+  // NUMBERS THAT DO IT. The double-counting is not only across people. A rule
+  // gap is bucketed per niche by `collectSkippedNiches`, which adds the video
+  // id to EVERY assigned niche a Short is filed under that is missing a rule
+  // half — so one Short filed under two half-configured niches lands in two
+  // buckets, each with `shortCount: 1`. `SkippedNiche` says so itself: "One
+  // Short filed under two unusable niches is counted once in each, so summing
+  // `shortCount` across niches can exceed the number of Shorts involved." The
+  // sum would have printed "2 Shorts earned nothing" for one Short, which is
+  // the inflated figure `shortGapNotice` refuses for the same reason: in a
+  // payroll announcement a smaller true number beats a larger invented one.
+  //
+  // Distinct niches is the figure this line actually holds — `unpaidNiches` is
+  // one entry per niche — and it is the same unit the summarised notice counts,
+  // so the line and the paragraph under it cannot disagree.
+  //
+  // "no hit bonus from" rather than "unpaid hits": one line cannot carry both
+  // gap kinds, and a rule gap's Shorts were never judged, so calling them hits
+  // here would be the one claim the engine explicitly refuses to make. Not
+  // "niches earned nothing" either — a niche's earnings are a real and
+  // unrelated figure elsewhere in this product.
+  const unpaidNiches = employee.unpaidNiches.length;
+  const gapPart =
+    unpaidNiches > 0
+      ? ` · no hit bonus from ${unpaidNiches} niche${unpaidNiches === 1 ? "" : "s"}`
+      : "";
+
+  return `${name} — ${role}: ${total}${hitPart}${gapPart}`;
 }
 
 const EMPTY_RUN_NOTICE = "Nobody was on payroll for this period.";
@@ -251,7 +445,13 @@ export function formatPayrollMessage(input: PayrollMessageInput): string {
     input.employees.length > 0
       ? input.employees.map(formatEmployeeBlock)
       : [EMPTY_RUN_NOTICE];
-  return [header(input), ...blocks, footer(input)].join(SECTION_GAP);
+
+  // Absent entirely on a clean run, so a month with every niche configured
+  // reads exactly as it always has — and so the presence of the paragraph is
+  // itself the signal that something needs attention.
+  const notice = hasGaps(input) ? [gapNotice(input)] : [];
+
+  return [header(input), ...blocks, ...notice, footer(input)].join(SECTION_GAP);
 }
 
 /**
@@ -313,7 +513,16 @@ export function buildPayrollMessage(
   const bottom = footer(input);
   const lines = input.employees.map(formatEmployeeLine);
 
-  const summarised = [top, ...lines, bottom].join(SECTION_GAP);
+  // THE TAIL IS UNDROPPABLE, AND THE NOTICE IS PART OF IT FROM HERE DOWN.
+  //
+  // Steps 2 and 3 exist to shed detail, and a disclosure that only survives at
+  // small team sizes is the same silence this change removes, arriving later.
+  // The short form carries no free text — a niche count and a fixed sentence —
+  // so the floor of the message stays the arithmetic `MAX_COMPANY_CHARS`
+  // makes it rather than a hope about how long a niche name is.
+  const tail = hasGaps(input) ? [shortGapNotice(input), bottom] : [bottom];
+
+  const summarised = [top, ...lines, ...tail].join(SECTION_GAP);
   if (summarised.length <= limit) return summarised;
 
   // Step 3. Each candidate is measured WITH the overflow line it would need,
@@ -329,22 +538,23 @@ export function buildPayrollMessage(
       ...kept,
       lines[index],
       ...(remaining > 0 ? [formatRosterOverflow(remaining)] : []),
-      bottom,
+      ...tail,
     ].join(SECTION_GAP);
 
     if (candidate.length > limit) break;
     kept.push(lines[index]);
   }
 
-  // If not even one line fitted, this is header + overflow + total: a few
-  // hundred characters at most, because `MAX_COMPANY_CHARS` bounds the only
-  // free text in either. There is no shorter honest message, and it is far
-  // below Telegram's own limit.
+  // If not even one line fitted, this is header + overflow + notice + total: a
+  // few hundred characters at most, because `MAX_COMPANY_CHARS` bounds the only
+  // free text in the header and footer and the notice interpolates nothing but
+  // a count. There is no shorter honest message, and it is far below Telegram's
+  // own limit.
   const omitted = lines.length - kept.length;
   return [
     top,
     ...kept,
     ...(omitted > 0 ? [formatRosterOverflow(omitted)] : []),
-    bottom,
+    ...tail,
   ].join(SECTION_GAP);
 }

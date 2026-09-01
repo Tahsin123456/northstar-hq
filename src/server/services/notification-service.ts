@@ -11,6 +11,7 @@ import {
 } from "@/lib/payroll/payroll-engine";
 import {
   buildPayrollMessage,
+  type PayrollMessageGap,
   type PayrollMessageInput,
 } from "@/lib/payroll/payroll-message";
 import type {
@@ -19,7 +20,11 @@ import type {
   PayrollNotificationStatusDTO,
   TelegramStatusDTO,
 } from "@/lib/dto";
-import { getPeriodForOrganization, type PayrollPeriodDTO } from "./payroll-service";
+import {
+  getPeriodForOrganization,
+  type EmployeeNicheGap,
+  type PayrollPeriodDTO,
+} from "./payroll-service";
 import { sendMessage, sendTestMessage, telegramStatus } from "./telegram-service";
 import { getOrgSettings } from "./user-service";
 
@@ -527,12 +532,34 @@ async function recordPayrollSkip(
  * path — and for a finalized period that path returns the STORED records rather
  * than recalculating, which is what stops the message reporting a total that a
  * moving view count has since changed.
+ *
+ * `gaps` IS THE ONE THING THAT CANNOT COME FROM THE DTO, and it is not an
+ * oversight in the mapping. `PayrollPeriodDTO.skippedNiches` is run-level and
+ * is hardcoded empty for a frozen period, which every payroll message is built
+ * from; `PayrollRecordDTO` has no gap field at all because `PayrollRecord` has
+ * no column for one. So the per-employee fact has to arrive from the
+ * finalization that computed it — see `EmployeeNicheGap` — and this joins it
+ * back to the rows by user id. Empty when the caller had no run to take it
+ * from, which is an absence of information and never a claim of none.
  */
 function toMessageInput(
   companyName: string,
   period: PayrollPeriodWindow,
   dto: PayrollPeriodDTO,
+  gaps: readonly EmployeeNicheGap[],
 ): PayrollMessageInput {
+  const gapsByUserId = new Map<string, PayrollMessageGap[]>();
+  for (const gap of gaps) {
+    const bucket = gapsByUserId.get(gap.userId);
+    const entry = {
+      nicheName: gap.nicheName,
+      missing: gap.missing,
+      shortCount: gap.shortCount,
+    };
+    if (bucket) bucket.push(entry);
+    else gapsByUserId.set(gap.userId, [entry]);
+  }
+
   return {
     companyName,
     period,
@@ -557,6 +584,10 @@ function toMessageInput(
         hitPaymentMinor: line.hitPaymentMinor,
         bonusMinor: line.bonusMinor,
       })),
+      // Keyed on the record's own user id, which is the same id the engine
+      // calculated the gap against. Matching on name would put somebody else's
+      // unpaid Shorts under a colleague who happens to share one.
+      unpaidNiches: gapsByUserId.get(record.userId) ?? [],
     })),
     totalMinor: dto.totals.totalMinor,
     currency: dto.totals.currency,
@@ -577,6 +608,22 @@ export interface SendPayrollNotificationOptions {
    * admin action; the scheduled job must never set it.
    */
   readonly force?: boolean;
+  /**
+   * Per-employee niches that earned nothing, from the run this send announces.
+   *
+   * SUPPLIED BY EXACTLY ONE CALLER: the scheduled job, which finalizes and
+   * sends in one request. Nothing durable stores this, so no other caller can
+   * supply it — see `EmployeeNicheGap`. `sendPayrollNotificationForMonth`, which
+   * is every admin-initiated send, passes none: not only a re-send but the FIRST
+   * send from the UI, because finalizing and announcing are separate requests
+   * and the fact dies with the first.
+   *
+   * Absent means the message says nothing about gaps. That is the honest
+   * outcome, not a bug to be patched at the call site: the alternative is
+   * re-deriving a settled month from today's niche configuration and announcing
+   * the result as though it were what was frozen.
+   */
+  readonly unpaidNicheGaps?: readonly EmployeeNicheGap[];
   readonly request?: Request | null;
 }
 
@@ -666,7 +713,12 @@ export async function sendPayrollNotification(
     getOrgSettings(organizationId),
   ]);
 
-  const input = toMessageInput(orgSettings.companyName, period, dto);
+  const input = toMessageInput(
+    orgSettings.companyName,
+    period,
+    dto,
+    options.unpaidNicheGaps ?? [],
+  );
 
   // ONE message, one send. `buildPayrollMessage` guarantees a single body for
   // any size of team, which is what makes this line atomic: it either posted or
@@ -788,6 +840,21 @@ export async function sendPayrollNotification(
  * change, from a message that reads exactly like the real thing. Finalizing is
  * what turns an estimate into a document, and this is one of the places that
  * distinction has to be enforced rather than merely described.
+ *
+ * WHAT THIS SEND CANNOT SAY, AND WHY IT MUST NOT LEARN IT HERE
+ * No `unpaidNicheGaps` is passed, so the message carries no line about a niche
+ * that earned somebody nothing — and that is true of the FIRST send through
+ * this function as much as the tenth. It addresses a month, not a run: by the
+ * time anybody clicks, the finalization that computed the gaps is a finished
+ * request and nothing stored what it found, because `PayrollRecord` has no
+ * column for it and the schema is not ours to change.
+ *
+ * The fix that suggests itself here — load the niches and work it out — is the
+ * one thing this must not do. It would describe a frozen month using today's
+ * thresholds, windows and prices, and a message that says "3 of John's Shorts
+ * earned nothing" on the strength of a rate somebody changed last week is worse
+ * than one that says nothing. The admin can still see the gaps: they are on the
+ * payroll screen, the history screen and the finalize dialog.
  */
 export async function sendPayrollNotificationForMonth(options: {
   readonly organizationId: string;

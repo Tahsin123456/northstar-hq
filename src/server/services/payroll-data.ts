@@ -286,6 +286,79 @@ async function loadNiches(organizationId: string): Promise<PayrollNiche[]> {
 }
 
 /**
+ * The niches ONE person is on right now, with the three numbers that decide
+ * whether a hit in them can pay.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY THIS EXISTS SEPARATELY FROM `loadPayrollInputs`
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The employee's own earnings screen needs one fact about a FINALIZED month
+ * that the stored record cannot supply: whether a niche they are on is missing
+ * a setting, so a Short of theirs that reached the bar earned nothing. The
+ * engine knows it at calculation time and nothing durable stores it —
+ * `PayrollRecord` has no column for it and the schema is not ours to change.
+ *
+ * Going through `loadPayrollInputs` would have answered it and would have been
+ * the wrong instrument twice over: it loads a month of Shorts and every frozen
+ * credit to do it, which is a large read to answer a question about three
+ * columns, and running the engine over a settled month is the retroactive
+ * recalculation the payroll service refuses everywhere else. This reads the
+ * assignment and the niches and stops.
+ *
+ * WHAT THE CALLER MAY SAY WITH IT, AND WHAT IT MAY NOT. This describes the
+ * niches TODAY. It is not evidence about what was true when the month was
+ * frozen, so nothing built from it may claim a count of Shorts against a
+ * settled figure — see `settledGapSentence`, which states the niche's missing
+ * setting and says the settled month does not move.
+ *
+ * `hitPaymentMinor` IS LOADED AND MUST NOT LEAVE THE SERVER. The caller needs
+ * it only to decide whether a price exists at all; the amount is gated on
+ * `settings.manage` elsewhere and the employee DTO carries the existence of the
+ * gap, never the figure. See `niche-pay-disclosure.test.ts` for the endpoint
+ * this rule was written after.
+ *
+ * SCOPE IS BOTH HALVES. `organizationId` sits in the same `where` as `userId`,
+ * so an id from another workspace matches nothing rather than reaching across
+ * the tenancy line — the pattern `loadEmployeeMembers` follows for the same
+ * reason. Callers MUST take `userId` from the session, never from a request.
+ */
+export async function loadAssignedNiches(
+  organizationId: string,
+  userId: string,
+): Promise<PayrollNiche[]> {
+  const member = await prisma.organizationMember.findFirst({
+    where: { organizationId, userId },
+    select: {
+      niches: {
+        select: {
+          niche: {
+            select: {
+              id: true,
+              name: true,
+              kind: true,
+              hitPaymentMinor: true,
+              hitThreshold: true,
+              hitWindowHours: true,
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!member) return [];
+
+  return member.niches.map((assignment) => ({
+    ...assignment.niche,
+    // The column is a portable `String`; the engine takes the two-value union.
+    // Anything unrecognised reads as "production", exactly as `loadNiches`
+    // resolves it, so one niche cannot be a watchlist one on one screen and a
+    // production one on another.
+    kind: toNicheKind(assignment.niche.kind),
+  }));
+}
+
+/**
  * The longest window any niche here has, in hours.
  *
  * Decides how far BEFORE the period the Shorts query has to reach. A hit is

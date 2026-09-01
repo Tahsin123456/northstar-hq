@@ -121,6 +121,14 @@ async function runMonthlyPayroll(request: Request) {
         // Never forced. Re-sending a summary already delivered is a deliberate
         // admin action, not something a retry may decide to do.
         force: false,
+        // THE ONE PLACE THIS FACT EXISTS. A hit in a niche with no price earns
+        // nothing — correctly — and the engine reports which niches and how
+        // many of whose Shorts, per employee. Nothing stores it: `PayrollRecord`
+        // has no column for it, so by the time the message is built from the
+        // frozen period it is gone. These two calls are the only pair in the
+        // codebase that hold the run and the send at once, which is why the
+        // fact is handed straight across rather than looked up.
+        unpaidNicheGaps: finalized.unpaidNicheGaps,
         request,
       });
 

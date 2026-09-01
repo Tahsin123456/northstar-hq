@@ -8,6 +8,7 @@ import {
   formatPayDate,
   formatPayrollMessage,
   type PayrollMessageEmployee,
+  type PayrollMessageGap,
   type PayrollMessageInput,
 } from "@/lib/payroll/payroll-message";
 
@@ -32,6 +33,7 @@ const john: PayrollMessageEmployee = {
     { nicheName: "GTA", hitCount: 120, hitPaymentMinor: 1_000, bonusMinor: 120_000 },
     { nicheName: "RDR", hitCount: 80, hitPaymentMinor: 1_000, bonusMinor: 80_000 },
   ],
+  unpaidNiches: [],
 };
 
 const mia: PayrollMessageEmployee = {
@@ -44,6 +46,7 @@ const mia: PayrollMessageEmployee = {
   totalMinor: 270_000, // $2,700.00
   currency: "USD",
   byNiche: [{ nicheName: "GTA", hitCount: 20, hitPaymentMinor: 1_000, bonusMinor: 20_000 }],
+  unpaidNiches: [],
 };
 
 const run = (overrides: Partial<PayrollMessageInput> = {}): PayrollMessageInput => ({
@@ -330,5 +333,293 @@ describe("buildPayrollMessage", () => {
     expect(message.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
     expect(message).toContain("— Monthly Payroll");
     expect(message).toContain("Payroll: $8,700");
+  });
+});
+
+/**
+ * =========================================================================
+ * THE HIT THAT EARNED NOTHING, AND THE MESSAGE THAT NEVER MENTIONED IT
+ * =========================================================================
+ *
+ * A hit pays only when its niche carries all three of a threshold, a window and
+ * a price. Miss any one and the engine pays nothing — which is correct, and
+ * must stay correct — and until this block existed the message said nothing at
+ * all. The owner's actual August message read:
+ *
+ *   John — Editor
+ *   Base salary: $1,900
+ *   Total: $1,900
+ *
+ * Three lines with nothing wrong on any of them, about a month in which one of
+ * John's Shorts had reached the bar and been worth zero.
+ *
+ * Every assertion here is about DISCLOSURE. Not one of them may move a figure,
+ * and the two that check the totals are there to make a scope slip loud.
+ */
+describe("niches that earned nothing", () => {
+  const gta: PayrollMessageGap = {
+    nicheName: "GTA",
+    missing: { rule: null, payment: true },
+    shortCount: 1,
+  };
+  const science: PayrollMessageGap = {
+    nicheName: "Science",
+    missing: { rule: "threshold", payment: false },
+    shortCount: 3,
+  };
+
+  /** The owner's own case: base salary only, and one hit nobody priced. */
+  const shorted: PayrollMessageEmployee = {
+    name: "John",
+    roleLabel: "Editor",
+    baseSalaryMinor: 190_000,
+    hitPaymentMinor: 0,
+    adjustmentMinor: 0,
+    adjustmentReason: null,
+    totalMinor: 190_000,
+    currency: "USD",
+    byNiche: [],
+    unpaidNiches: [gta],
+  };
+
+  it("says a hit went unpaid instead of printing three innocent lines", () => {
+    expect(formatEmployeeBlock(shorted)).toBe(
+      [
+        "John — Editor",
+        "Base salary: $1,900",
+        "GTA hits: 1 — not paid, no hit payment set",
+        "Total: $1,900",
+      ].join("\n"),
+    );
+  });
+
+  /**
+   * THE SCOPE GUARD. This work discloses; it must never pay. If an edit ever
+   * lets a gap contribute to a figure, the salary or the total moves and this
+   * fails — which is why both are asserted for the same employee with and
+   * without the disclosure attached.
+   */
+  it("changes no figure whatsoever", () => {
+    const silent = formatEmployeeBlock({ ...shorted, unpaidNiches: [] });
+    const disclosed = formatEmployeeBlock(shorted);
+
+    for (const block of [silent, disclosed]) {
+      expect(block).toContain("Base salary: $1,900");
+      expect(block).toContain("Total: $1,900");
+    }
+    // And the run's own total, which no path here recomputes.
+    expect(buildPayrollMessage(run({ employees: [shorted], totalMinor: 190_000 }))).toContain(
+      "Total Northstar Studios Payroll: $1,900",
+    );
+  });
+
+  /**
+   * The two gaps stopped at different points and the words have to as well. A
+   * payment gap's Shorts were judged and WON; a rule gap's were never measured,
+   * so calling them hits would claim a verdict that was never reached.
+   */
+  it("tells the two gaps apart, and never calls an unjudged Short a hit", () => {
+    const payment = formatEmployeeBlock(shorted);
+    expect(payment).toContain("GTA hits: 1 — not paid, no hit payment set");
+
+    const rule = formatEmployeeBlock({ ...shorted, unpaidNiches: [science] });
+    expect(rule).toContain("Science: 3 Shorts not counted, no hit threshold set");
+    expect(rule).not.toMatch(/Science hits:/);
+
+    // Two different sentences, not one sentence with a swapped noun.
+    expect(payment).not.toBe(rule);
+  });
+
+  it("agrees in the singular and the plural where the grammar has one", () => {
+    // The payment line keeps "hits:" at every count, matching the paid niche
+    // lines directly above it — those never singularise either.
+    expect(
+      formatEmployeeBlock({ ...shorted, unpaidNiches: [{ ...gta, shortCount: 4 }] }),
+    ).toContain("GTA hits: 4 — not paid, no hit payment set");
+    expect(
+      formatEmployeeBlock({ ...shorted, unpaidNiches: [{ ...science, shortCount: 1 }] }),
+    ).toContain("Science: 1 Short not counted, no hit threshold set");
+  });
+
+  /**
+   * There IS no rate — that is the entire problem — so there is no figure to
+   * state. "1 × $0 = $0" would invent a price the engine deliberately refused
+   * to invent, and would read as a debt the studio does not owe.
+   */
+  it("puts no money on an unpaid line, because there is none to put", () => {
+    const gapLine =
+      formatEmployeeBlock(shorted)
+        .split("\n")
+        .find((line) => line.startsWith("GTA")) ?? "";
+    expect(gapLine).not.toContain("$");
+    expect(gapLine).not.toContain("×");
+    expect(gapLine).not.toContain("=");
+  });
+
+  it("names the missing setting the way the admin screens name it", () => {
+    // `describeNicheGap`'s vocabulary, shared with the payroll notice, the
+    // finalize dialog and the employee's own page. An owner reading "no hit
+    // payment" here and "no hit window" there about one niche has no way to
+    // know which field to open.
+    expect(formatEmployeeBlock(shorted)).toContain("no hit payment set");
+    expect(
+      formatEmployeeBlock({
+        ...shorted,
+        unpaidNiches: [{ ...science, missing: { rule: "window", payment: false } }],
+      }),
+    ).toContain("no hit window set");
+    expect(
+      formatEmployeeBlock({
+        ...shorted,
+        unpaidNiches: [{ ...science, missing: { rule: "both", payment: false } }],
+      }),
+    ).toContain("no hit threshold or window set");
+  });
+
+  it("explains the three settings once, for the run, above the total", () => {
+    const message = formatPayrollMessage(run({ employees: [shorted, mia] }));
+
+    expect(message).toContain(
+      "A hit bonus needs three things from a niche: a view threshold, a window to reach it in, and what one hit is worth.",
+    );
+    expect(message).toContain("Nobody's salary is affected — only the hit bonus.");
+    // Never a promise that the settled month will re-pay itself.
+    expect(message).toContain("August 2026 is final either way");
+
+    const explainerAt = message.indexOf("Some Shorts earned nothing this month.");
+    const totalAt = message.indexOf("Total Northstar Studios Payroll");
+    expect(explainerAt).toBeGreaterThan(-1);
+    expect(explainerAt).toBeLessThan(totalAt);
+  });
+
+  it("stays completely silent on a run where nothing was skipped", () => {
+    // The presence of the paragraph is itself the signal, so a clean month has
+    // to read exactly as it always has.
+    const clean = formatPayrollMessage(run());
+    expect(clean).not.toContain("Some Shorts earned nothing");
+    expect(clean).not.toContain("Hit bonuses went unpaid");
+  });
+
+  /**
+   * A DISCLOSURE THAT VANISHES AS THE TEAM GROWS IS THE SAME SILENCE, LATER.
+   *
+   * Step 2 of the ladder drops every per-niche line, which would take the gap
+   * lines with it. The short form carries a niche count and no free text, so it
+   * survives to the floor of the message and the floor stays arithmetic.
+   */
+  it("keeps saying it after the per-niche detail is dropped", () => {
+    const employees = Array.from({ length: 40 }, (_, index) => ({
+      ...shorted,
+      name: `Employee Number ${index + 1}`,
+      unpaidNiches: [gta, science],
+    }));
+
+    const message = buildPayrollMessage(run({ employees, totalMinor: 40 * 190_000 }));
+
+    expect(message.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    // Summarised, so the detail really is gone.
+    expect(message).not.toContain("not paid, no hit payment set");
+    // And the fact is not.
+    expect(message).toContain(
+      "Hit bonuses went unpaid on this run: 2 niches are missing a setting.",
+    );
+    expect(message).toContain("no hit bonus from 2 niches");
+  });
+
+  /**
+   * THE INFLATED NUMBER THIS LINE USED TO PRINT.
+   *
+   * A rule gap is bucketed per niche: `collectSkippedNiches` adds a Short's
+   * video id to EVERY assigned niche it is filed under that is missing a rule
+   * half, and `SkippedNiche` says outright that summing `shortCount` across
+   * niches can exceed the number of Shorts involved. One Short filed under two
+   * unconfigured niches arrives here as two gaps of one Short each, and the
+   * summarised line reported "2 Shorts earned nothing" for it.
+   *
+   * Overstating what a gap cost somebody, in the message announcing their pay,
+   * is the same category of failure as the silence the whole change is about —
+   * so the line counts the thing it can prove, and never a Short.
+   */
+  it("counts niches on the summarised line, never Shorts", () => {
+    /** The summarised line for one person carrying exactly these gaps. */
+    const lineFor = (unpaidNiches: PayrollMessageGap[]): string => {
+      const employees = Array.from({ length: 40 }, (_, index) => ({
+        ...shorted,
+        name: `Employee Number ${index + 1}`,
+        unpaidNiches,
+      }));
+      const message = buildPayrollMessage(run({ employees, totalMinor: 40 * 190_000 }));
+      // Summarised, so this really is the one-line form.
+      expect(message).not.toContain("not paid, no hit payment set");
+      expect(message).not.toContain("not counted, no hit threshold set");
+      return message.split("\n").find((line) => line.startsWith("Employee Number 1 —")) ?? "";
+    };
+
+    // ONE Short of his, filed under two niches that each lack a threshold —
+    // which is how the engine buckets it, one video id in each. Summing said
+    // two Shorts earned nothing. There was one Short.
+    const twoRuleGaps = lineFor([
+      { nicheName: "GTA", missing: { rule: "threshold", payment: false }, shortCount: 1 },
+      { nicheName: "Science", missing: { rule: "threshold", payment: false }, shortCount: 1 },
+    ]);
+    expect(twoRuleGaps).toContain("no hit bonus from 2 niches");
+
+    // The SAME two niches, four Shorts between them. The figure does not move,
+    // because it was never a count of Shorts.
+    const sameNichesMoreShorts = lineFor([
+      { nicheName: "GTA", missing: { rule: null, payment: true }, shortCount: 1 },
+      { nicheName: "Science", missing: { rule: "threshold", payment: false }, shortCount: 3 },
+    ]);
+    expect(sameNichesMoreShorts).toContain("no hit bonus from 2 niches");
+
+    // One niche is one niche, whatever it cost.
+    expect(
+      lineFor([
+        { nicheName: "GTA", missing: { rule: null, payment: true }, shortCount: 9 },
+      ]),
+    ).toContain("no hit bonus from 1 niche");
+
+    // And no version of it states a number of Shorts, which is the claim this
+    // line cannot prove from what it holds.
+    for (const line of [twoRuleGaps, sameNichesMoreShorts]) {
+      expect(line).not.toMatch(/Shorts?\b/);
+    }
+  });
+
+  it("survives even the roster being clipped, at any team size", () => {
+    for (const count of [1, 2, 40, 400, 4_000]) {
+      const employees = Array.from({ length: count }, (_, index) => ({
+        ...shorted,
+        name: `Employee Number ${index + 1}`,
+        unpaidNiches: [gta],
+      }));
+      const message = buildPayrollMessage(run({ employees, totalMinor: count * 190_000 }));
+
+      expect(message.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+      expect(message).toMatch(/GTA hits: 1|1 niche is missing a setting/);
+      // The calculated total is never recomputed from what happened to fit.
+      expect(message).toContain(formatPayAmount(count * 190_000, "USD"));
+    }
+  });
+
+  /**
+   * The floor of the message, with the notice inside it. `MAX_COMPANY_CHARS`
+   * bounds the header and the footer, and the short notice interpolates nothing
+   * but a count — so a pathological company name and 400 unpaid people still fit.
+   */
+  it("keeps the floor a floor with the notice on it", () => {
+    const employees = Array.from({ length: 400 }, (_, index) => ({
+      ...shorted,
+      name: "N".repeat(500),
+      roleLabel: "R".repeat(500),
+      unpaidNiches: [{ ...gta, nicheName: `Niche ${index}` }],
+    }));
+
+    const message = buildPayrollMessage(
+      run({ companyName: "N".repeat(50_000), employees, totalMinor: 190_000 }),
+    );
+    expect(message.length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
+    expect(message).toContain("Hit bonuses went unpaid on this run");
+    expect(message).toContain("Payroll: $1,900");
   });
 });
