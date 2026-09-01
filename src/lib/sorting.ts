@@ -1,3 +1,4 @@
+import { measuredRate } from "@/lib/analytics/hit-display";
 import type { ChannelMetrics } from "@/lib/analytics/types";
 import type { ChannelDTO } from "@/lib/dto";
 
@@ -53,7 +54,19 @@ function valueFor(row: SortableRow, key: SortKey): number | string | null {
     case "hitCount":
       return row.metrics.hits.hits;
     case "hitRate":
-      return row.metrics.hits.rate;
+      /*
+       * An evidence-limited rate sorts as NO DATA, not as zero.
+       *
+       * Its `rate` is arithmetically 0 — nothing was observed clearing its bar
+       * inside its window — so leaving it alone would sink the row to the
+       * bottom of the default descending sort, ranking a channel with five
+       * unrecorded million-view Shorts below every measured competitor on the
+       * one screen the owner opens to find it. It is unmeasured, not worst, and
+       * `sortRows` parks unmeasured rows at the end in BOTH directions, which
+       * groups it with "Not configured" and "Nothing decided yet" where it
+       * belongs.
+       */
+      return measuredRate(row.metrics.hits);
     case "consistency":
       return row.metrics.consistencyScore;
     case "lastUpdated":
@@ -69,11 +82,12 @@ function valueFor(row: SortableRow, key: SortKey): number | string | null {
  * This matters more than it sounds, and it matters more again now. A channel
  * with no Shorts this period has a `null` hit rate, not a zero — and so does a
  * channel whose Shorts are all still inside their hit windows, or all in a
- * niche nobody has configured. If nulls sorted as zero, all three would flood
- * the top of an ascending sort and read as the worst performers, when in fact
- * they are unmeasured, unfinished and unconfigured respectively. Parking them
- * at the end in either direction keeps the ranked list about channels that
- * actually have a number.
+ * niche nobody has configured — and so does a channel whose only Shorts past
+ * the bar passed it while nobody was recording. If nulls sorted as zero, all
+ * four would flood the top of an ascending sort and read as the worst
+ * performers, when in fact they are unmeasured, unfinished, unconfigured and
+ * unwitnessed respectively. Parking them at the end in either direction keeps
+ * the ranked list about channels that actually have a number.
  */
 export function sortRows<T extends SortableRow>(
   rows: readonly T[],

@@ -146,6 +146,88 @@ export const HIT_RATE_BOUNDS_EXPLANATION =
   "Every unrecorded Short did eventually pass the bar, so each one is a potential hit whose timing nobody captured. The low end counts them all as too slow; the high end counts them all as hits. The truth is somewhere between.";
 
 /**
+ * ==========================================================================
+ * WHEN THE ZERO BELONGS TO THE EVIDENCE AND NOT TO THE CHANNEL
+ * ==========================================================================
+ *
+ * The trap on the far side of the "Not configured" fix, and the reason this
+ * state exists at all.
+ *
+ * Setting the missing hit windows is the obvious repair, and on an account with
+ * no snapshot history it makes the screen WORSE rather than blank. `evaluateHit`
+ * can infer a miss from a lifetime total that never reached the bar, but it can
+ * only ever OBSERVE a hit — it needs a view count recorded inside the window to
+ * see one. So a library nobody was sampling is an evaluator that emits misses.
+ * Replayed over the real rows under a 500K/7-day rule, one channel returned 0
+ * hits, 6 misses and 5 "unknown" — and those 5 unknowns were the owner's actual
+ * hits, at 1.2M, 14.3M, 1.2M, 14.7M and 2.2M views. The screen would have
+ * printed a confident "0.0% over 6 decided".
+ *
+ * That is strictly worse than saying nothing, because it looks like a
+ * measurement. This state is the honest alternative: print the range the truth
+ * lies in, and say how many Shorts nobody was watching.
+ */
+export const EVIDENCE_LIMITED_LABEL =
+  "Hit rate: a range, not a single figure — no Short was recorded clearing its bar inside its window";
+
+export const EVIDENCE_LIMITED_EXPLANATION =
+  "No Short here was recorded clearing its niche's bar inside its hit window — but some of them did pass the bar at a time nobody was watching. A single percentage would have to guess whether those were fast or slow, so the range is shown instead: the low end counts every one of them as too slow, the high end counts every one as a hit. The range narrows as view history accumulates: turn on automatic refresh in Settings so it starts being recorded.";
+
+/**
+ * How wide the range has to be before the rate stops being a real zero.
+ *
+ * Percentage points on the UPPER bound. This is what keeps a genuine,
+ * fully-evidenced 0% intact: a channel with 100 fair misses and one unrecorded
+ * Short has an upper bound of 1%, and that IS a measured zero — the one
+ * unrecorded Short cannot rescue it and the screen should say 0.0%. A channel
+ * with 6 misses and 5 unrecorded has an upper bound of 45%, and its zero is an
+ * artefact of who was holding the camera. Five points is the line between the
+ * two, chosen low so the state is rare rather than a way of never printing a
+ * bad number.
+ *
+ * DELIBERATELY SCALE-INVARIANT — it is a ratio and it ignores judged volume,
+ * and that is the property, not an oversight. A tempting-looking amendment is
+ * to exempt heavily-decided rows: 1,530 confident misses against 374 unrecorded
+ * Shorts feels like as well-measured a zero as this account can produce, and
+ * its upper bound of 19.6 currently suppresses the 0.0%. It should. Those 374
+ * are not noise around a zero — every one of them is a Short that DID pass its
+ * bar, at a time nobody recorded, so if even a tenth of them cleared it in time
+ * the true rate is 2% and not 0%. Volume of misses cannot answer a question
+ * about the unknowns; only recording their timing can. An exemption keyed on
+ * `judged` would print the most confident zero in the product exactly where the
+ * most Shorts are unaccounted for.
+ *
+ * The zero this floor protects is protected by evidence, not by sample size: a
+ * measured 0.0% needs the unrecorded share to be small, which is the only
+ * condition under which a zero is trustworthy. That case is reachable and
+ * reached — a channel with twelve fair misses and nothing unrecorded prints
+ * 0.0% today, and `sorting.test.ts` pins it.
+ */
+export const EVIDENCE_LIMITED_MIN_UPPER_BOUND = 5;
+
+/**
+ * ==========================================================================
+ * WHEN THE DATA ITSELF IS OLD
+ * ==========================================================================
+ *
+ * The freshness pill goes amber past a day, and it is 12px of text in a row of
+ * buttons, attached to nothing in particular. On the day this bug was reported
+ * it read "Data updated 5 days ago" and nobody registered it — while the
+ * channel it was about publishes one Short a day, so a 30-day window was
+ * missing roughly six of its thirty days of uploads at the NEW end. That is an
+ * understatement of about 20%, invisible, and it reads as a channel going
+ * quiet. Past two days the page says so in a full-width sentence instead.
+ */
+export const STALE_DATA_TITLE = "These numbers are out of date";
+
+/** How stale is stale enough to interrupt the page. Two days. */
+export const STALE_DATA_THRESHOLD_MS = 48 * 60 * 60 * 1000;
+
+export function staleDataExplanation(relative: string): string {
+  return `Channels were last refreshed ${relative}. Shorts published since then are missing from every figure on this page, so the selected period really ends at the last refresh, not today. Refresh now, or turn on automatic refresh in Settings so this does not happen again.`;
+}
+
+/**
  * What the view-count control now does, said plainly.
  *
  * It used to define a hit. It cannot any more — a hit needs a window and the
@@ -157,16 +239,107 @@ export const THRESHOLD_LENS_EXPLANATION =
   "This bar highlights Shorts at or above a view count. It does NOT define a hit: a hit is a niche's threshold reached within that niche's hit window, decided per Short and stored. Moving this changes what is highlighted and sorted, and changes no hit rate on the page.";
 
 /**
- * What "Total Shorts views" means here — stated because the natural assumption
- * (that it matches YouTube Studio) is wrong, and silently differing numbers
- * destroy trust in every other figure on the page.
+ * ==========================================================================
+ * ONE NAME FOR THE VIEWS FIGURE, ON EVERY SURFACE
+ * ==========================================================================
+ *
+ * The bug report's first half: "Total Views aren't correct… vidiq says dawnstarz
+ * gained 89m views in the last day." The figure was correct; the NAME was not.
+ * It is the sum of the current lifetime view counts of Shorts UPLOADED in the
+ * selected period — two clocks in one number, and a useful measure of how
+ * recent output performed. Called "Total views" with no qualifier, in a table
+ * comparing channels, it reads as "views this channel earned", which is what
+ * Studio and VidIQ report over a whole back catalogue.
+ *
+ * It went by five different names across the app, which is how a column head
+ * came to be the only surface with no disclosure attached at all.
+ *
+ * "Upload views" rather than the longer "Views of period uploads" because the
+ * channels-table column head is 10px uppercase inside a ~100px track: the long
+ * form cannot render there, and a name that only fits on three surfaces out of
+ * five is exactly how this happened. "Upload" is the word that kills the "views
+ * the channel earned" reading; the full sentence lives in the tip, which every
+ * surface now carries.
+ */
+export const UPLOAD_VIEWS_LABEL = "Upload views";
+
+/**
+ * THE SAME QUANTITY, NAMED IN FULL WHERE THERE IS ROOM FOR IT.
+ *
+ * The short form names the COHORT — Shorts uploaded in the period — and never
+ * says the views themselves are lifetime. "Views our uploads got in the last 30
+ * days" survives it intact, and that reading is VidIQ's quantity, which is the
+ * false comparison the rename exists to break. One word fixes it and the word
+ * did not fit in a 10px uppercase column head.
+ *
+ * So the column keeps the short name and every surface with a stat label — the
+ * Overview strip, the channel KPI, the admin tile, the exported report — uses
+ * this one. Not a second definition: the same metric, the same tip, the same
+ * constants file, one of them abbreviated for a track it has to fit in. The
+ * summary card in particular used to read "Views of period uploads" and must
+ * not come out of a consistency pass saying LESS than it did before.
+ */
+export const UPLOAD_VIEWS_LABEL_LONG = "Lifetime views of period uploads";
+
+/**
+ * What "Upload views" means here — stated because the natural assumption (that
+ * it matches YouTube Studio) is wrong, and silently differing numbers destroy
+ * trust in every other figure on the page.
  */
 export const TOTAL_VIEWS_DEFINITION =
-  "Total Shorts views is the sum of the current view counts of Shorts uploaded during the selected period. It is not views earned during the period: a Short uploaded three days ago contributes all of its lifetime views, and a Short uploaded before the period contributes none. Unlike hit rate, this figure is deliberately a LIFETIME total and has no window — it describes reach, not whether the work met a bar in time.";
+  "Upload views is the sum of the current view counts of Shorts uploaded during the selected period. It is not views earned during the period: a Short uploaded three days ago contributes all of its lifetime views, and a Short uploaded before the period contributes none. Unlike hit rate, this figure is deliberately a LIFETIME total and has no window — it describes reach, not whether the work met a bar in time.";
 
-/** Why this will not match the number in YouTube Studio. */
+/**
+ * Why this will not match the number in YouTube Studio — or VidIQ, or Social
+ * Blade, which is the comparison that actually gets made. Naming only Studio
+ * left a reader holding a VidIQ tab to conclude the caveat did not apply to
+ * them, which is how a correct disclosure still fails.
+ */
 export const TOTAL_VIEWS_VS_STUDIO =
-  "YouTube Studio measures something different — views earned in the last N days across a channel's entire back catalogue, including videos uploaded years ago. The two figures answer different questions and will not agree.";
+  "YouTube Studio, VidIQ and Social Blade measure something different — views earned in the last N days across a channel's entire back catalogue, including videos uploaded years ago. The two figures answer different questions and will not agree, and neither one is wrong.";
+
+/** The whole disclosure, for any surface with room for a tooltip. */
+export const UPLOAD_VIEWS_TIP = `${TOTAL_VIEWS_DEFINITION} ${TOTAL_VIEWS_VS_STUDIO}`;
+
+/**
+ * Why the Studio-style figure is ABSENT rather than approximated.
+ *
+ * Same principle as the revenue service's four states: "we could not ask" must
+ * not be rendered as an answer. Views earned inside a window needs a view count
+ * recorded for each Short at BOTH ends of that window, and this account holds
+ * one reading per video — there is no delta to take for anybody. A views-earned
+ * column built out of current totals would be a fabrication wearing a
+ * measurement's clothes, so there is no column, and this says why instead.
+ */
+export const VIEWS_EARNED_NOT_AVAILABLE =
+  "Views earned during the period — the figure Studio and VidIQ report — is not shown here. It needs a view count recorded for every Short at both ends of the window, and there is not enough view history yet to work one out.";
+
+/**
+ * How much history exists, in a clause a non-technical reader can act on.
+ *
+ * Deliberately keyed off the raw day count rather than the readiness flag on
+ * `ViewsDefinitionDTO`. That flag is computed from the organization-wide oldest
+ * and newest capture times, so it flips true the moment a SINGLE video has
+ * accumulated eight days of readings while every other video still holds one —
+ * a false positive that would promise a number nothing can produce. A day count
+ * cannot claim more than it knows.
+ */
+export function viewHistoryNote(snapshotDays: number): string {
+  if (snapshotDays <= 0) return " No view history has been recorded on this account yet.";
+  if (snapshotDays === 1) return " There is 1 day of view history so far.";
+  return ` There are ${snapshotDays} days of view history so far.`;
+}
+
+/**
+ * The tip for the two roomy surfaces — the Overview summary card and the
+ * channel page KPI — which have space for the absent-figure disclosure as well
+ * as the definition. `null` gives the short form, for the surfaces that do not
+ * receive the dataset's history figures.
+ */
+export function uploadViewsTip(snapshotDays: number | null): string {
+  if (snapshotDays === null) return UPLOAD_VIEWS_TIP;
+  return `${UPLOAD_VIEWS_TIP} ${VIEWS_EARNED_NOT_AVAILABLE}${viewHistoryNote(snapshotDays)}`;
+}
 
 /**
  * ==========================================================================

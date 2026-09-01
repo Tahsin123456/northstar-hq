@@ -35,8 +35,8 @@ import {
 } from "@/lib/analytics/market-share";
 import {
   HIT_RATE_DEFINITION,
-  TOTAL_VIEWS_DEFINITION,
-  TOTAL_VIEWS_VS_STUDIO,
+  UPLOAD_VIEWS_LABEL_LONG,
+  UPLOAD_VIEWS_TIP,
   UNCONFIGURED_RULE_EXPLANATION,
   UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
@@ -193,13 +193,9 @@ export default function AdminOverviewPage() {
           >
             <Tile>
               <Stat
-                label="Total views"
+                label={UPLOAD_VIEWS_LABEL_LONG}
                 value={formatCompactNumber(summary.totalViews)}
-                hint={
-                  <InfoTip>
-                    {TOTAL_VIEWS_DEFINITION} {TOTAL_VIEWS_VS_STUDIO}
-                  </InfoTip>
-                }
+                hint={<InfoTip>{UPLOAD_VIEWS_TIP}</InfoTip>}
                 /*
                  * BOTH HALVES OF THIS FRACTION COME FROM THE SAME POPULATION.
                  *

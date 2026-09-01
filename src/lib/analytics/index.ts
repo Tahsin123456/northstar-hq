@@ -16,6 +16,11 @@ export * from "./stats";
 // the first time somebody edits one. Every consumer that decides whether
 // something is a hit calls `evaluateHit` rather than comparing view counts.
 export * from "./hit-rate";
+// How a hit rate should be READ, kept beside the rule that produces it. One
+// predicate for "is this zero a measurement or an absence?", so no two screens
+// can answer it differently about the same object — which they did, in the
+// same card group, for months.
+export * from "./hit-display";
 export * from "./filters";
 export * from "./distribution";
 export * from "./channel-metrics";

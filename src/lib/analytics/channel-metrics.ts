@@ -8,6 +8,7 @@ import {
   type HitTally,
 } from "./hit-rate";
 import { getLongformInDateRange, getShortsInDateRange } from "./filters";
+import { measuredRate } from "./hit-display";
 import {
   consistencyScore,
   mean,
@@ -149,7 +150,8 @@ function findExtremes(shorts: readonly EvaluatedShort[]): {
  *     the page it sits on.
  *
  *   THE SCORECARD — `pooled`, `averageHitRate`, `medianHitRate`,
- *     `channelsWithData`, `topChannel` — is over entries flagged
+ *     `channelsWithData`, `channelsEvidenceLimited`, `scorecardTotalShorts`,
+ *     `topChannel` — is over entries flagged
  *     `countsTowardHitRate`. A watchlist niche is full of channels nobody at
  *     Northstar is trying to be, so averaging them into "our hit rate" produces
  *     a number describing work the studio does not do: arithmetic that is
@@ -186,10 +188,33 @@ export interface PortfolioSummary {
    * from a rate over all of them, and only one of them is "how are WE doing".
    */
   readonly scorecardChannelCount: number;
-  /** Scorecard channels with at least one judged Short — what `averageHitRate` is over. */
+  /** Scorecard channels with a MEASURED rate — what `averageHitRate` is over. */
   readonly channelsWithData: number;
+  /**
+   * Scorecard channels held out of the average because their zero is an
+   * artefact of the evidence. See `HitRateSummary.evidenceLimited`.
+   *
+   * Counted rather than merely skipped, because a mean that silently drops
+   * entries is the same class of quiet claim as the zero it is dropping. The
+   * caption states the exclusion beside the figure.
+   */
+  readonly channelsEvidenceLimited: number;
   readonly totalShorts: number;
   readonly totalViews: number;
+  /**
+   * Shorts published by SCORECARD channels only — the denominator `pooled` is
+   * actually about.
+   *
+   * `totalShorts` counts every entry, watchlist included, and the two are
+   * different populations by design (see the note above). Any predicate that
+   * reads a tally against a Shorts count has to use the count from the SAME
+   * population, and the portfolio one did not: with watchlist channels
+   * publishing and studio channels quiet, `pooled` is an all-zero tally while
+   * `totalShorts` is positive, which resolves to "no hit rule set for these
+   * niches" and puts a full-width banner about broken configuration over
+   * niches that are configured perfectly.
+   */
+  readonly scorecardTotalShorts: number;
   /**
    * The SCORECARD channels' verdicts, added.
    *
@@ -218,7 +243,9 @@ export function calculatePortfolioSummary(
 ): PortfolioSummary {
   let totalShorts = 0;
   let totalViews = 0;
+  let scorecardTotalShorts = 0;
   let scorecardChannelCount = 0;
+  let channelsEvidenceLimited = 0;
   let pooledTally: HitTally = EMPTY_HIT_TALLY;
   const rates: number[] = [];
   let topChannel: PortfolioSummary["topChannel"] = null;
@@ -231,9 +258,29 @@ export function calculatePortfolioSummary(
     // And everything below describes the studio.
     if (!entry.countsTowardHitRate) continue;
     scorecardChannelCount += 1;
+    scorecardTotalShorts += entry.metrics.totalShorts;
     pooledTally = addTallies(pooledTally, entry.metrics.hits.tally);
 
-    const rate = entry.metrics.hits.rate;
+    if (entry.metrics.hits.evidenceLimited) channelsEvidenceLimited += 1;
+
+    /*
+     * `measuredRate`, NOT `.rate`.
+     *
+     * The `rate === null` skip below has always been the right instinct — an
+     * unmeasured channel must not be averaged in as a zero — and it stopped one
+     * case short. An evidence-limited channel's rate is arithmetically `0`,
+     * not null, so it walked straight past this guard and into the mean. The
+     * result was Overview's headline reading "Average hit rate 0.0%" over a
+     * table in which every row correctly read "0%–20%": the same object,
+     * contradicting itself two inches apart, on the one screen the owner opens
+     * first. Same object, same predicate, one import.
+     *
+     * It is held out of the `topChannel` contest for the same reason. "Top
+     * channel: 0.0% hit rate" is a sentence about a winner that never won
+     * anything, and the entry it names might be the strongest channel on the
+     * account or the weakest — nobody recorded which.
+     */
+    const rate = measuredRate(entry.metrics.hits);
     if (rate === null) continue;
     rates.push(rate);
 
@@ -259,8 +306,10 @@ export function calculatePortfolioSummary(
     channelCount: entries.length,
     scorecardChannelCount,
     channelsWithData: rates.length,
+    channelsEvidenceLimited,
     totalShorts,
     totalViews,
+    scorecardTotalShorts,
     pooled: calculateHitRate(pooledTally),
     averageHitRate: avg === null ? null : roundTo(avg, 2),
     medianHitRate: med === null ? null : roundTo(med, 2),

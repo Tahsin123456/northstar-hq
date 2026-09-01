@@ -36,6 +36,7 @@ import {
   NOTHING_DECIDED_SHORT,
   UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
+import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
 import {
   nicheSelection,
   scopeMarketComparison,
@@ -751,20 +752,34 @@ interface HeadlineSide {
  * Why a side has no hit rate — read off that side's own verdicts rather than
  * inferred from the missing number.
  *
- * The same three-way test `HitRateValue` makes, in the same order and in the
- * same words, because a chart and a stat disagreeing about which kind of
- * nothing this is would be the original bug wearing a different hat. Nothing
- * published, no rule to judge by, or a rule with nothing decided under it yet:
- * the first is a shrug, the second sends an admin to a settings screen and the
- * third means come back on Thursday.
+ * `resolveHitDisplayState`, NOT A SIXTH PRIVATE COPY. This function used to
+ * make its own three-way test and its docblock used to claim it was "the same
+ * three-way test `HitRateValue` makes, in the same order and in the same
+ * words" — which stopped being true the moment that component grew a fifth
+ * state, and the drift showed up exactly where the comment promised it could
+ * not. An evidence-limited pool has an arithmetic rate of `0` rather than
+ * `null`, so it never reached this function at all: the chart drew its
+ * 2%-wide sliver and labelled it 0.0%, under a comment explaining that the
+ * sliver exists to mark "a real, earned measurement".
+ *
+ * `compareToMarket` now nulls that rate at source, so the pool arrives here and
+ * gets the range as its reason. Nothing published, no rule to judge by, a rule
+ * with nothing decided under it yet, or a rule whose verdicts cannot support a
+ * figure: a shrug, a settings screen, come back on Thursday, and read the
+ * interval.
  */
 function hitRateAbsence(pool: MarketPool): string {
   const { totalShorts, hits } = pool.metrics;
-  if (totalShorts === 0) return NO_SHORTS_IN_PERIOD;
-  if (hits.judged === 0 && hits.tally.pending === 0 && hits.tally.unknown === 0) {
-    return UNCONFIGURED_RULE_SHORT;
+  switch (resolveHitDisplayState(hits, totalShorts)) {
+    case "noShorts":
+      return NO_SHORTS_IN_PERIOD;
+    case "notConfigured":
+      return UNCONFIGURED_RULE_SHORT;
+    case "evidenceLimited":
+      return `${formatPercent(hits.lowerBound, 0)}–${formatPercent(hits.upperBound, 0)} · ${hits.tally.unknown} unrecorded`;
+    default:
+      return NOTHING_DECIDED_SHORT;
   }
-  return NOTHING_DECIDED_SHORT;
 }
 
 /**
@@ -786,7 +801,9 @@ function hitRateAbsence(pool: MarketPool): string {
  *
  * A genuine 0 still draws its 2%-wide sliver, and that is the point of keeping
  * the two cases apart: zero is a real, earned measurement and deserves to be
- * visible as one.
+ * visible as one. A zero that belongs to the evidence is not one, and it no
+ * longer reaches the sliver — `compareToMarket` hands this row a `null` for
+ * that side, and `hitRateAbsence` prints the interval in the bar's place.
  */
 function HeadlineChart({ comparison }: { comparison: ReturnType<typeof compareToMarket> }) {
   const hitRate = comparison.metrics.find((m) => m.key === "hitRate");

@@ -3,12 +3,16 @@
 import * as React from "react";
 import Link from "next/link";
 import {
+  EVIDENCE_LIMITED_EXPLANATION,
+  EVIDENCE_LIMITED_LABEL,
   HIT_RATE_DEFINITION,
-  TOTAL_VIEWS_DEFINITION,
-  TOTAL_VIEWS_VS_STUDIO,
   UNCONFIGURED_RULE_EXPLANATION,
   UNCONFIGURED_RULE_SHORT,
+  UPLOAD_VIEWS_LABEL_LONG,
+  uploadViewsTip,
 } from "@/lib/analytics/constants";
+import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
+import type { ViewsDefinitionDTO } from "@/lib/dto";
 import type { PortfolioSummary } from "@/lib/analytics";
 import { calculateTrend } from "@/lib/analytics/trends";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
@@ -33,10 +37,17 @@ import { TrendIndicator } from "@/components/metrics/trend-indicator";
 export function SummaryCards({
   summary,
   previousSummary,
+  viewsDefinition,
   loading,
 }: {
   summary: PortfolioSummary;
   previousSummary?: PortfolioSummary;
+  /**
+   * How much view history exists, for the Upload views tip. `null` while the
+   * dataset is loading — the tip falls back to the definition alone rather
+   * than claiming a history figure it does not have.
+   */
+  viewsDefinition?: ViewsDefinitionDTO | null;
   loading?: boolean;
 }) {
   /*
@@ -61,12 +72,35 @@ export function SummaryCards({
    * The gap is stated rather than left to be noticed.
    */
   const watchlistExcluded = summary.channelCount - summary.scorecardChannelCount;
-  const nothingScoreable =
-    summary.totalShorts > 0 &&
-    pooled.judged === 0 &&
-    pooled.tally.pending === 0 &&
-    pooled.tally.unknown === 0;
+  /*
+   * The same predicate the cards, the table cells and the page banner use, from
+   * the analytics layer rather than a fourth private copy of it here — and read
+   * against the SCORECARD's own Shorts count.
+   *
+   * `summary.totalShorts` counts every entry in scope, watchlist included,
+   * while `pooled` is the scorecard's verdicts only. Where watchlist channels
+   * published this period and studio channels did not, the tally is all zeros
+   * against a positive count, which resolves to "notConfigured" and puts a
+   * banner about a broken hit rule over niches that are configured correctly.
+   * Two populations, one comparison — see `scorecardTotalShorts`.
+   */
+  const pooledState = resolveHitDisplayState(pooled, summary.scorecardTotalShorts);
+  const nothingScoreable = pooledState === "notConfigured";
   const ruleConfigured = !nothingScoreable;
+  /*
+   * AND THE STATE THE HEADLINE ITSELF IS IN.
+   *
+   * `ruleConfigured` is a two-way split and this tile needs the five-way one.
+   * An evidence-limited portfolio is "configured" — so the guard passed, and
+   * the loudest number in the product printed `formatPercent(averageHitRate)`
+   * as a flat 0.0% with "0 hits · 0.0% pooled over 1,530 decided" underneath,
+   * directly above a table where every row read "0%–20%". The mean itself no
+   * longer takes those channels in (`calculatePortfolioSummary` skips them);
+   * this covers the case where EVERY scorecard channel is in that state, which
+   * is precisely the state this deployment enters the moment somebody sets the
+   * missing hit windows.
+   */
+  const evidenceLimited = pooledState === "evidenceLimited";
   const trends = React.useMemo(() => {
     const prev = previousSummary;
     return {
@@ -114,7 +148,7 @@ export function SummaryCards({
             watchlistExcluded > 0
               ? `${formatNumber(summary.scorecardChannelCount)} in the hit rate · ${formatNumber(watchlistExcluded)} watchlist`
               : summary.channelsWithData < summary.channelCount
-                ? `${summary.channelsWithData} with decided Shorts this period`
+                ? `${summary.channelsWithData} with a measured hit rate`
                 : "All active this period"
           }
         />
@@ -136,12 +170,20 @@ export function SummaryCards({
 
       <div className="border-b border-border p-5 md:border-b-0">
         <Stat
-          label="Views of period uploads"
+          /* One name for this quantity on every surface, in the long form
+             because this surface has room for it.
+
+             The short form is an abbreviation for a 100px column head, not a
+             different metric, and it drops the word LIFETIME — which leaves
+             "views our uploads got in the last 30 days" intact as a reading,
+             and that reading is VidIQ's number. This card previously said
+             "Views of period uploads"; a naming pass that made it say less on
+             the exact screen in the bug report would be a regression wearing a
+             consistency badge. */
+          label={UPLOAD_VIEWS_LABEL_LONG}
           value={formatCompactNumber(summary.totalViews)}
           hint={
-            <InfoTip>
-              {TOTAL_VIEWS_DEFINITION} {TOTAL_VIEWS_VS_STUDIO}
-            </InfoTip>
+            <InfoTip>{uploadViewsTip(viewsDefinition?.snapshotDays ?? null)}</InfoTip>
           }
           caption={
             previousSummary ? (
@@ -160,17 +202,53 @@ export function SummaryCards({
           label="Average hit rate"
           emphasis="strong"
           value={
-            ruleConfigured
-              ? formatPercent(summary.averageHitRate)
-              : UNCONFIGURED_RULE_SHORT
+            !ruleConfigured ? (
+              UNCONFIGURED_RULE_SHORT
+            ) : evidenceLimited ? (
+              /* The pooled range, in the slot the 0.0% would have taken. It is
+                 the pooled interval rather than a range around the mean for the
+                 same reason the caption's figure is pooled: there is no honest
+                 interval around an average of averages, and the mean has no
+                 members left to average in this state anyway. */
+              <span aria-label={EVIDENCE_LIMITED_LABEL}>
+                {formatPercent(pooled.lowerBound, 0)}–
+                {formatPercent(pooled.upperBound, 0)}
+              </span>
+            ) : (
+              formatPercent(summary.averageHitRate)
+            )
           }
           hint={
             <InfoTip>
-              {ruleConfigured ? (
+              {!ruleConfigured ? (
+                UNCONFIGURED_RULE_EXPLANATION
+              ) : evidenceLimited ? (
+                EVIDENCE_LIMITED_EXPLANATION
+              ) : (
                 <>
                   The mean of each channel&rsquo;s own hit rate, counting only
-                  channels with at least one DECIDED Short this period.{" "}
+                  channels with a MEASURED rate this period.{" "}
                   {HIT_RATE_DEFINITION}
+                  {/*
+                    The other exclusion, stated for the same reason as the
+                    watchlist one below it. A channel whose every Short cleared
+                    its bar unwatched has no rate to average, and dropping it
+                    silently would move this figure for a reason no reader could
+                    see — the quiet version of the zero it was dropped to avoid.
+                  */}
+                  {summary.channelsEvidenceLimited > 0 ? (
+                    <>
+                      {" "}
+                      {formatNumber(summary.channelsEvidenceLimited)}{" "}
+                      {summary.channelsEvidenceLimited === 1
+                        ? "channel is"
+                        : "channels are"}{" "}
+                      also left out: nothing on them was recorded clearing its bar
+                      inside its window, so their rate is a range rather than a
+                      figure and averaging a zero in would understate the whole
+                      portfolio.
+                    </>
+                  ) : null}
                   {/*
                     Said in the tooltip rather than left implicit. A rate over 30
                     of 48 tracked channels is a different claim from a rate over
@@ -189,16 +267,27 @@ export function SummaryCards({
                     </>
                   ) : null}
                 </>
-              ) : (
-                UNCONFIGURED_RULE_EXPLANATION
               )}
             </InfoTip>
           }
           caption={
             // No trend either. A movement indicator against a metric that does
-            // not exist would be two fabrications rather than one.
+            // not exist would be two fabrications rather than one — and that
+            // applies to the evidence-limited state for exactly the same
+            // reason, so it is checked before the trend, not after it.
             !ruleConfigured ? (
               "No hit rule set for these niches"
+            ) : evidenceLimited ? (
+              /*
+                `${pooled.hits} hits` USED TO PRINT HERE, and in this state that
+                is the literal string "0 hits" beside a "0.0% pooled" — the
+                sentence from the bug report, on the tool's number one KPI, in
+                the caption of the tile whose value slot had just been fixed.
+                What replaces it is the only count in the tally that is not
+                pinned to zero by the evidence: how many Shorts cleared their
+                bar with nobody recording when.
+              */
+              `${formatNumber(pooled.tally.unknown)} passed the bar, timing not recorded · ${formatNumber(pooled.judged)} decided`
             ) : previousSummary ? (
               <TrendIndicator trend={trends.hitRate} valueFormat="percent" />
             ) : pooled.rate !== null ? (
@@ -253,7 +342,12 @@ export function SummaryCards({
               ? "Ranked by hit rate, which needs a configured hit rule"
               : summary.topChannel
                 ? `${formatPercent(summary.topChannel.hitRate)} hit rate`
-                : "No channel has Shorts this period"
+                : summary.channelsEvidenceLimited > 0
+                  ? // The contest has entrants and none of them has a rate to
+                    // enter with. Naming a "top" channel out of a field of
+                    // arithmetic zeros would crown whichever one sorted first.
+                    "No channel has a measured hit rate this period"
+                  : "No channel has Shorts this period"
           }
         />
       </div>

@@ -21,9 +21,16 @@ import {
 } from "@/components/metrics/hit-rate-value";
 import { HitRuleNotConfigured } from "@/components/metrics/hit-rule-not-configured";
 import {
+  EVIDENCE_LIMITED_EXPLANATION,
+  EVIDENCE_LIMITED_LABEL,
   NOTHING_DECIDED_EXPLANATION,
+  NOTHING_DECIDED_SHORT,
   UNCONFIGURED_RULE_EXPLANATION,
+  UPLOAD_VIEWS_LABEL_LONG,
+  uploadViewsTip,
 } from "@/lib/analytics/constants";
+import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
+import type { ViewsDefinitionDTO } from "@/lib/dto";
 
 /**
  * KPI strip for one channel.
@@ -34,20 +41,34 @@ import {
  * not overpower the main metric, and the layout enforces that rather than
  * relying on restraint.
  *
- * THE HEADLINE HAS THREE WAYS OF BEING ABSENT and they are rendered as three
- * different things, because they ask the reader for three different responses:
- * no Shorts published (nothing to do), no rule configured (an admin has a niche
- * to finish), and a rule with nothing decided under it yet (wait). The old card
- * had two of those states and used the threshold's nullability to pick between
- * them, which cannot distinguish the third at all.
+ * THE HEADLINE HAS FOUR WAYS OF NOT BEING A PERCENTAGE and they are rendered
+ * as four different things, because they ask the reader for four different
+ * responses: no Shorts published (nothing to do), no rule configured (an admin
+ * has a niche to finish), a rule with nothing decided under it yet (wait), and
+ * a rate whose zero belongs to the evidence rather than to the channel (read
+ * the range, and turn on automatic refresh). The old card had two of those
+ * states and used the threshold's nullability to pick between them, which
+ * cannot distinguish the third at all — and the fourth is what the obvious fix
+ * for the third would have created.
+ *
+ * EVERY TILE IN THIS COMPONENT OBEYS THE SAME STATE. That is the whole point of
+ * `resolveHitDisplayState` living in the analytics layer: the "Shorts that hit"
+ * tile used to sit outside the headline's guard and print a bare 0 beside it.
  */
 export function KpiCards({
   metrics,
   trendDelta,
+  viewsDefinition,
   className,
 }: {
   metrics: ChannelMetrics;
   trendDelta: number | null;
+  /**
+   * How much view history exists, for the Upload views tip. `null` while the
+   * dataset is still loading — the tip falls back to the definition alone
+   * rather than claiming a history figure it does not have.
+   */
+  viewsDefinition?: ViewsDefinitionDTO | null;
   className?: string;
 }) {
   const { hits } = metrics;
@@ -60,13 +81,16 @@ export function KpiCards({
    * would have made a niche with a perfectly good rule read "Not configured"
    * the moment somebody typed an override, and a niche with no window at all
    * read as a real 0%.
+   *
+   * RESOLVED ONCE AND SHARED WITH THE TILE BESIDE IT. These predicates used to
+   * live only around the headline, and the "Shorts that hit" tile sat outside
+   * them printing `formatNumber(hits.hits)` — so this card group could read
+   * "Hit rate: Not configured" and "Shorts that hit: 0" at the same time, from
+   * the same object. The second half is the fabrication the owner reported.
    */
-  const nothingScoreable =
-    metrics.totalShorts > 0 &&
-    hits.judged === 0 &&
-    hits.tally.pending === 0 &&
-    hits.tally.unknown === 0;
-  const nothingDecided = metrics.totalShorts > 0 && hits.judged === 0 && !nothingScoreable;
+  const state = resolveHitDisplayState(hits, metrics.totalShorts);
+  const nothingScoreable = state === "notConfigured";
+  const nothingDecided = state === "nothingDecided";
   const hasData = hits.rate !== null;
 
   return (
@@ -91,6 +115,34 @@ export function KpiCards({
                 <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
                   {UNCONFIGURED_RULE_EXPLANATION}
                 </p>
+              </>
+            ) : state === "evidenceLimited" ? (
+              /*
+               * The range, not the 0.0% the arithmetic would print.
+               *
+               * Nothing here was ever seen clearing its bar inside its window,
+               * and Shorts exist that passed the bar while nobody was
+               * recording — so the numerator is pinned to zero by the evidence
+               * rather than by the work. Same treatment as the unconfigured
+               * state above: no trend pill, because there is no figure to have
+               * moved, and no bar, because a bar at 0% contradicts the range
+               * printed above it. The exclusions still ride underneath, since
+               * the unrecorded population is the entire reason for this state.
+               */
+              <>
+                <div className="flex items-baseline gap-2.5">
+                  <span
+                    className="tnum text-[40px] font-semibold leading-none tracking-tight text-foreground"
+                    aria-label={EVIDENCE_LIMITED_LABEL}
+                  >
+                    {formatPercent(hits.lowerBound, 0)}–
+                    {formatPercent(hits.upperBound, 0)}
+                  </span>
+                </div>
+                <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
+                  {EVIDENCE_LIMITED_EXPLANATION}
+                </p>
+                <HitExclusions summary={hits} className="mt-2" />
               </>
             ) : (
               <>
@@ -165,11 +217,37 @@ export function KpiCards({
           <div className="border-b border-border p-5 sm:border-r">
             <Stat
               label="Shorts that hit"
-              value={formatNumber(hits.hits)}
+              /*
+               * THE LITERAL "0 HITS" FROM THE BUG REPORT WAS HERE.
+               *
+               * This tile printed `formatNumber(hits.hits)` unconditionally and
+               * sat outside the guard protecting the headline four inches to
+               * its left, so a channel whose niche had no hit window showed
+               * "Hit rate: Not configured" and "Shorts that hit: 0" together. A
+               * studio owner reads that 0 as "the channel failed". The truth
+               * was that the app had never asked the question.
+               *
+               * A count is only meaningful beside a denominator that exists, so
+               * it is printed in exactly one of the five states and the caption
+               * carries the reason in the other four. In the evidence-limited
+               * state the em dash is shown even though `hits.hits` is literally
+               * 0, because that 0 is the count of hits somebody OBSERVED, not
+               * the count of hits — and printing it is the exact sentence that
+               * produced this bug report.
+               */
+              value={
+                state === "measured" ? formatNumber(hits.hits) : EM_DASH
+              }
               caption={
-                hits.judged > 0
+                state === "measured"
                   ? `of ${formatNumber(hits.judged)} decided · ${formatNumber(metrics.totalShorts)} uploaded`
-                  : EM_DASH
+                  : state === "noShorts"
+                    ? "No Shorts in this period"
+                    : state === "notConfigured"
+                      ? "No hit rule set for these niches"
+                      : state === "nothingDecided"
+                        ? NOTHING_DECIDED_SHORT
+                        : `${formatNumber(hits.tally.unknown)} passed the bar, timing not recorded`
               }
               hint={
                 hits.excluded > 0 ? (
@@ -186,8 +264,15 @@ export function KpiCards({
 
           <div className="border-b border-r border-border p-5 sm:border-r-0 lg:border-r-0">
             <Stat
-              label="Total Shorts views"
+              label={UPLOAD_VIEWS_LABEL_LONG}
               value={formatCompactNumber(metrics.totalViews)}
+              /* One of the two roomy surfaces that also carries the reason the
+                 Studio-style figure is absent rather than approximated. */
+              hint={
+                <InfoTip>
+                  {uploadViewsTip(viewsDefinition?.snapshotDays ?? null)}
+                </InfoTip>
+              }
               caption={
                 metrics.viewsPerUpload !== null
                   ? `${formatCompactNumber(metrics.viewsPerUpload)} per upload`

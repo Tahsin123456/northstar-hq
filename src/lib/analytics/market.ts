@@ -1,5 +1,6 @@
 import { calculateChannelMetrics } from "./channel-metrics";
 import { getShortsInDateRange } from "./filters";
+import { measuredRate } from "./hit-display";
 import { calculateHitRate, tallyShorts } from "./hit-rate";
 import { mean, median, roundTo, sum, topFractionAverage } from "./stats";
 import type { ChannelMetrics, DateRange, JudgedVideo } from "./types";
@@ -138,8 +139,11 @@ function growth(shorts: readonly JudgedVideo[], range: DateRange): number | null
   const first = shorts.filter((s) => s.publishedAt >= range.startMs && s.publishedAt < mid);
   const second = shorts.filter((s) => s.publishedAt >= mid && s.publishedAt < range.endMs);
 
-  const a = calculateHitRate(tallyShorts(first)).rate;
-  const b = calculateHitRate(tallyShorts(second)).rate;
+  // Same rule as the rate itself: a half whose zero belongs to the evidence is
+  // not a half that moved. Subtracting an unmeasured 0 from a measured 30 would
+  // report a 30-point collapse caused entirely by nobody recording.
+  const a = measuredRate(calculateHitRate(tallyShorts(first)));
+  const b = measuredRate(calculateHitRate(tallyShorts(second)));
   if (a === null || b === null) return null;
   return roundTo(b - a, 2);
 }
@@ -193,8 +197,22 @@ export function compareToMarket(
       "hitRate",
       "Hit rate",
       "higherIsBetter",
-      ours.metrics.hits.rate,
-      market.metrics.hits.rate,
+      /*
+       * `measuredRate`, so an evidence-limited side is ABSENT from the
+       * comparison rather than present as a zero.
+       *
+       * This is the one place worth fixing rather than the two that render it.
+       * A pooled side whose Shorts all passed their bar unrecorded has a rate
+       * of arithmetic 0, and left alone it flowed into three separate lies at
+       * once: a "0.0%" cell in the metric table, a zero-length bar in the
+       * headline chart, and — worst — a `delta` and an `outperforming` verdict
+       * built on it, so the scoreboard would report the studio beating the
+       * market by however much the market happened to score. `null` is already
+       * the "this side cannot be compared" value here and every consumer
+       * already handles it: an em dash, no bar, and `outperforming: null`.
+       */
+      measuredRate(ours.metrics.hits),
+      measuredRate(market.metrics.hits),
       "percent",
       "Share of JUDGED Shorts that reached their niche's bar inside its window. Shorts still inside their window, and those nobody was recording during it, are in neither half — see the exclusions beside each side.",
     ),

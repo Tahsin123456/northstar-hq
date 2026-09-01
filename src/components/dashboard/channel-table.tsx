@@ -15,6 +15,8 @@ import {
 import { nextSortState, type SortKey, type SortState } from "@/lib/sorting";
 import {
   PERIOD_PRESET_BY_ID,
+  UPLOAD_VIEWS_LABEL,
+  UPLOAD_VIEWS_TIP,
 } from "@/lib/analytics/constants";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -47,7 +49,15 @@ const COLUMNS: Column[] = [
   { key: "name", label: "Channel", align: "left", width: "minmax(200px,2.2fr)" },
   { key: "hitRate", label: "Hit rate", align: "left", width: "minmax(118px,1.1fr)" },
   { key: "shortsUploaded", label: "Shorts", align: "right", width: "minmax(72px,0.6fr)", tip: "Shorts uploaded during the selected period. Long-form videos are excluded." },
-  { key: "totalViews", label: "Total views", align: "right", width: "minmax(92px,0.75fr)" },
+  /*
+   * THE COLUMN IN THE BUG REPORT. It was labelled "Total views" with no tip —
+   * the only numeric column here without one, while its neighbours all carried
+   * theirs — so it read as "views this channel earned", which is what YouTube
+   * Studio and VidIQ report and is a different quantity entirely. The name and
+   * the sentence both already existed elsewhere in the app; this column simply
+   * never got them.
+   */
+  { key: "totalViews", label: UPLOAD_VIEWS_LABEL, align: "right", width: "minmax(104px,0.8fr)", tip: UPLOAD_VIEWS_TIP },
   { key: "averageViews", label: "Avg views", align: "right", width: "minmax(88px,0.7fr)", hideBelow: "md" },
   { key: "medianViews", label: "Median", align: "right", width: "minmax(84px,0.7fr)", hideBelow: "lg", tip: "The typical Short. More resistant to a single viral outlier than the average." },
   { key: "bestShort", label: "Best Short", align: "right", width: "minmax(92px,0.7fr)", hideBelow: "lg" },

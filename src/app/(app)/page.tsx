@@ -6,7 +6,7 @@ import { PageContainer, PageHeader } from "@/components/layout/app-shell";
 import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
 import { ConnectYouTubePanel } from "@/components/youtube/connect-youtube-panel";
 import { ChannelTable } from "@/components/dashboard/channel-table";
-import { DataFreshness } from "@/components/dashboard/data-freshness";
+import { DataFreshness, StaleDataNotice } from "@/components/dashboard/data-freshness";
 import { PeriodSelector } from "@/components/dashboard/period-selector";
 import { SearchInput } from "@/components/dashboard/search-input";
 import { SummaryCards } from "@/components/dashboard/summary-cards";
@@ -42,6 +42,7 @@ import {
   HIT_RATE_DEFINITION,
   UNCONFIGURED_RULE_LABEL,
 } from "@/lib/analytics/constants";
+import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
 import { asksAboutOneNiche, isStudioChannel } from "@/lib/niches/niche-kind";
 import { BRAND } from "@/lib/brand";
 
@@ -55,7 +56,10 @@ import { BRAND } from "@/lib/brand";
 export default function OverviewPage() {
   const { data, isLoading, error, refetch, isFetching } = useDataset();
   const {
-    threshold,
+    // NOTE: the threshold is deliberately NOT read here any more. It is a
+    // display lens over the distribution and decides no verdict, so gating an
+    // unconfigured-rule banner on it asked the wrong question — see the banner
+    // below.
     nicheId,
     nicheName,
     niche,
@@ -119,12 +123,26 @@ export default function OverviewPage() {
   // niche can be unconfigured, so it is found by id rather than inferred.
   // Keyed off `data` rather than the `niches` fallback array, whose identity
   // changes on every render and would defeat the memo.
+  /*
+   * BOTH HALVES COUNT AS UNCONFIGURED, and the memo used to look for only one.
+   *
+   * It searched for `hitThreshold === null`. Every niche on this deployment has
+   * a threshold and no window — half a rule, which scores exactly as much as no
+   * rule at all — so the search never resolved and the banner below rendered
+   * without its "set the rule" button, leaving an admin told what was wrong and
+   * given nothing to click. The gate is also no longer `threshold === null`;
+   * see the banner itself.
+   */
   const unconfiguredNiche = React.useMemo(
     () =>
-      threshold === null && nicheId
-        ? (data?.niches.find((n) => n.id === nicheId && n.hitThreshold === null) ?? null)
+      nicheId
+        ? (data?.niches.find(
+            (n) =>
+              n.id === nicheId &&
+              (n.hitThreshold === null || n.hitWindowHours === null),
+          ) ?? null)
         : null,
-    [data, nicheId, threshold],
+    [data, nicheId],
   );
 
   const unassignedCount = React.useMemo(
@@ -181,6 +199,23 @@ export default function OverviewPage() {
   const showEmptyTracker = !isLoading && !error && !hasChannels;
   const scopeIsEmpty = hasChannels && scopedRows.length === 0;
 
+  /*
+   * Shorts in scope, and no rule reached any of them. The same predicate every
+   * card and cell on this page uses, so the banner cannot disagree with the
+   * figures it is explaining.
+   *
+   * OVER THE SCORECARD'S OWN SHORTS, not the tracker's. `pooled` is built from
+   * scorecard entries and `totalShorts` counts every entry including watchlist
+   * ones, so the pair compares two different populations: a period in which the
+   * watchlist published and the studio did not gives an all-zero tally against
+   * a positive count, and this banner — full width, above every number on the
+   * page — would announce that the niches have no hit rule when they are
+   * configured perfectly and simply had nothing to judge.
+   */
+  const nothingScoreableInScope =
+    resolveHitDisplayState(summary.pooled, summary.scorecardTotalShorts) ===
+    "notConfigured";
+
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
@@ -188,15 +223,22 @@ export default function OverviewPage() {
         description={
           !hasChannels
             ? "Track the Shorts channels you care about."
-            : summary.pooled.judged === 0 && summary.totalShorts > 0
+            : nothingScoreableInScope
               ? /*
-                 * Read off the pooled verdicts, not off the threshold control.
+                 * Read off the pooled verdicts, not off the threshold control,
+                 * and off the SAME resolved state as the banner underneath it.
                  *
                  * The headline question needs a rule to be a question, and the
                  * rule is now per niche and has two halves. When nothing in
                  * scope could be judged the page states the situation instead
                  * of pretending to ask; when things are judged, the question is
                  * the one the product actually answers, with the clock in it.
+                 *
+                 * It used to have its own `pooled.judged === 0 && totalShorts >
+                 * 0` — the same two mismatched populations as the banner, plus
+                 * the "nothing decided yet" case, so a page whose windows had
+                 * simply not shut yet was told its niches were unconfigured and
+                 * sent to fix something that was not broken.
                  */
                 `${UNCONFIGURED_RULE_LABEL} for ${nicheName ?? "these niches"}, so no hit rate is shown below.`
               : "Out of every 100 Shorts these channels publish, how many reach their niche's view threshold inside its hit window?"
@@ -260,11 +302,27 @@ export default function OverviewPage() {
             </div>
           </div>
 
+          {/*
+            THE DATA'S AGE, ABOVE EVERY NUMBER IT AFFECTS.
+
+            The pill in the header says the same thing and gets missed. Silent
+            when the tracker is current, so it stays worth reading.
+          */}
+          {data ? <StaleDataNotice oldestFetchedAt={data.oldestFetchedAt} /> : null}
+
           {/* The banner sits above the numbers rather than beside one of them:
               hit rate is the column the whole table is ranked by, so an
               unconfigured niche changes how the entire screen should be read,
-              not just one cell. */}
-          {threshold === null ? (
+              not just one cell.
+
+              GATED ON WHAT THE CARDS ARE GATED ON, not on the threshold. It
+              used to render when `threshold === null` — the threshold half of
+              the rule only — so on a deployment where every niche has a
+              threshold and no window it never appeared, even though nothing on
+              the page was scoreable and the page header eight lines above was
+              already saying so. The screen contradicted itself, and the half
+              that stayed silent was the half with the fix attached to it. */}
+          {nothingScoreableInScope ? (
             <HitRuleNotConfiguredNotice
               nicheName={nicheName}
               action={
@@ -278,6 +336,7 @@ export default function OverviewPage() {
           <SummaryCards
             summary={summary}
             previousSummary={previousSummary}
+            viewsDefinition={data?.viewsDefinition ?? null}
             loading={isLoading}
           />
 

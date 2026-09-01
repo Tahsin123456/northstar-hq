@@ -39,6 +39,7 @@ import {
   HIT_RATE_DEFINITION,
   UNCONFIGURED_RULE_LABEL,
 } from "@/lib/analytics/constants";
+import { measuredRate, resolveHitDisplayState } from "@/lib/analytics/hit-display";
 import {
   buildInheritanceTimeline,
   effectiveContentTypeIds,
@@ -245,6 +246,13 @@ export default function ChannelDetailPage({
 
   const { channel } = row;
   const metrics = analysis.metrics;
+  /*
+   * Resolved ONCE for the whole page, and read by everything on it that speaks
+   * about the hit rate — the KPI strip resolves the same value internally from
+   * the same object. Two guards over one object is how this page came to print
+   * an em dash and a "0 hit" for the same number.
+   */
+  const hitState = resolveHitDisplayState(metrics.hits, metrics.totalShorts);
 
   return (
     <PageContainer className="flex flex-col gap-6">
@@ -271,7 +279,11 @@ export default function ChannelDetailPage({
         />
       </div>
 
-      <KpiCards metrics={metrics} trendDelta={analysis.trend?.delta ?? null} />
+      <KpiCards
+        metrics={metrics}
+        trendDelta={analysis.trend?.delta ?? null}
+        viewsDefinition={data?.viewsDefinition ?? null}
+      />
 
       <div className="grid gap-4 xl:grid-cols-2">
         {/* --- Hit rate over time --- */}
@@ -302,10 +314,7 @@ export default function ChannelDetailPage({
                 which decides nothing. A channel whose niche has a rule but
                 whose Shorts are all still in flight gets the chart with gaps in
                 it, because that is a wait rather than a misconfiguration. */}
-            {metrics.totalShorts > 0 &&
-            metrics.hits.judged === 0 &&
-            metrics.hits.tally.pending === 0 &&
-            metrics.hits.tally.unknown === 0 ? (
+            {hitState === "notConfigured" ? (
               <HitRuleNotConfiguredNotice
                 nicheName={thresholdNicheName}
                 action={
@@ -319,7 +328,7 @@ export default function ChannelDetailPage({
                 <HitRateChart
                   points={analysis.series}
                   granularity={analysis.granularity}
-                  averageHitRate={metrics.hits.rate}
+                  averageHitRate={measuredRate(metrics.hits)}
                 />
                 <p className="mt-2 text-[11px] leading-relaxed text-subtle-foreground">
                   A gap means nothing was decided in that {analysis.granularity} —
@@ -375,13 +384,27 @@ export default function ChannelDetailPage({
             Shorts in this period
           </h2>
           <p className="text-[12px] text-muted-foreground">
-            {metrics.hits.judged === 0 ? (
+            {/*
+              THE SAME STATE THE KPI STRIP AT THE TOP OF THIS PAGE RESOLVES,
+              from the same object, rather than a fourth guard of its own.
+
+              This sentence used to gate on `judged === 0` alone, which is false
+              in the evidence-limited state — so a channel whose KPI card four
+              inches above correctly read "Shorts that hit: —" over a 0%–45%
+              range read "0 hit of 6 decided" down here, in success green. One
+              page, one object, two answers. The count is printed in exactly the
+              state where a count means something; the others say what is
+              actually missing.
+            */}
+            {hitState !== "measured" ? (
               <>
                 {metrics.totalShorts} Shorts ·{" "}
                 <span className="text-warning">
-                  {metrics.hits.excluded > 0
-                    ? `none decided yet · ${metrics.hits.excluded} excluded`
-                    : UNCONFIGURED_RULE_LABEL}
+                  {hitState === "evidenceLimited"
+                    ? `${metrics.hits.tally.unknown} passed the bar with the timing unrecorded · ${metrics.hits.judged} decided`
+                    : metrics.hits.excluded > 0
+                      ? `none decided yet · ${metrics.hits.excluded} excluded`
+                      : UNCONFIGURED_RULE_LABEL}
                 </span>
               </>
             ) : (

@@ -11,6 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { measuredRate } from "@/lib/analytics/hit-display";
 import type { HitRateSeriesPoint, SeriesGranularity } from "@/lib/analytics/types";
 import {
   formatAxisNumber,
@@ -59,6 +60,15 @@ export function HitRateChart({
 }: {
   points: readonly HitRateSeriesPoint[];
   granularity: SeriesGranularity;
+  /**
+   * The period rate to draw a dashed reference line at, or `null` for no line.
+   *
+   * `null` MEANS "THERE IS NO SUCH NUMBER", and callers must pass it rather
+   * than an arithmetic zero — use `measuredRate(metrics.hits)`. A dashed line
+   * labelled "avg 0%" across a chart whose points are all gaps is the same
+   * confident zero the KPI card above it now refuses to print, drawn full
+   * width instead of in 40px of type.
+   */
   averageHitRate: number | null;
   className?: string;
   height?: number;
@@ -67,7 +77,7 @@ export function HitRateChart({
 
   // Headroom above the peak so the line never touches the frame, but never
   // below 20% or a flat low series looks dramatic.
-  const maxRate = Math.max(...points.map((p) => p.hits.rate ?? 0), 0);
+  const maxRate = Math.max(...points.map((p) => measuredRate(p.hits) ?? 0), 0);
   const yMax = Math.min(100, Math.max(20, Math.ceil((maxRate * 1.25) / 10) * 10));
 
   /*
@@ -81,8 +91,16 @@ export function HitRateChart({
    * slopes downward on the right for reasons that have nothing to do with the
    * work. The tooltip distinguishes the two; the shape deliberately does not
    * pretend to know.
+   *
+   * IT NOW ALSO MEANS "THE ZERO HERE BELONGS TO THE EVIDENCE". An
+   * evidence-limited bucket has an arithmetic rate of 0, so plotting `.rate`
+   * put the line on the floor while the tooltip for that exact point said
+   * "0%–45%" — the shape contradicting its own label, which is worse than
+   * either alone because the shape is what gets read from across a room.
+   * `measuredRate` is the same expression the comparator, the mean and the
+   * report use, so the gap and the em dash are one decision.
    */
-  const data = points.map((point) => ({ ...point, value: point.hits.rate }));
+  const data = points.map((point) => ({ ...point, value: measuredRate(point.hits) }));
 
   // Axis space is derived from the labels that will actually be drawn, so a
   // wide value can never be clipped and a narrow one never wastes plot area.
@@ -212,11 +230,38 @@ function HitRateTooltip({
         </div>
       ) : (
         <div className="mt-1.5 flex flex-col gap-0.5 text-[11px]">
-          <Row label="Hit rate" value={formatPercent(point.hits.rate)} strong />
-          <Row
-            label="Hits"
-            value={formatFraction(point.hits.hits, point.hits.judged)}
-          />
+          {/*
+            "0 / 0" WAS THE OLD ANSWER HERE, and it is the same fabrication as
+            the "0 hits" on the channel card: `formatFraction` has no null path,
+            so a period where nothing was decided printed a fraction asserting
+            that nothing hit out of nothing judged. The rate row printed an em
+            dash directly above it, so the tooltip contradicted itself.
+
+            Three shapes now: nothing decided says so in one line and drops both
+            rows; an evidence-limited period shows the range in place of the
+            rate and drops the count entirely, because the observed-hit count is
+            not the hit count; anything else is a real measurement and prints
+            both, including a true 0.0% over real misses.
+          */}
+          {point.hits.judged === 0 ? (
+            <div className="leading-relaxed text-subtle-foreground">
+              Nothing decided this {periodWord}
+            </div>
+          ) : point.hits.evidenceLimited ? (
+            <Row
+              label="Hit rate"
+              value={`${formatPercent(point.hits.lowerBound, 0)}–${formatPercent(point.hits.upperBound, 0)}`}
+              strong
+            />
+          ) : (
+            <>
+              <Row label="Hit rate" value={formatPercent(point.hits.rate)} strong />
+              <Row
+                label="Hits"
+                value={formatFraction(point.hits.hits, point.hits.judged)}
+              />
+            </>
+          )}
           <Row label="Shorts published" value={formatNumber(point.totalShorts)} />
           {/* Named separately rather than summed into one "excluded", because
               a pending Short is a wait and an unrecorded one is a permanent

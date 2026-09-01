@@ -2,6 +2,8 @@
 
 import * as React from "react";
 import {
+  EVIDENCE_LIMITED_EXPLANATION,
+  EVIDENCE_LIMITED_LABEL,
   HIT_RATE_BOUNDS_EXPLANATION,
   HIT_RATE_DEFINITION,
   HIT_RATE_PENDING_EXPLANATION,
@@ -11,6 +13,7 @@ import {
 } from "@/lib/analytics/constants";
 import type { HitRateSummary } from "@/lib/analytics/hit-rate";
 import { formatHitWindow } from "@/lib/analytics/hit-rate";
+import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
 import {
   EM_DASH,
   formatCompactNumber,
@@ -44,6 +47,13 @@ import { cn } from "@/lib/utils";
  *     rule but none decided yet, and Shorts with no rule to be judged by. The
  *     old component conflated the last two into "Not configured"; the middle
  *     one did not exist before there was a clock.
+ *
+ *  1b. A FOURTH STATE PRINTS NEITHER A PERCENTAGE NOR AN EM DASH. When nothing
+ *     was ever recorded clearing its bar inside its window and Shorts exist
+ *     that passed the bar unwatched, the rate is arithmetically 0 and is not a
+ *     measurement — see `HitRateSummary.evidenceLimited`. The range takes the
+ *     headline slot instead. A real 0%, earned over Shorts that were genuinely
+ *     judged and genuinely missed, still renders as 0.0% and always must.
  *
  *  2. The fraction ("12 / 38 decided") sits directly beneath the percentage.
  *     A rate without its denominator is not interpretable — 100% from one
@@ -96,21 +106,31 @@ export function HitRateValue({
   const { rate, hits, judged, tally } = summary;
 
   /*
-   * The three distinguishable kinds of "no rate", in order of specificity.
+   * The five distinguishable things a hit rate can be saying, resolved once in
+   * `resolveHitDisplayState` rather than re-derived here.
    *
    * Nothing published is the plainest. Then: Shorts exist, and either none of
    * them has a rule to be judged by (an admin has a niche to finish
    * configuring) or they have one and none has been decided yet (a wait, not a
    * gap). Collapsing those two would send somebody to the settings screen to
-   * fix a niche that is already correct.
+   * fix a niche that is already correct. The fourth is the one added when the
+   * windows get set: verdicts exist, none is a hit, and the Shorts that DID
+   * clear the bar cleared it while nobody was recording — a zero belonging to
+   * the evidence, not to the channel.
    */
-  const hasShorts = totalShorts > 0;
-  const nothingScoreable =
-    hasShorts && judged === 0 && tally.pending === 0 && tally.unknown === 0;
-  const nothingDecided = hasShorts && judged === 0 && !nothingScoreable;
+  const state = resolveHitDisplayState(summary, totalShorts);
+  const nothingDecided = state === "nothingDecided";
+  const evidenceLimited = state === "evidenceLimited";
   const hasData = rate !== null;
 
-  if (nothingScoreable) {
+  const valueClass = {
+    sm: "text-[13px]",
+    md: "text-[15px]",
+    lg: "text-[22px]",
+    xl: "text-[32px]",
+  }[size];
+
+  if (state === "notConfigured") {
     return (
       <div className={cn("flex flex-col gap-1", className)}>
         <HitRuleNotConfigured size={size} />
@@ -123,12 +143,44 @@ export function HitRateValue({
     );
   }
 
-  const valueClass = {
-    sm: "text-[13px]",
-    md: "text-[15px]",
-    lg: "text-[22px]",
-    xl: "text-[32px]",
-  }[size];
+  if (evidenceLimited) {
+    /*
+     * THE RANGE IN THE HEADLINE SLOT, WHERE THE 0.0% WOULD HAVE BEEN.
+     *
+     * In `text-foreground` rather than the muted colour the other absent states
+     * use, because this is not an absent figure — it is a real, defensible
+     * claim about where the truth lies. What is absent is the single number.
+     *
+     * No progress bar: a bar drawn at 0% would contradict the range printed
+     * beside it, and it is the bar a scanning eye reads first. No separate
+     * `HitRateBounds` either — it would print the same interval twice.
+     *
+     * THE CAPTION IGNORES `showExclusions`. The Overview channels table passes
+     * `showExclusions={false}` so that three counts under every rate do not
+     * drown a scannable comparison, and that reasoning still holds — but
+     * hiding "5 unrecorded" under a 0% is precisely what turns this row into a
+     * lie, and this is one short line rather than the three-count block.
+     */
+    return (
+      <div className={cn("flex flex-col gap-1", className)}>
+        <span className="flex items-baseline gap-1">
+          <span
+            className={cn(
+              "tnum font-semibold leading-none tracking-tight text-foreground",
+              valueClass,
+            )}
+            aria-label={EVIDENCE_LIMITED_LABEL}
+          >
+            {formatPercent(summary.lowerBound, 0)}–{formatPercent(summary.upperBound, 0)}
+          </span>
+          <InfoTip>{EVIDENCE_LIMITED_EXPLANATION}</InfoTip>
+        </span>
+        <span className="tnum text-[11px] leading-none text-subtle-foreground">
+          {formatNumber(tally.unknown)} unrecorded · {formatNumber(judged)} decided
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("flex flex-col gap-1", className)}>

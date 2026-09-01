@@ -10,9 +10,14 @@ import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/ca
 import { EmptyState } from "@/components/ui/empty-state";
 import { InfoTip } from "@/components/ui/tooltip";
 import {
+  EVIDENCE_LIMITED_EXPLANATION,
+  EVIDENCE_LIMITED_LABEL,
   HIT_RATE_DEFINITION,
   NOTHING_DECIDED_SHORT,
+  UPLOAD_VIEWS_LABEL,
+  UPLOAD_VIEWS_TIP,
 } from "@/lib/analytics/constants";
+import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -103,8 +108,16 @@ export function ContentTypePerformanceTable({
                 <th scope="col" className="px-3 py-2 text-right font-medium">
                   Mean views
                 </th>
-                <th scope="col" className="px-3 py-2 text-right font-medium">
-                  Total views
+                {/* A `title` rather than an InfoTip: this is a bare <th> in a
+                    scrollable table and a nested info button would cost a
+                    column of width the numbers need. Same sentence either
+                    way — no surface writes its own. */}
+                <th
+                  scope="col"
+                  className="px-3 py-2 text-right font-medium"
+                  title={UPLOAD_VIEWS_TIP}
+                >
+                  {UPLOAD_VIEWS_LABEL}
                 </th>
                 <th scope="col" className="px-5 py-2 text-right font-medium">
                   Hit rate
@@ -181,15 +194,56 @@ export function ContentTypePerformanceTable({
                       telling somebody to go configure a niche would send them
                       to fix something that is not broken.
                     */}
-                    {row.hits.rate === null ? (
-                      row.hits.tally.pending === 0 && row.hits.tally.unknown === 0 ? (
-                        <HitRuleNotConfigured size="sm" className="justify-end" />
-                      ) : (
-                        <span className="text-[12px] text-subtle-foreground">
-                          {NOTHING_DECIDED_SHORT}
-                        </span>
-                      )
-                    ) : (
+                    {(() => {
+                      const state = resolveHitDisplayState(row.hits, row.shortsCount);
+                      if (state === "notConfigured") {
+                        return <HitRuleNotConfigured size="sm" className="justify-end" />;
+                      }
+                      if (state === "noShorts" || state === "nothingDecided") {
+                        return (
+                          <span className="text-[12px] text-subtle-foreground">
+                            {NOTHING_DECIDED_SHORT}
+                          </span>
+                        );
+                      }
+                      if (state === "evidenceLimited") {
+                        /*
+                          THE RANGE WHERE THE 0.0% WOULD HAVE BEEN, and no
+                          fraction beside it.
+
+                          This cell fell through to the measured branch, because
+                          an evidence-limited rate is `0` and not `null` — so a
+                          content type whose Shorts all cleared their bar
+                          unwatched printed a bold "0.0%" and "0/12 decided",
+                          with `HitRateBounds` contradicting both on the line
+                          underneath. The emphasised number is what a scanning
+                          eye takes, and this is the table an editor reads to
+                          decide what to make more of: "Skits 0.0%" is an
+                          instruction to stop making skits.
+
+                          The fraction goes because its numerator is not the hit
+                          count — it is the count of hits somebody happened to
+                          observe. The denominator survives in the caption,
+                          which is the half that was doing honest work.
+                        */
+                        return (
+                          <span className="inline-flex flex-col items-end gap-0.5">
+                            <span
+                              className="tnum font-medium text-foreground"
+                              aria-label={EVIDENCE_LIMITED_LABEL}
+                              title={EVIDENCE_LIMITED_EXPLANATION}
+                            >
+                              {formatPercent(row.hits.lowerBound, 0)}–
+                              {formatPercent(row.hits.upperBound, 0)}
+                            </span>
+                            <span className="tnum text-[11px] text-subtle-foreground">
+                              {row.hits.tally.unknown} unrecorded · {row.hits.judged}{" "}
+                              decided
+                            </span>
+                          </span>
+                        );
+                      }
+                      return (
                       /*
                         The fraction says what the rate is OVER; the bounds say
                         what it had to leave out. A tag whose Shorts mostly went
@@ -208,7 +262,8 @@ export function ContentTypePerformanceTable({
                         </span>
                         <HitRateBounds summary={row.hits} />
                       </span>
-                    )}
+                      );
+                    })()}
                   </td>
                 </tr>
               ))}

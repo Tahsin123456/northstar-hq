@@ -38,6 +38,10 @@ import { NicheChips } from "@/components/niches/niche-chip";
 import { useDataset, useRestoreChannel } from "@/hooks/use-dataset";
 import { api } from "@/lib/api-client";
 import {
+  UPLOAD_VIEWS_LABEL,
+  UPLOAD_VIEWS_TIP,
+} from "@/lib/analytics/constants";
+import {
   EM_DASH,
   formatCompactNumber,
   formatRelativeTime,
@@ -269,7 +273,14 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
           />
         </div>
 
-        <MiniStat label="Views" value={formatCompactNumber(metrics.totalViews)} />
+        {/* The disclosure rides in a `title` rather than an InfoTip. This card
+            sits under a stretched link, where a nested button is unreachable —
+            the same constraint documented on `HitRateBounds`'s compact form. */}
+        <MiniStat
+          label={UPLOAD_VIEWS_LABEL}
+          value={formatCompactNumber(metrics.totalViews)}
+          title={UPLOAD_VIEWS_TIP}
+        />
         <MiniStat
           label="Median"
           value={formatCompactNumber(metrics.medianViews)}
@@ -317,9 +328,18 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function MiniStat({
+  label,
+  value,
+  title,
+}: {
+  label: string;
+  value: string;
+  /** The definition, where a tooltip button cannot go. */
+  title?: string;
+}) {
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1" title={title}>
       <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
         {label}
       </span>

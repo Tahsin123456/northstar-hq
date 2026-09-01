@@ -16,6 +16,11 @@ import {
   type OutlierShort,
 } from "@/lib/analytics";
 import { calculateTrend, previousRange, type Trend } from "@/lib/analytics/trends";
+import {
+  TOTAL_VIEWS_VS_STUDIO,
+  UPLOAD_VIEWS_LABEL_LONG,
+} from "@/lib/analytics/constants";
+import { measuredRate } from "@/lib/analytics/hit-display";
 import type { HitRateSummary } from "@/lib/analytics/hit-rate";
 import { baselineRangeFor } from "@/hooks/use-shorts-feed";
 import type { ChannelDTO, DatasetDTO, NicheDTO } from "@/lib/dto";
@@ -62,6 +67,13 @@ export interface ReportShort {
 export interface ReportSummaryMetric {
   readonly key: string;
   readonly label: string;
+  /**
+   * A caveat printed under the figure, for a metric a reader will otherwise
+   * compare against a number from somewhere else.
+   *
+   * On screen this is a tooltip. On paper there is nowhere else to put it.
+   */
+  readonly note?: string;
   readonly value: number | null;
   readonly format: "views" | "percent" | "count" | "decimal";
   readonly trend: Trend;
@@ -245,7 +257,20 @@ export function buildReport(options: BuildReportOptions): ReportData {
   const summary: ReportSummaryMetric[] = [
     {
       key: "totalViews",
-      label: "Views of period uploads",
+      /*
+       * The shared long-form name, and the Studio/VidIQ caveat PRINTED rather
+       * than footnoted.
+       *
+       * Every screen carries this disclosure in a tooltip. This file's own
+       * contract, six lines up in `ReportData.hits`, is that a PDF cannot: it
+       * is forwarded, quoted and read six months later by somebody who cannot
+       * hover anything. This metric is the one the bug report was about — a
+       * reader comparing it against VidIQ and concluding the tool is broken —
+       * and it was the one surface that shipped neither the name nor the
+       * caveat.
+       */
+      label: UPLOAD_VIEWS_LABEL_LONG,
+      note: TOTAL_VIEWS_VS_STUDIO,
       value: current.totalViews,
       format: "views",
       trend: calculateTrend(current.totalViews, previous.totalViews, {
@@ -256,7 +281,13 @@ export function buildReport(options: BuildReportOptions): ReportData {
     {
       key: "hitRate",
       label: "Hit rate",
-      value: currentScorecard.hits.rate,
+      /*
+       * `measuredRate`, so the cover prints an em dash rather than a confident
+       * 0.0% when nothing in the period could be measured. The HIT RATE BASIS
+       * block beside it carries the unrecorded count, which is the fact that
+       * replaces the figure.
+       */
+      value: measuredRate(currentScorecard.hits),
       format: "percent",
       // Both sides of the comparison are windowed rates over decided Shorts, so
       // the movement is finally a statement about the work. Under the old rule
@@ -267,10 +298,11 @@ export function buildReport(options: BuildReportOptions): ReportData {
       // Both sides are also over the same SCORECARD pool. A trend between a
       // rate that included watchlist channels and one that did not would move
       // when nothing about the work had.
-      trend: calculateTrend(currentScorecard.hits.rate, previousScorecard.hits.rate, {
-        direction: "higherIsBetter",
-        unit: "percentagePoints",
-      }),
+      trend: calculateTrend(
+        measuredRate(currentScorecard.hits),
+        measuredRate(previousScorecard.hits),
+        { direction: "higherIsBetter", unit: "percentagePoints" },
+      ),
     },
     {
       key: "shortsUploaded",
@@ -337,7 +369,9 @@ export function buildReport(options: BuildReportOptions): ReportData {
           direction: "higherIsBetter",
           unit: "relativePercent",
         }),
-        hitRateTrend: calculateTrend(metrics.hits.rate, prior.hits.rate, {
+        // A movement between two rates, one of which is an unmeasured zero, is
+        // a movement in who was recording rather than in the work.
+        hitRateTrend: calculateTrend(measuredRate(metrics.hits), measuredRate(prior.hits), {
           direction: "higherIsBetter",
           unit: "percentagePoints",
         }),
@@ -473,13 +507,26 @@ function buildInsights(input: {
   }
 
   // Hit rate movement, and how it sits against the market.
-  if (input.current.hits.rate !== null && input.previous.hits.rate !== null) {
-    const delta = input.current.hits.rate - input.previous.hits.rate;
+  const currentRate = measuredRate(input.current.hits);
+  const priorRate = measuredRate(input.previous.hits);
+  if (currentRate !== null && priorRate !== null) {
+    const delta = currentRate - priorRate;
     if (Math.abs(delta) >= 0.5) {
       out.push(
-        `Hit rate ${delta > 0 ? "increased" : "decreased"} by ${Math.abs(delta).toFixed(1)} percentage points, to ${fmtPct(input.current.hits.rate)}, over ${input.current.hits.judged} decided Shorts.`,
+        `Hit rate ${delta > 0 ? "increased" : "decreased"} by ${Math.abs(delta).toFixed(1)} percentage points, to ${fmtPct(currentRate)}, over ${input.current.hits.judged} decided Shorts.`,
       );
     }
+  } else if (input.current.hits.evidenceLimited) {
+    /*
+     * The written finding for the state the figure cannot express.
+     *
+     * Without it the narrative simply says nothing about the headline metric,
+     * and a silence in a list of findings reads as "no news" rather than "no
+     * measurement" — the same fabrication one level up, made by omission.
+     */
+    out.push(
+      `No Short was recorded clearing its niche's bar inside its hit window this period, and ${input.current.hits.tally.unknown} passed the bar at a time nobody was recording — so the hit rate is somewhere between ${fmtPct(input.current.hits.lowerBound)} and ${fmtPct(input.current.hits.upperBound)} rather than a single figure.`,
+    );
   }
 
   /*

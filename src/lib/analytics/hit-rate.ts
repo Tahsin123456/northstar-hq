@@ -1,4 +1,5 @@
 import type { JudgedVideo, ThresholdAnnotation } from "./types";
+import { EVIDENCE_LIMITED_MIN_UPPER_BOUND } from "./constants";
 import { ratePercent } from "./stats";
 
 /**
@@ -644,6 +645,28 @@ export interface HitRateSummary {
    */
   readonly lowerBound: number | null;
   readonly upperBound: number | null;
+  /**
+   * TRUE WHEN THE RATE IS ARITHMETIC BUT NOT A MEASUREMENT.
+   *
+   * Nothing was ever seen clearing its bar inside its window, and there are
+   * Shorts that did clear it at a time nobody recorded. The numerator is pinned
+   * to zero by the EVIDENCE, not by the channel's performance: `evaluateHit`
+   * can infer a miss from a lifetime total but can only ever observe a hit, so
+   * a library nobody was sampling produces misses and nothing else. A 0%
+   * printed here would assert a failure the data cannot support — the same
+   * fabrication as `$0.00` standing in for "we could not ask".
+   *
+   * `rate` stays 0 rather than becoming null, because the arithmetic is real
+   * and the surfaces that legitimately need a number (the sort comparator has
+   * its own opinion, see `lib/sorting.ts`) should not have to reconstruct it.
+   * What this flag buys is the right of every surface to refuse to print it.
+   *
+   * THE UPPER-BOUND FLOOR IS WHAT KEEPS A GENUINE ZERO INTACT. A hundred fair
+   * misses and one unrecorded Short is a real zero — its upper bound is 1% and
+   * this stays false. Six misses and five unrecorded is not — its upper bound
+   * is 45%. See `EVIDENCE_LIMITED_MIN_UPPER_BOUND`.
+   */
+  readonly evidenceLimited: boolean;
 }
 
 /**
@@ -656,6 +679,7 @@ export interface HitRateSummary {
 export function calculateHitRate(tally: HitTally): HitRateSummary {
   const judged = tally.hits + tally.misses;
   const withUnknowns = judged + tally.unknown;
+  const upperBound = ratePercent(tally.hits + tally.unknown, withUnknowns);
 
   return {
     rate: ratePercent(tally.hits, judged),
@@ -664,7 +688,29 @@ export function calculateHitRate(tally: HitTally): HitRateSummary {
     excluded: tally.pending + tally.unknown + tally.unscoreable,
     tally,
     lowerBound: ratePercent(tally.hits, withUnknowns),
-    upperBound: ratePercent(tally.hits + tally.unknown, withUnknowns),
+    upperBound,
+    /*
+     * Derived here rather than at each surface so no screen can disagree with
+     * another about whether the zero it is holding is real. Every clause is
+     * load-bearing: nothing observed clearing the bar, a denominator that
+     * exists (otherwise the rate is already null and a different state
+     * applies), at least one Short that DID pass the bar unwatched, and enough
+     * of them that the answer could plausibly have been different. See the
+     * field's own comment for why the last clause protects a true 0%.
+     *
+     * `tally.unknown > 0` is REDUNDANT AGAINST THE BOUND and kept anyway. With
+     * no hits and no unknowns the upper bound is 0, which already fails the
+     * floor — so no test can tell the two versions apart. It stays because the
+     * condition this flag means is "there are Shorts nobody watched", and a
+     * reader should be able to see that in the predicate rather than deduce it
+     * from the arithmetic of `ratePercent`.
+     */
+    evidenceLimited:
+      tally.hits === 0 &&
+      judged > 0 &&
+      tally.unknown > 0 &&
+      upperBound !== null &&
+      upperBound >= EVIDENCE_LIMITED_MIN_UPPER_BOUND,
   };
 }
 

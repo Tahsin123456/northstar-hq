@@ -122,6 +122,7 @@ const s = StyleSheet.create({
   kpiLabel: { fontSize: 6.8, color: C.subtle, letterSpacing: 0.7 },
   kpiValue: { fontSize: 17, fontFamily: "Helvetica-Bold", marginTop: 5, letterSpacing: -0.4 },
   kpiTrend: { fontSize: 7.5, marginTop: 4 },
+  kpiNote: { fontSize: 6, color: C.subtle, marginTop: 5, lineHeight: 1.35 },
 
   // --- tables ---
   tHead: {
@@ -496,8 +497,16 @@ export function ReportDocument({ report }: { report: ReportData }) {
                   decided" has to be legible without one. */}
               <Text style={s.coverMetaLabel}>HIT RATE BASIS</Text>
               <Text style={s.coverMetaValue}>
-                {report.hits.judged} decided of{" "}
-                {report.hits.judged + report.hits.excluded} Shorts
+                {/*
+                  "N decided of M Shorts" on its own makes whatever figure sits
+                  beside it look strongly evidenced, which is the opposite of
+                  what it means when the unrecorded pile is what pinned the
+                  numerator to zero. In that state the count that matters is
+                  named first, because it is the reason there is no percentage.
+                */}
+                {report.hits.evidenceLimited
+                  ? `${report.hits.tally.unknown} unrecorded · ${report.hits.judged} decided`
+                  : `${report.hits.judged} decided of ${report.hits.judged + report.hits.excluded} Shorts`}
               </Text>
               <Text style={{ fontSize: 6.6, color: C.subtle, marginTop: 2 }}>
                 {report.hits.tally.pending > 0
@@ -547,6 +556,11 @@ export function ReportDocument({ report }: { report: ReportData }) {
                 <Text style={{ ...s.kpiTrend, color: trendColor(metric.trend) }}>
                   {trendText(metric.trend)}
                 </Text>
+                {/* The caveat under the figure it applies to, not in a footnote
+                    at the bottom of a page nobody reads to the end of. Present
+                    only on the metrics that carry one, so it stays worth
+                    reading where it does appear. */}
+                {metric.note ? <Text style={s.kpiNote}>{metric.note}</Text> : null}
               </View>
             ))}
           </View>
@@ -737,7 +751,22 @@ function ChannelRow({ row }: { row: ReportChannelRow }) {
         {compact(row.metrics.totalViews)}
       </Text>
       <Text style={{ ...s.tCell, flex: 1, textAlign: "right" }}>
-        {pct(row.metrics.hits.rate)}
+        {/*
+          THE RANGE, ON PAPER, WHERE THE 0.0% WOULD HAVE BEEN.
+
+          `pct` guards null and non-finite, and an evidence-limited rate is
+          neither — it is a real `0` — so this cell printed "0.0%" for a channel
+          whose every bar-clearing Short went unrecorded. On a screen the reader
+          can hover the figure and find that out. This is the artefact that
+          outlives the screen, which is the argument the cover block above makes
+          for printing exclusions rather than footnoting them; it applies to
+          this cell more sharply than to anything else in the file, because a
+          per-channel 0.0% in a forwarded PDF is read as a verdict on a person's
+          work.
+        */}
+        {row.metrics.hits.evidenceLimited
+          ? `${pct(row.metrics.hits.lowerBound, 0)}–${pct(row.metrics.hits.upperBound, 0)}`
+          : pct(row.metrics.hits.rate)}
       </Text>
       <Text style={{ ...s.tCell, flex: 1, textAlign: "right" }}>
         {compact(row.metrics.medianViews)}
