@@ -10,7 +10,9 @@ import {
   formatNumber,
   formatPercent,
   youtubeShortsUrl,
+  youtubeWatchUrl,
 } from "@/lib/format";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { Card } from "@/components/ui/card";
 import { InfoTip } from "@/components/ui/tooltip";
 import { Stat, TrendPill } from "@/components/metrics/stat";
@@ -28,6 +30,7 @@ import {
   UNCONFIGURED_RULE_EXPLANATION,
   UPLOAD_VIEWS_LABEL_LONG,
   uploadViewsTip,
+  uploadViewsTipLongform,
 } from "@/lib/analytics/constants";
 import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
 import type { ViewsDefinitionDTO } from "@/lib/dto";
@@ -59,6 +62,7 @@ export function KpiCards({
   metrics,
   trendDelta,
   viewsDefinition,
+  format = "shorts",
   className,
 }: {
   metrics: ChannelMetrics;
@@ -69,9 +73,21 @@ export function KpiCards({
    * rather than claiming a history figure it does not have.
    */
   viewsDefinition?: ViewsDefinitionDTO | null;
+  /**
+   * Which format's metrics these are. Every figure is already the right one —
+   * the caller computed `metrics` with the same format — so what this decides
+   * is only the words beside them, the Best-video link's destination, and
+   * which sentence explains the exclusion count.
+   */
+  format?: NicheFormat;
   className?: string;
 }) {
   const { hits } = metrics;
+  // The unit noun, once. "Short(s)" for the product that always said so,
+  // "video(s)" for Long Form — never "Longform", which is a setting name,
+  // not a word the studio owner uses.
+  const one = format === "shorts" ? "Short" : "video";
+  const many = format === "shorts" ? "Shorts" : "videos";
   /*
    * "Not configured" now means NO RULE REACHED THESE SHORTS, read off the
    * verdicts rather than off the threshold control.
@@ -170,13 +186,13 @@ export function KpiCards({
                 <p className="tnum mt-2.5 text-[12px] text-muted-foreground">
                   {hasData ? (
                     <>
-                      {formatFraction(hits.hits, hits.judged)} decided Shorts reached
+                      {formatFraction(hits.hits, hits.judged)} decided {many} reached
                       their niche&rsquo;s bar inside its hit window
                     </>
                   ) : nothingDecided ? (
                     NOTHING_DECIDED_EXPLANATION
                   ) : (
-                    "No Shorts uploaded in this period"
+                    `No ${many} uploaded in this period`
                   )}
                 </p>
 
@@ -194,7 +210,7 @@ export function KpiCards({
         <Card className="grid grid-cols-2 divide-border sm:grid-cols-3 lg:grid-cols-3">
           <div className="border-b border-r border-border p-5">
             <Stat
-              label="Shorts uploaded"
+              label={format === "shorts" ? "Shorts uploaded" : "Videos uploaded"}
               value={formatNumber(metrics.totalShorts)}
               caption={
                 metrics.uploadsPerWeek
@@ -204,10 +220,25 @@ export function KpiCards({
               hint={
                 metrics.excludedLongform > 0 ? (
                   <InfoTip>
-                    {metrics.excludedLongform} long-form{" "}
-                    {metrics.excludedLongform === 1 ? "video was" : "videos were"}{" "}
-                    published in this period and excluded from every figure on
-                    this page.
+                    {/* `excludedLongform` is the in-range complement of THIS
+                        page's format, whatever its name says — for a Long Form
+                        page that is Shorts plus anything unresolved. */}
+                    {format === "shorts" ? (
+                      <>
+                        {metrics.excludedLongform} long-form{" "}
+                        {metrics.excludedLongform === 1 ? "video was" : "videos were"}{" "}
+                        published in this period and excluded from every figure on
+                        this page.
+                      </>
+                    ) : (
+                      <>
+                        {metrics.excludedLongform}{" "}
+                        {metrics.excludedLongform === 1 ? "upload" : "uploads"} in
+                        this period {metrics.excludedLongform === 1 ? "is" : "are"}{" "}
+                        not long-form — Shorts, or videos the classifier could not
+                        confirm — and excluded from every figure on this page.
+                      </>
+                    )}
                   </InfoTip>
                 ) : undefined
               }
@@ -216,7 +247,7 @@ export function KpiCards({
 
           <div className="border-b border-border p-5 sm:border-r">
             <Stat
-              label="Shorts that hit"
+              label={format === "shorts" ? "Shorts that hit" : "Videos that hit"}
               /*
                * THE LITERAL "0 HITS" FROM THE BUG REPORT WAS HERE.
                *
@@ -242,7 +273,7 @@ export function KpiCards({
                 state === "measured"
                   ? `of ${formatNumber(hits.judged)} decided · ${formatNumber(metrics.totalShorts)} uploaded`
                   : state === "noShorts"
-                    ? "No Shorts in this period"
+                    ? `No ${many} in this period`
                     : state === "notConfigured"
                       ? "No hit rule set for these niches"
                       : state === "nothingDecided"
@@ -252,7 +283,7 @@ export function KpiCards({
               hint={
                 hits.excluded > 0 ? (
                   <InfoTip>
-                    {hits.excluded} of {metrics.totalShorts} Shorts uploaded in this
+                    {hits.excluded} of {metrics.totalShorts} {many} uploaded in this
                     period are not in the rate: still inside their hit window,
                     published with no view history recorded during it, or filed
                     under a niche with no rule.
@@ -270,7 +301,9 @@ export function KpiCards({
                  Studio-style figure is absent rather than approximated. */
               hint={
                 <InfoTip>
-                  {uploadViewsTip(viewsDefinition?.snapshotDays ?? null)}
+                  {format === "shorts"
+                    ? uploadViewsTip(viewsDefinition?.snapshotDays ?? null)
+                    : uploadViewsTipLongform(viewsDefinition?.snapshotDays ?? null)}
                 </InfoTip>
               }
               caption={
@@ -285,7 +318,7 @@ export function KpiCards({
             <Stat
               label="Average views"
               value={formatCompactNumber(metrics.averageViews)}
-              caption="Mean per Short"
+              caption={`Mean per ${one}`}
             />
           </div>
 
@@ -293,10 +326,10 @@ export function KpiCards({
             <Stat
               label="Median views"
               value={formatCompactNumber(metrics.medianViews)}
-              caption="The typical Short"
+              caption={`The typical ${one}`}
               hint={
                 <InfoTip>
-                  Half of this channel&rsquo;s Shorts did better than this and
+                  Half of this channel&rsquo;s {many} did better than this and
                   half did worse. Unlike the average, one viral outlier
                   can&rsquo;t drag it upward.
                 </InfoTip>
@@ -306,11 +339,15 @@ export function KpiCards({
 
           <div className="border-t border-border p-5 sm:border-t-0">
             <Stat
-              label="Best Short"
+              label={format === "shorts" ? "Best Short" : "Best video"}
               value={
                 metrics.bestShort ? (
                   <a
-                    href={youtubeShortsUrl(metrics.bestShort.youtubeVideoId)}
+                    href={
+                      format === "shorts"
+                        ? youtubeShortsUrl(metrics.bestShort.youtubeVideoId)
+                        : youtubeWatchUrl(metrics.bestShort.youtubeVideoId)
+                    }
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 transition-colors hover:text-accent"

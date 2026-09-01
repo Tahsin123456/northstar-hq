@@ -2,8 +2,10 @@
 
 import * as React from "react";
 import { Play } from "lucide-react";
-import { SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
+import { LONGFORM_POSTER_FRAME, SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
 import { posterSourceFor } from "@/lib/shorts/poster";
+import { longformPosterSourceFor } from "@/lib/shorts/longform-poster";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { cn } from "@/lib/utils";
 
 /**
@@ -103,11 +105,22 @@ export const SHORT_CARD_ACTION_PLATE =
  * why the portrait source is tried first and why the fallback is letterboxed
  * into an unchanged 9:16 box rather than cropped to fill it.
  */
-export function PosterFrame({ videoId }: { videoId: string }) {
+export function PosterFrame({
+  videoId,
+  format = "shorts",
+}: {
+  videoId: string;
+  /** Which source table and shape — 9:16 oardefault for shorts (the default,
+   * so every existing card is untouched), 16:9 maxres/hq for long form. */
+  format?: NicheFormat;
+}) {
   // WHICH source failed, not a boolean — see `posterSourceFor`. Keyed to the
   // URL, so a card recycled onto a different Short considers it untried again.
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
-  const poster = posterSourceFor(videoId, failedSrc);
+  const poster =
+    format === "shorts"
+      ? posterSourceFor(videoId, failedSrc)
+      : longformPosterSourceFor(videoId, failedSrc);
 
   return (
     /* eslint-disable-next-line @next/next/no-img-element */
@@ -168,9 +181,13 @@ export function ShortPoster({
   placeholder,
   children,
   className,
+  format = "shorts",
 }: {
   /** `null` draws the placeholder plate instead. See the note above. */
   videoId: string | null;
+  /** 9:16 shorts frame (default) or the 16:9 long-form one — box and source
+   * table move together, so the fallback letterboxing rules stay coherent. */
+  format?: NicheFormat;
   /**
    * Plays the Short in the app. Absent means "there is nothing to play", which
    * is a different state from "there is a Short and you may not play it" —
@@ -210,12 +227,12 @@ export function ShortPoster({
         // with every loading skeleton — see the note on it.
         className={cn(
           "relative block cursor-pointer disabled:cursor-default",
-          SHORTS_POSTER_FRAME,
+          format === "shorts" ? SHORTS_POSTER_FRAME : LONGFORM_POSTER_FRAME,
         )}
       >
         {videoId !== null ? (
           <>
-            <PosterFrame videoId={videoId} />
+            <PosterFrame videoId={videoId} format={format} />
 
             {/* Drawn rather than left to the image, which is the one part of
                 this that can fail: YouTube serves a placeholder or a 404 for a

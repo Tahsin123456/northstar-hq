@@ -1,5 +1,6 @@
 import { roundTo } from "./stats";
 import { convertMinorBetween, minorUnitsFor, symbolFor } from "@/lib/finance/money";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
  * =========================================================================
@@ -141,7 +142,7 @@ export function rpmDigitsFor(currency: string): number {
 export const MAX_RPM_MAJOR_PER_THOUSAND = 100;
 
 /**
- * Where the form starts warning rather than refusing.
+ * Where the form starts warning rather than refusing — for a SHORTS niche.
  *
  * $10 per 1,000 views is achievable in finance or B2B long-form and is
  * two orders of magnitude above any Shorts rate, so a number above it is much
@@ -149,6 +150,22 @@ export const MAX_RPM_MAJOR_PER_THOUSAND = 100;
  * hint, not a rule: somebody who means it can still save it.
  */
 export const RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND = 10;
+
+/**
+ * The same hint for a LONG FORM niche, five times higher, because the formats
+ * genuinely pay that differently: $10–$40 per 1,000 views is an ordinary
+ * long-form rate in a well-monetized vertical, and warning at the Shorts bound
+ * would flag almost every honest long-form entry. The $100 hard cap
+ * (`MAX_RPM_MAJOR_PER_THOUSAND`) stays shared — no format has ever paid that.
+ */
+export const RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND_LONGFORM = 50;
+
+/** The warn bound for one format's niches, as a single lookup. */
+export function rpmImplausibleMajorPerThousand(format: NicheFormat): number {
+  return format === "shorts"
+    ? RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND
+    : RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND_LONGFORM;
+}
 
 /** The largest storable rate for a currency, in minor units per 1,000,000 views. */
 export function maxRpmMinorPerMillion(currency: string): number {
@@ -1052,15 +1069,37 @@ export interface RpmBounds {
   readonly basis: RpmBasis;
 }
 
-export function rpmBounds(resolution: NicheRpmResolution): RpmBounds | null {
+/**
+ * Which basis a HAND-ENTERED range for a niche of this format is quoted on.
+ *
+ * "engaged" for shorts — the unit the market quotes a Shorts RPM in, and the
+ * unit the dialog's label names. "raw" for long form, because a long-form RPM
+ * is quoted per 1,000 plain views everywhere anybody would copy one from, and
+ * scaling it by the engaged-view share would silently halve every Long Form
+ * money figure — the exact factor-of-two error `RpmBasis` exists to make
+ * unwritable. One function rather than a ternary at each caller, so the
+ * dialog's label, the value strip's captions and the pricing arithmetic
+ * cannot answer the question three different ways.
+ */
+export function manualRpmBasis(format: NicheFormat): RpmBasis {
+  return format === "shorts" ? "engaged" : "raw";
+}
+
+export function rpmBounds(
+  resolution: NicheRpmResolution,
+  // The format of the NICHE the resolution belongs to. Defaulted to shorts so
+  // every existing call site keeps producing byte-identical bounds; callers
+  // with a `NicheDTO` in hand thread `toNicheFormat(niche.format)` through.
+  format: NicheFormat = "shorts",
+): RpmBounds | null {
   if (resolution.source === "derived") {
     return {
       lowMinorPerMillion: resolution.rpmMinorPerMillion,
       highMinorPerMillion: resolution.rpmMinorPerMillion,
       currency: resolution.currency,
-      // ALREADY per raw view. Its numerator is money YouTube actually paid,
-      // which is net of Google's own engaged-view accounting, and its
-      // denominator is the raw public counter's delta.
+      // ALREADY per raw view, WHATEVER THE FORMAT. Its numerator is money
+      // YouTube actually paid, which is net of Google's own engaged-view
+      // accounting, and its denominator is the raw public counter's delta.
       basis: "raw",
     };
   }
@@ -1069,9 +1108,9 @@ export function rpmBounds(resolution: NicheRpmResolution): RpmBounds | null {
       lowMinorPerMillion: resolution.range.lowMinorPerMillion,
       highMinorPerMillion: resolution.range.highMinorPerMillion,
       currency: resolution.range.currency,
-      // Typed by a person, per 1,000 engaged views — the unit the market quotes
-      // a Shorts RPM in, and the unit the dialog's label now names.
-      basis: "engaged",
+      // Typed by a person, in the unit that format's market quotes — see
+      // `manualRpmBasis`.
+      basis: manualRpmBasis(format),
     };
   }
   return null;
@@ -1183,6 +1222,25 @@ export function projectRevenue(
  */
 export const TRACKED_NICHE_VALUE_DEFINITION =
   "Tracked niche revenue prices the Shorts views of the channels currently tracked for this niche at its RPM — revenue per 1,000 views. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Note which views are priced: the lifetime views to date of the Shorts PUBLISHED in the selected period, exactly as the hit rate counts them. The period chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. A hand-entered rate is applied to ENGAGED views only — the paid subset of the view count, set under Settings — while a rate measured from Northstar's own channel already accounts for engagement and is applied to the full count.";
+
+/**
+ * The long-form counterpart, WHOSE LAST SENTENCE INVERTS. On a Long Form niche
+ * the hand-entered rate is applied to the FULL view count — long-form RPM is
+ * quoted per 1,000 raw views and no engaged-view share applies (see
+ * `manualRpmBasis`). Rendering the Shorts sentence there would state the
+ * opposite of the arithmetic beneath it, and an owner who trusted it could
+ * double his entered rate to "compensate" — the human version of the exact 2x
+ * the basis rules exist to prevent.
+ */
+export const TRACKED_NICHE_VALUE_DEFINITION_LONGFORM =
+  "Tracked niche revenue prices the long-form views of the channels currently tracked for this niche at its RPM — revenue per 1,000 views. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Note which views are priced: the lifetime views to date of the videos PUBLISHED in the selected period, exactly as the hit rate counts them. The period chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. Every rate here — entered or measured — is applied to the full view count: long-form RPM is quoted per 1,000 views, and no engaged-view share applies.";
+
+/** The definition for a niche of the given format. The wording differs where the arithmetic does. */
+export function trackedNicheValueDefinition(format: NicheFormat): string {
+  return format === "shorts"
+    ? TRACKED_NICHE_VALUE_DEFINITION
+    : TRACKED_NICHE_VALUE_DEFINITION_LONGFORM;
+}
 
 export interface NicheValue {
   readonly ourViews: number;
@@ -1464,6 +1522,20 @@ export const UNPRICED_NICHE_EXPLANATION =
 
 /** A priced niche that published nothing in the period. */
 export const UNPRICED_NICHE_SHORT_NO_SHORTS = "No Shorts in this period";
+
+/** The same state on a Long Form surface, where the uploads are not Shorts. */
+export const UNPRICED_NICHE_LONGFORM_NO_VIDEOS = "No videos in this period";
+
+/**
+ * The empty-period line for a niche of the given format. Selected on the ROW'S
+ * format rather than the page's: an admin surface could one day list both
+ * lists, and each row must describe its own uploads.
+ */
+export function unpricedNicheNothingPublished(format: NicheFormat): string {
+  return format === "shorts"
+    ? UNPRICED_NICHE_SHORT_NO_SHORTS
+    : UNPRICED_NICHE_LONGFORM_NO_VIDEOS;
+}
 
 /**
  * What a priced niche with no Shorts in the period says instead of a figure.

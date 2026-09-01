@@ -500,7 +500,12 @@ export function useAssignContentTypeToVideos() {
     onSuccess: (_result, input) => {
       const targets = new Set(input.videoIds);
 
-      queryClient.setQueryData<DatasetDTO>(DATASET_KEY, (current) => {
+      // `setQueriesData` with the prefix, not `setQueryData` with an exact
+      // key: the dataset caches per format now (`["dataset", format]`), a
+      // channel can appear in both payloads, and an optimistic patch that
+      // reached only one of them would leave the other silently stale until
+      // its next fetch. Same rule for every dataset patch in this file.
+      queryClient.setQueriesData<DatasetDTO>({ queryKey: DATASET_KEY }, (current) => {
         if (!current) return current;
 
         // Computed against the cache as it is *now*, inside the updater, so
@@ -818,7 +823,9 @@ function patchCatalogue(
   queryClient: QueryClient,
   change: { upsert: ContentTypeDTO } | { removeId: string },
 ): void {
-  queryClient.setQueryData<DatasetDTO>(DATASET_KEY, (current) => {
+  // Prefix write — both format caches carry the catalogue. See the note in
+  // `useAssignContentTypeToVideos`.
+  queryClient.setQueriesData<DatasetDTO>({ queryKey: DATASET_KEY }, (current) => {
     if (!current) return current;
 
     if ("removeId" in change) {
@@ -859,7 +866,9 @@ function patchChannelRules(
     current: readonly ChannelContentTypeRuleDTO[],
   ) => readonly ChannelContentTypeRuleDTO[],
 ): void {
-  queryClient.setQueryData<DatasetDTO>(DATASET_KEY, (current) => {
+  // Prefix write — the channel can sit in both format caches. See the note in
+  // `useAssignContentTypeToVideos`.
+  queryClient.setQueriesData<DatasetDTO>({ queryKey: DATASET_KEY }, (current) => {
     if (!current) return current;
 
     let changed = false;
@@ -897,7 +906,9 @@ function patchStoredDeviations(
     manualIds: stored.manualContentTypeIds,
     excludedIds: stored.excludedContentTypeIds,
   };
-  queryClient.setQueryData<DatasetDTO>(DATASET_KEY, (current) =>
+  // Prefix write — the video's channel can sit in both format caches. See the
+  // note in `useAssignContentTypeToVideos`.
+  queryClient.setQueriesData<DatasetDTO>({ queryKey: DATASET_KEY }, (current) =>
     current
       ? applyVideoDeviations(current, new Set([stored.videoId]), () => plan)
       : current,

@@ -10,8 +10,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { youtubeShortsUrl } from "@/lib/format";
+import { youtubeShortsUrl, youtubeWatchUrl } from "@/lib/format";
 import { frameFor, type ShortPlayerTarget } from "@/lib/shorts/player";
+import type { NicheFormat } from "@/lib/niches/niche-format";
+import { cn } from "@/lib/utils";
 
 export type { ShortPlayerTarget };
 
@@ -98,16 +100,31 @@ export function ShortPlayerDialog({
   short,
   open,
   onOpenChange,
+  format = "shorts",
 }: {
   /** `null` keeps the dialog closed and the player unmounted. */
   short: ShortPlayerTarget | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Which shape of video this dialog plays. The embed player is the same
+   * document either way; what moves is the geometry (a 9:16 box sizes itself
+   * height-first, a 16:9 one width-first — see the notes on the frame box),
+   * the outward link (/shorts/ vs /watch), and the title fallback. The
+   * unmount-on-close property is shared: `frameFor` and the no-exit-animation
+   * rule know nothing about aspect ratios.
+   */
+  format?: NicheFormat;
 }) {
   const prefersReducedMotion = usePrefersReducedMotion();
   const frame = frameFor(short, open, !prefersReducedMotion);
+  const longform = format === "longform";
 
-  const title = short?.title?.trim() ? short.title : "YouTube Short";
+  const title = short?.title?.trim()
+    ? short.title
+    : longform
+      ? "YouTube video"
+      : "YouTube Short";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -142,7 +159,15 @@ export function ShortPlayerDialog({
           header and the × stay put. Putting the scroll on this box instead
           would scroll the × out of reach, which is the bug rather than the fix.
       */}
-      <DialogContent className="flex max-h-[calc(100dvh-2rem)] max-w-[420px] flex-col overflow-hidden">
+      <DialogContent
+        className={cn(
+          "flex max-h-[calc(100dvh-2rem)] flex-col overflow-hidden",
+          // A 16:9 frame is short, not tall, so the long-form dialog buys
+          // WIDTH instead: 720px yields a 405px-tall player, well inside the
+          // same max-h. The Shorts width is untouched.
+          longform ? "max-w-[720px]" : "max-w-[420px]",
+        )}
+      >
         <DialogHeader className="shrink-0">
           {/* `pr-6` clears the close button, which is the only exit that keeps
               working once focus is inside the player — see the note below. */}
@@ -181,7 +206,32 @@ export function ShortPlayerDialog({
             the reader left it. `max-w-full` still guards the other axis, where
             a tall narrow window could otherwise derive a width past the dialog.
           */}
-          <div className="mx-auto aspect-[9/16] h-[min(70dvh,560px)] min-h-0 w-auto max-w-full overflow-hidden rounded-lg bg-black ring-1 ring-border">
+          <div
+            className={cn(
+              "mx-auto min-h-0 overflow-hidden rounded-lg bg-black ring-1 ring-border",
+              longform
+                ? /*
+                   * THE 16:9 BOX SIZES ITSELF FROM ITS WIDTH — the mirror of
+                   * the Shorts rule below, and reasoned the same way round.
+                   * A 9:16 box is TALL: give it the dialog's width and it
+                   * derives 746px of height, off the bottom of a laptop — so
+                   * the Shorts frame fixes height first. A 16:9 box is SHORT:
+                   * give it the dialog's 720px width and it derives 405px,
+                   * comfortably inside the dialog's own max-h — so this frame
+                   * takes the width and derives the height. The one case that
+                   * breaks that is a squat window (a landscape phone), where a
+                   * width-derived height could still overflow; the `max-w`
+                   * bound converts the height budget back into a width cap —
+                   * 100dvh minus the dialog's chrome, times 16/9 — so the
+                   * frame shrinks in proportion instead of being squashed by
+                   * flex, which would distort the video rather than letterbox
+                   * it. Worked at 812x375: the cap allows (375-176)*16/9 ≈
+                   * 353px of width, a real 353x199 player, entirely on screen.
+                   */
+                  "aspect-video w-full max-w-[min(100%,calc((100dvh-11rem)*16/9))]"
+                : "aspect-[9/16] h-[min(70dvh,560px)] w-auto max-w-full",
+            )}
+          >
             {frame ? (
               <iframe
                 // Keyed by src so switching Shorts without closing the dialog
@@ -224,7 +274,16 @@ export function ShortPlayerDialog({
               with a lesser copy of the destination takes a capability away.
             */}
             <a
-              href={short ? youtubeShortsUrl(short.youtubeVideoId) : "#"}
+              // The real destination for the format: a long-form video's home
+              // is the watch page, and a /shorts/ URL for one bounces through
+              // a redirect that some clients turn into an error page.
+              href={
+                short
+                  ? longform
+                    ? youtubeWatchUrl(short.youtubeVideoId)
+                    : youtubeShortsUrl(short.youtubeVideoId)
+                  : "#"
+              }
               target="_blank"
               // A new tab is handed a live handle on this document through
               // `window.opener` unless it is cut, and this destination is

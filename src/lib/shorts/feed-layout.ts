@@ -53,3 +53,16 @@ export const SHORTS_CARD_GRID =
  * and on a narrower card `w-full` wins and the cap never applies.
  */
 export const SHORTS_POSTER_FRAME = "mx-auto aspect-[9/16] w-full max-w-[208px]";
+
+/**
+ * The 16:9 poster box for a LONG-FORM card, in the same grid.
+ *
+ * `aspect-video` and NO width cap, where the Shorts frame caps at 208px — and
+ * the asymmetry is the geometry, not an oversight. The Shorts cap exists
+ * because 9:16 of a 325px card is 578px of height; 16:9 of the same card is
+ * about 183px, already a readable tile, and capping the width would shrink a
+ * frame that has no height problem to solve. Same `mx-auto w-full` so the two
+ * frames sit identically in the shared card shell, and the same "no `min-w-`
+ * ever" rule binds anything drawn inside it.
+ */
+export const LONGFORM_POSTER_FRAME = "mx-auto aspect-video w-full";

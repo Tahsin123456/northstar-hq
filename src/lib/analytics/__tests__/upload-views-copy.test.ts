@@ -255,6 +255,11 @@ describe("no surface invents its own name for this figure", () => {
     // `totalViews` was the only numeric column in the channels table with no
     // `tip`, while every neighbour had one.
     const source = readSource("components/dashboard/channel-table.tsx");
-    expect(source).toMatch(/key: "totalViews"[^}]*tip: UPLOAD_VIEWS_TIP/);
+    // The column reads its tip through the labels object now (so the Long
+    // Form table can carry its own words); what must not regress is that the
+    // column still HAS a tip and that the Shorts default is the shared
+    // disclosure, not a rephrasing.
+    expect(source).toMatch(/key: "totalViews"[^}]*tip: labels\.uploadViewsTip/);
+    expect(source).toContain("uploadViewsTip: UPLOAD_VIEWS_TIP");
   });
 });

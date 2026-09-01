@@ -61,6 +61,7 @@ import { NotesPanel } from "@/components/notes/notes-panel";
 import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
@@ -289,6 +290,15 @@ function NicheCard({
 }) {
   const { range } = useFilters();
   /*
+   * Which product this page is an instance of. "shorts" on /niches (the
+   * default context), "longform" under the /longform layout, where this same
+   * module is re-exported as the Long Form niches page. It decides which
+   * videos the card's figures count and where the card's link leads — the
+   * niche LIST is already the right one, because the provider's dataset only
+   * carries this format's niches.
+   */
+  const format = useDatasetFormat();
+  /*
    * This niche's own definition of a hit — and nothing else.
    *
    * There is deliberately no `?? accountThreshold` here any more. A card that
@@ -332,6 +342,7 @@ function NicheCard({
           videos: row.videos,
           range,
           threshold: nicheThreshold,
+          format,
         }),
         // TRUE FOR EVERY CARD, INCLUDING A WATCHLIST ONE. This card is one
         // niche's own analytics, which is exactly what a watchlist niche is
@@ -342,7 +353,7 @@ function NicheCard({
         // the top of the card.
         countsTowardHitRate: true,
       })),
-    [members, range, nicheThreshold],
+    [members, range, nicheThreshold, format],
   );
 
   const summary = React.useMemo(() => calculatePortfolioSummary(entries), [entries]);
@@ -371,8 +382,9 @@ function NicheCard({
       own.map((row) => ({ videos: row.videos })),
       others.map((row) => ({ videos: row.videos })),
       range,
+      format,
     );
-  }, [members, range]);
+  }, [members, range, format]);
 
   const best = summary.topChannel;
   /*
@@ -400,7 +412,14 @@ function NicheCard({
               style={{ background: nicheColor(niche.colorIndex) }}
             />
             <Link
-              href={`/?niche=${encodeURIComponent(niche.id)}`}
+              // Into the dashboard THIS page belongs to: the Long Form niches
+              // page hands off to the Long Form overview, whose own provider
+              // reads the `?niche=` parameter into its own store.
+              href={
+                format === "shorts"
+                  ? `/?niche=${encodeURIComponent(niche.id)}`
+                  : `/longform?niche=${encodeURIComponent(niche.id)}`
+              }
               className="truncate text-[14px] font-medium text-foreground transition-colors hover:text-accent"
             >
               {niche.name}
@@ -508,7 +527,10 @@ function NicheCard({
 
         <div className="mt-4 grid grid-cols-3 gap-3 border-t border-border pt-3">
           <MiniStat label="Channels" value={formatNumber(members.length)} />
-          <MiniStat label="Shorts" value={formatNumber(summary.totalShorts)} />
+          <MiniStat
+            label={format === "shorts" ? "Shorts" : "Videos"}
+            value={formatNumber(summary.totalShorts)}
+          />
           <MiniStat
             label={
               nicheThreshold === null
@@ -566,7 +588,9 @@ function NicheCard({
             <span className="text-[12px] text-subtle-foreground">
               {members.length === 0
                 ? "No channels assigned yet"
-                : "No Shorts in this period"}
+                : format === "shorts"
+                  ? "No Shorts in this period"
+                  : "No videos in this period"}
             </span>
           )}
 
@@ -600,6 +624,9 @@ function NicheCard({
  * has gaps.
  */
 function UncategorisedCard({ rows }: { rows: readonly ChannelRow[] }) {
+  // Unfiled channels appear on BOTH products' pages by design; the link just
+  // has to stay inside the product the reader is standing in.
+  const format = useDatasetFormat();
   return (
     <div className="flex flex-col gap-3">
       <div>
@@ -616,7 +643,11 @@ function UncategorisedCard({ rows }: { rows: readonly ChannelRow[] }) {
           <div key={row.channel.id} className="flex items-center gap-3 px-4 py-2.5">
             <Avatar src={row.channel.avatarUrl} name={row.channel.displayName} size={26} />
             <Link
-              href={`/channels/${row.channel.id}`}
+              href={
+                format === "shorts"
+                  ? `/channels/${row.channel.id}`
+                  : `/longform/channels/${row.channel.id}`
+              }
               className="min-w-0 flex-1 truncate text-[13px] text-foreground transition-colors hover:text-accent"
             >
               {row.channel.displayName}
@@ -736,6 +767,16 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
   const [error, setError] = React.useState<string | null>(null);
   const canConfigure = useCanConfigureThreshold();
   const create = useCreateNiche();
+  /*
+   * Which format list the new niche joins — the page's own product.
+   *
+   * Sent EXPLICITLY only from the Long Form page. The Shorts page keeps
+   * sending exactly the request it always sent (no `format` key), which the
+   * server resolves to the caller's own side; the Long Form page states
+   * "longform" so the server can refuse a caller whose role does not cover it
+   * rather than silently minting a Shorts niche under a Long Form heading.
+   */
+  const format = useDatasetFormat();
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -765,9 +806,12 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
     // write and refuses it without `settings.manage`. `kind` rides on
     // `niches.manage`, which anybody reaching this form already holds.
     create.mutate(
-      hitThreshold === undefined
-        ? { name: trimmed, kind }
-        : { name: trimmed, kind, hitThreshold },
+      {
+        name: trimmed,
+        kind,
+        ...(hitThreshold === undefined ? {} : { hitThreshold }),
+        ...(format === "longform" ? { format } : {}),
+      },
       {
         onSuccess: ({ niche }) => {
           toast.success(`Niche “${niche.name}” created`, {
@@ -860,8 +904,9 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
               <FieldHint tone="danger">{error}</FieldHint>
             ) : (
               <FieldHint>
-                How many views make a Short a hit in this niche. Optional — leave it
-                empty and set it later; no hit rate is reported until you do.
+                How many views make a {format === "shorts" ? "Short" : "video"} a hit
+                in this niche. Optional — leave it empty and set it later; no hit
+                rate is reported until you do.
               </FieldHint>
             )}
             <div className="flex flex-wrap gap-1.5">

@@ -6,20 +6,11 @@ import type { DateRange, PeriodPresetId, PeriodSelection } from "@/lib/analytics
 import { resolveDateRange } from "@/lib/date-range";
 import { useNow } from "@/hooks/use-now";
 import { useDataset } from "@/hooks/use-dataset";
+import { DatasetFormatContext } from "@/hooks/dataset-format-context";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import {
-  clearThresholdOverride,
-  getFiltersServerSnapshot,
-  getFiltersSnapshot,
-  resetFilters,
-  seedDefaults,
-  setContentTypeFilter,
-  setCustomRange,
-  setNicheFilter,
-  setOwnFirst,
-  setOwnershipFilter,
-  setPeriodPreset,
-  setThreshold,
-  subscribeToFilters,
+  defaultFiltersStore,
+  type FiltersStore,
   type ContentTypeFilter,
   type NicheFilter,
   type OwnershipFilter,
@@ -141,25 +132,45 @@ export function FiltersProvider({
   children,
   defaultThreshold = DEFAULT_THRESHOLD,
   defaultPeriod = { preset: DEFAULT_PERIOD_PRESET },
+  store = defaultFiltersStore,
+  format = "shorts",
 }: {
   children: React.ReactNode;
   defaultThreshold?: number;
   defaultPeriod?: PeriodSelection;
+  /**
+   * Which store instance backs this provider. The default is the Shorts
+   * singleton the module always was; the /longform layout mounts a second
+   * provider over `longformFiltersStore` so the two products' selections
+   * never share state. Must be stable for the provider's lifetime.
+   */
+  store?: FiltersStore;
+  /**
+   * Which format's dataset this subtree is about. Threaded to `useDataset`
+   * here AND published through `DatasetFormatContext`, so every bare
+   * `useDataset()` under this provider — save buttons, dialogs, the
+   * channel-threshold hook — reads the same payload this provider resolves
+   * niche names and thresholds from. Two different answers to "which
+   * dataset?" inside one subtree is the bug this pairing prevents.
+   */
+  format?: NicheFormat;
 }) {
   // Seeded during render on purpose: the store's server snapshot must match the
   // values the server rendered with *before* the first useSyncExternalStore
   // read, or hydration would disagree. seedDefaults is idempotent.
-  seedDefaults({ period: defaultPeriod });
+  store.seedDefaults({ period: defaultPeriod });
 
   const snapshot = React.useSyncExternalStore(
-    subscribeToFilters,
-    getFiltersSnapshot,
-    getFiltersServerSnapshot,
+    store.subscribeToFilters,
+    store.getFiltersSnapshot,
+    store.getFiltersServerSnapshot,
   );
 
   // Niche thresholds live in the dataset, which every page fetches anyway; this
-  // reads the existing cache rather than adding a request.
-  const { data } = useDataset();
+  // reads the existing cache rather than adding a request. Explicitly THIS
+  // provider's format: the provider renders the format context below itself,
+  // so its own hooks cannot read it and must be told.
+  const { data } = useDataset(format);
 
   const activeNiche = React.useMemo(() => {
     if (snapshot.niche === "all" || snapshot.niche === "unassigned") return null;
@@ -189,7 +200,7 @@ export function FiltersProvider({
    * setter directly, and a `?contentType=` link no longer has to move somebody's
    * niche filter to make its own selection visible.
    */
-  const setNiche = setNicheFilter;
+  const setNiche = store.setNicheFilter;
 
   const nicheDefaultThreshold = activeNiche?.hitThreshold ?? null;
 
@@ -253,20 +264,20 @@ export function FiltersProvider({
         snapshot.niche !== "all" ||
         snapshot.contentType !== "all" ||
         snapshot.ownership !== "all",
-      setPeriodPreset,
-      setCustomRange,
-      setThreshold,
-      clearThresholdOverride,
+      setPeriodPreset: store.setPeriodPreset,
+      setCustomRange: store.setCustomRange,
+      setThreshold: store.setThreshold,
+      clearThresholdOverride: store.clearThresholdOverride,
       setNiche,
-      setContentType: setContentTypeFilter,
-      setOwnership: setOwnershipFilter,
-      setOwnFirst,
+      setContentType: store.setContentTypeFilter,
+      setOwnership: store.setOwnershipFilter,
+      setOwnFirst: store.setOwnFirst,
       clearScopeFilters: () => {
-        setNicheFilter("all");
-        setContentTypeFilter("all");
-        setOwnershipFilter("all");
+        store.setNicheFilter("all");
+        store.setContentTypeFilter("all");
+        store.setOwnershipFilter("all");
       },
-      resetToDefaults: resetFilters,
+      resetToDefaults: store.resetFilters,
     }),
     [
       snapshot,
@@ -277,10 +288,18 @@ export function FiltersProvider({
       activeNiche,
       activeContentType,
       setNiche,
+      store,
     ],
   );
 
-  return <FiltersContext.Provider value={value}>{children}</FiltersContext.Provider>;
+  return (
+    // The format context wraps the filters context so that everything reading
+    // this provider's filters also reads this provider's dataset — one subtree,
+    // one format, structurally.
+    <DatasetFormatContext.Provider value={format}>
+      <FiltersContext.Provider value={value}>{children}</FiltersContext.Provider>
+    </DatasetFormatContext.Provider>
+  );
 }
 
 export function useFilters(): FiltersState {

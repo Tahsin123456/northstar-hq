@@ -1,5 +1,6 @@
 import { handle } from "@/server/http";
 import { requirePermission } from "@/server/auth/dal";
+import { requireFormat } from "@/server/auth/format-scope";
 import { getExcludedVideos } from "@/server/services/dataset-service";
 
 export const runtime = "nodejs";
@@ -17,10 +18,14 @@ type RouteContext = { params: Promise<{ id: string }> };
 export function GET(request: Request, context: RouteContext) {
   return handle(async () => {
     // The audit trail behind a hit rate is part of the analytics it explains.
-    await requirePermission("analytics.view");
+    const actor = await requirePermission("analytics.view");
 
     const { id } = await context.params;
     const url = new URL(request.url);
+
+    // Same coercion as the dataset route: `get` answers null for an absent
+    // parameter, and only `undefined` means "no preference" to `requireFormat`.
+    const format = requireFormat(actor.role, url.searchParams.get("format") ?? undefined);
 
     const parseMs = (key: string): number | undefined => {
       const raw = url.searchParams.get(key);
@@ -33,6 +38,7 @@ export function GET(request: Request, context: RouteContext) {
       startMs: parseMs("startMs"),
       endMs: parseMs("endMs"),
       limit: 300,
+      format,
     });
 
     return { videos };

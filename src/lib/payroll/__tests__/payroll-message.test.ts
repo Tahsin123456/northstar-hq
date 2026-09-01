@@ -423,7 +423,7 @@ describe("niches that earned nothing", () => {
     expect(payment).toContain("GTA hits: 1 — not paid, no hit payment set");
 
     const rule = formatEmployeeBlock({ ...shorted, unpaidNiches: [science] });
-    expect(rule).toContain("Science: 3 Shorts not counted, no hit threshold set");
+    expect(rule).toContain("Science: 3 videos not counted, no hit threshold set");
     expect(rule).not.toMatch(/Science hits:/);
 
     // Two different sentences, not one sentence with a swapped noun.
@@ -438,7 +438,7 @@ describe("niches that earned nothing", () => {
     ).toContain("GTA hits: 4 — not paid, no hit payment set");
     expect(
       formatEmployeeBlock({ ...shorted, unpaidNiches: [{ ...science, shortCount: 1 }] }),
-    ).toContain("Science: 1 Short not counted, no hit threshold set");
+    ).toContain("Science: 1 video not counted, no hit threshold set");
   });
 
   /**
@@ -486,7 +486,7 @@ describe("niches that earned nothing", () => {
     // Never a promise that the settled month will re-pay itself.
     expect(message).toContain("August 2026 is final either way");
 
-    const explainerAt = message.indexOf("Some Shorts earned nothing this month.");
+    const explainerAt = message.indexOf("Some videos earned nothing this month.");
     const totalAt = message.indexOf("Total Northstar Studios Payroll");
     expect(explainerAt).toBeGreaterThan(-1);
     expect(explainerAt).toBeLessThan(totalAt);
@@ -496,7 +496,7 @@ describe("niches that earned nothing", () => {
     // The presence of the paragraph is itself the signal, so a clean month has
     // to read exactly as it always has.
     const clean = formatPayrollMessage(run());
-    expect(clean).not.toContain("Some Shorts earned nothing");
+    expect(clean).not.toContain("Some videos earned nothing");
     expect(clean).not.toContain("Hit bonuses went unpaid");
   });
 

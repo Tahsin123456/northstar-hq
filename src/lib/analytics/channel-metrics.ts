@@ -7,7 +7,7 @@ import {
   type HitRateSummary,
   type HitTally,
 } from "./hit-rate";
-import { getShortsInDateRange, isWithinRange } from "./filters";
+import { isWithinRange, videosInDateRange } from "./filters";
 import { measuredRate } from "./hit-display";
 import {
   consistencyScore,
@@ -53,11 +53,13 @@ const MS_PER_WEEK = 604_800_000;
 export function calculateChannelMetrics(
   input: ChannelMetricsInput,
 ): ChannelMetrics {
-  const { videos, range, threshold } = input;
+  const { videos, range, threshold, format = "shorts" } = input;
 
-  // Order matters and is the whole ballgame: Shorts only, then uploaded inside
-  // the window. Long-form can never reach the lines below.
-  const shortsInRange = getShortsInDateRange(videos, range);
+  // Order matters and is the whole ballgame: this format's videos only, then
+  // uploaded inside the window. The other format — and everything the
+  // classifier could not resolve — can never reach the lines below. For
+  // shorts (every existing caller) this is `getShortsInDateRange` verbatim.
+  const shortsInRange = videosInDateRange(videos, range, format);
   const evaluated = annotateAgainstThreshold(shortsInRange, threshold);
 
   const totalShorts = evaluated.length;

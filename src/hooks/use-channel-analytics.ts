@@ -17,6 +17,7 @@ import type {
 } from "@/lib/dto";
 import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
 import { useFilters } from "@/components/providers/filters-provider";
+import { useDatasetFormat } from "./dataset-format-context";
 import { useVideoContentTypeResolutions } from "./use-content-types";
 import { sortRows, type SortState } from "@/lib/sorting";
 import type {
@@ -57,6 +58,10 @@ export interface ChannelRow {
  */
 export function useChannelRows(dataset: DatasetDTO | undefined): ChannelRow[] {
   const { range, threshold } = useFilters();
+  // The subtree's dataset format — the same context `useDataset` defaults
+  // from, so the rows are derived by the same rule the payload was fetched
+  // under. "shorts" everywhere except under the /longform provider.
+  const format = useDatasetFormat();
 
   return React.useMemo(() => {
     if (!dataset) return [];
@@ -69,9 +74,10 @@ export function useChannelRows(dataset: DatasetDTO | undefined): ChannelRow[] {
         videos: entry.videos,
         range,
         threshold,
+        format,
       }),
     }));
-  }, [dataset, range, threshold]);
+  }, [dataset, range, threshold, format]);
 }
 
 /** Case-insensitive search across the display name, YouTube title and handle. */
@@ -332,6 +338,9 @@ export function usePortfolioSummary(
   options: PortfolioSummaryOptions = {},
 ): PortfolioSummary {
   const { range, threshold } = useFilters();
+  // Same context read as `useChannelRows`, for the same reason: a previous-
+  // period recompute must count the same format the live rows do.
+  const format = useDatasetFormat();
   const { overrideRange, includeWatchlist = false } = options;
   const effective = overrideRange ?? range;
 
@@ -344,14 +353,14 @@ export function usePortfolioSummary(
           // Recompute against the requested window rather than reusing
           // row.metrics, which is always scoped to the active period.
           metrics: overrideRange
-            ? calculateChannelMetrics({ videos: row.videos, range: effective, threshold })
+            ? calculateChannelMetrics({ videos: row.videos, range: effective, threshold, format })
             : row.metrics,
           // Decided from the channel's own niche chips, which carry their kind
           // — no catalogue to join and nothing to forget to pass.
           countsTowardHitRate: includeWatchlist || isStudioChannel(row.channel.niches),
         })),
       ),
-    [rows, overrideRange, effective, threshold, includeWatchlist],
+    [rows, overrideRange, effective, threshold, includeWatchlist, format],
   );
 }
 

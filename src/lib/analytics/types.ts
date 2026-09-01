@@ -272,6 +272,14 @@ export interface ChannelMetricsInput {
   readonly videos: readonly JudgedVideo[];
   readonly range: DateRange;
   /**
+   * Which format's videos the metrics describe. Absent means shorts — every
+   * existing caller — and the narrowing itself is `isVideoOfFormat`'s, via
+   * `videosInDateRange`: shorts is `isShort === true` exactly as it always
+   * was, longform is `classification === "not_short"`, and an uncertain video
+   * is in neither denominator.
+   */
+  readonly format?: import("@/lib/niches/niche-format").NicheFormat;
+  /**
    * The bar the display is exploring with, or `null` when the active niche has
    * none configured.
    *

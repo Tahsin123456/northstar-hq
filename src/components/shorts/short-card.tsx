@@ -19,6 +19,7 @@ import { NicheChips } from "@/components/niches/niche-chip";
 import { ContentTypeControl } from "@/components/content-types/content-type-control";
 import { SaveShortButton } from "./save-short-button";
 import type { UnbenchmarkableReason } from "@/lib/analytics/outliers";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import {
   SHORT_CARD_ACTION_PLATE,
   SHORT_CARD_BODY,
@@ -49,6 +50,7 @@ export function OutlierMultiple({
   multiple,
   sampleSize,
   reason,
+  format = "shorts",
   size = "md",
   className,
 }: {
@@ -56,10 +58,21 @@ export function OutlierMultiple({
   sampleSize: number;
   /** Why there is no multiple. `null` when there is one. */
   reason?: UnbenchmarkableReason | null;
+  /**
+   * Which product's upload the multiple describes. Arithmetic is identical;
+   * the TOOLTIPS are not — the headline figure the whole feed is ranked by
+   * cannot call a 20-minute video "this Short" on the Long Form feed.
+   */
+  format?: NicheFormat;
   size?: "sm" | "md" | "lg";
   className?: string;
 }) {
   const textClass = { sm: "text-[13px]", md: "text-[17px]", lg: "text-[24px]" }[size];
+  // The noun every sentence below uses. "video" rather than "long-form video":
+  // the reader is on the Long Form feed, and the shorter word keeps a tooltip
+  // a sentence rather than a paragraph.
+  const noun = format === "shorts" ? "Short" : "video";
+  const nounPlural = format === "shorts" ? "Shorts" : "videos";
 
   if (multiple === null) {
     const inFlight = reason === "in-flight";
@@ -78,16 +91,16 @@ export function OutlierMultiple({
         <TooltipContent className="max-w-[280px]">
           {inFlight ? (
             <>
-              This Short is still inside its niche&rsquo;s hit window. Its views
-              are compared against the channel&rsquo;s typical Short, and its
-              typical Short has had months — so a multiple now would understate
+              This {noun} is still inside its niche&rsquo;s hit window. Its views
+              are compared against the channel&rsquo;s typical {noun}, and its
+              typical {noun} has had months — so a multiple now would understate
               it by however long it has left. Views per day is the age-neutral
               figure until the window shuts.
             </>
           ) : (
             <>
-              This channel has only {sampleSize}{" "}
-              {sampleSize === 1 ? "settled Short" : "settled Shorts"} in the
+              This channel has only {sampleSize} settled{" "}
+              {sampleSize === 1 ? noun : nounPlural} in the
               baseline window. A median needs at least 5 to be a trustworthy
               benchmark, so no multiple is shown rather than a misleading one.
             </>
@@ -119,9 +132,9 @@ export function OutlierMultiple({
         </span>
       </TooltipTrigger>
       <TooltipContent>
-        This Short did {multiple >= 10 ? Math.round(multiple) : multiple.toFixed(1)}× the
-        views of this channel&rsquo;s median Short over the baseline window
-        ({sampleSize} Shorts). Median, not average — one viral Short would drag an
+        This {noun} did {multiple >= 10 ? Math.round(multiple) : multiple.toFixed(1)}× the
+        views of this channel&rsquo;s median {noun} over the baseline window
+        ({sampleSize} {nounPlural}). Median, not average — one viral {noun} would drag an
         average up and hide the next breakout.
       </TooltipContent>
     </Tooltip>
@@ -190,10 +203,18 @@ export function ShortCard({
   onOpenShort,
   noteCount = 0,
   resolution = EMPTY_RESOLUTION,
+  format = "shorts",
   className,
 }: {
   short: FeedShort;
   rank?: number;
+  /**
+   * Which product's card this is. Decides the poster's shape and source table
+   * (9:16 oardefault vs 16:9 maxres/hq) and where the channel name links —
+   * the Long Form channel page for a long-form card, so a reader does not
+   * fall into the Shorts page and silently read the other format's numbers.
+   */
+  format?: NicheFormat;
   /**
    * Plays the Short in the app. Separate from `onOpenShort` because they are
    * two different intentions with two different dialogs: this one is "let me
@@ -219,6 +240,7 @@ export function ShortCard({
     <Card className={cn(SHORT_CARD_SHELL, className)}>
       <ShortPoster
         videoId={video.youtubeVideoId}
+        format={format}
         onPlay={onPlayShort ? () => onPlayShort(short) : undefined}
       >
         {rank !== undefined ? (
@@ -249,10 +271,15 @@ export function ShortCard({
                   variant="ghost"
                   size="icon-sm"
                   onClick={() => onOpenShort(short)}
-                  // The dialog behind this button is the app's single-Short
+                  // The dialog behind this button is the app's single-video
                   // filing view — notes, plus the niche and the content type —
-                  // so the label names the Short rather than only the note.
-                  aria-label="Open this Short: notes, niche and content type"
+                  // so the label names the upload rather than only the note,
+                  // in the format's own noun.
+                  aria-label={
+                    format === "shorts"
+                      ? "Open this Short: notes, niche and content type"
+                      : "Open this video: notes, niche and content type"
+                  }
                   className={cn(noteCount > 0 && "text-accent")}
                 >
                   <StickyNote />
@@ -260,8 +287,10 @@ export function ShortCard({
               </TooltipTrigger>
               <TooltipContent>
                 {noteCount > 0
-                  ? `${noteCount} ${noteCount === 1 ? "note" : "notes"} — open the Short`
-                  : "Open this Short — notes, niche and content type"}
+                  ? `${noteCount} ${noteCount === 1 ? "note" : "notes"} — open the ${format === "shorts" ? "Short" : "video"}`
+                  : format === "shorts"
+                    ? "Open this Short — notes, niche and content type"
+                    : "Open this video — notes, niche and content type"}
               </TooltipContent>
             </Tooltip>
           ) : null}
@@ -278,7 +307,11 @@ export function ShortCard({
 
         <div className={SHORT_CARD_META_ROW}>
           <Link
-            href={`/channels/${channel.id}`}
+            href={
+              format === "shorts"
+                ? `/channels/${channel.id}`
+                : `/longform/channels/${channel.id}`
+            }
             className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
           >
             <Avatar src={channel.avatarUrl} name={channel.displayName} size={14} />
@@ -321,6 +354,7 @@ export function ShortCard({
               multiple={short.outlierMultiple}
               sampleSize={short.baselineSampleSize}
               reason={short.unbenchmarkable}
+              format={format}
             />
             <span className="tnum text-[10px] text-subtle-foreground">
               median{" "}
@@ -349,8 +383,9 @@ export function ShortCard({
                     </TooltipTrigger>
                     <TooltipContent>
                       Average since upload, over {short.ageDays.toFixed(1)} days. Not
-                      shown for Shorts under a day old, where the figure would be an
-                      extrapolation rather than a rate.
+                      shown for {format === "shorts" ? "Shorts" : "videos"} under a day
+                      old, where the figure would be an extrapolation rather than a
+                      rate.
                     </TooltipContent>
                   </Tooltip>
                 </>

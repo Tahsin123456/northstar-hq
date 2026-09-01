@@ -6,6 +6,7 @@ import { History, Info } from "lucide-react";
 import { api } from "@/lib/api-client";
 import { calculateViewDistribution } from "@/lib/analytics/distribution";
 import type { JudgedVideo, DateRange } from "@/lib/analytics/types";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { useNow } from "@/hooks/use-now";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -50,6 +51,7 @@ export function DistributionPanel({
   threshold,
   /** Restricts the comparison series to one channel, when on a channel page. */
   channelId,
+  format = "shorts",
   className,
 }: {
   shorts: readonly JudgedVideo[];
@@ -61,6 +63,14 @@ export function DistributionPanel({
    */
   threshold: number | null;
   channelId?: string;
+  /**
+   * Which format the (already-filtered) list describes. The histogram is
+   * format-blind — it buckets whatever it is handed — but the HISTORICAL
+   * comparison is not: the history endpoint reconstructs Shorts only, so on
+   * a Long Form page the compare-with control is withheld entirely rather
+   * than offered and answered with the other product's data.
+   */
+  format?: NicheFormat;
   className?: string;
 }) {
   const [compareTo, setCompareTo] = React.useState<string | null>(null);
@@ -132,6 +142,7 @@ export function DistributionPanel({
 
   return (
     <div className={className}>
+      {format === "shorts" ? (
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
         <span className="mr-1 inline-flex items-center gap-1.5 text-[11px] text-subtle-foreground">
           <History className="size-3" />
@@ -170,6 +181,7 @@ export function DistributionPanel({
           </TooltipContent>
         </Tooltip>
       </div>
+      ) : null}
 
       {selected && history.isLoading ? (
         <Skeleton className="h-[280px] w-full rounded-lg" />

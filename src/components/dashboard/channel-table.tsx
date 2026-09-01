@@ -40,32 +40,73 @@ interface Column {
 }
 
 /**
+ * The strings that name a format on this table, as one object so the Long
+ * Form overview can reuse the whole table by swapping words rather than
+ * forking four hundred lines of grid. The default is the Shorts set, verbatim
+ * — every existing page renders byte-identically — and `hrefBase` rides here
+ * too because it is the one non-label difference: a Long Form row must lead
+ * into the Long Form channel page, or the reader lands on a page quietly
+ * showing the other format's numbers.
+ */
+export interface ChannelTableLabels {
+  /** Header of the per-period upload-count column. */
+  readonly countColumn: string;
+  readonly countTip: string;
+  readonly uploadViewsLabel: string;
+  readonly uploadViewsTip: string;
+  readonly medianTip: string;
+  readonly bestColumn: string;
+  readonly consistencyTip: string;
+  readonly tableAriaLabel: string;
+  /** Where a row's channel link leads; the channel id is appended. */
+  readonly hrefBase: string;
+}
+
+export const SHORTS_TABLE_LABELS: ChannelTableLabels = {
+  countColumn: "Shorts",
+  countTip: "Shorts uploaded during the selected period. Long-form videos are excluded.",
+  uploadViewsLabel: UPLOAD_VIEWS_LABEL,
+  uploadViewsTip: UPLOAD_VIEWS_TIP,
+  medianTip: "The typical Short. More resistant to a single viral outlier than the average.",
+  bestColumn: "Best Short",
+  consistencyTip:
+    "0–100. How tightly this channel's Shorts cluster around their median. High means dependable output rather than a few outliers carrying the total.",
+  tableAriaLabel: "Tracked channels ranked by Shorts hit rate",
+  hrefBase: "/channels",
+};
+
+/**
  * Column order encodes priority: identity, then the headline metric, then the
  * volume and shape metrics that qualify it. Hit rate sits immediately after the
  * channel because it is the answer the table exists to give — everything to its
  * right is supporting evidence.
  */
-const COLUMNS: Column[] = [
-  { key: "name", label: "Channel", align: "left", width: "minmax(200px,2.2fr)" },
-  { key: "hitRate", label: "Hit rate", align: "left", width: "minmax(118px,1.1fr)" },
-  { key: "shortsUploaded", label: "Shorts", align: "right", width: "minmax(72px,0.6fr)", tip: "Shorts uploaded during the selected period. Long-form videos are excluded." },
-  /*
-   * THE COLUMN IN THE BUG REPORT. It was labelled "Total views" with no tip —
-   * the only numeric column here without one, while its neighbours all carried
-   * theirs — so it read as "views this channel earned", which is what YouTube
-   * Studio and VidIQ report and is a different quantity entirely. The name and
-   * the sentence both already existed elsewhere in the app; this column simply
-   * never got them.
-   */
-  { key: "totalViews", label: UPLOAD_VIEWS_LABEL, align: "right", width: "minmax(104px,0.8fr)", tip: UPLOAD_VIEWS_TIP },
-  { key: "averageViews", label: "Avg views", align: "right", width: "minmax(88px,0.7fr)", hideBelow: "md" },
-  { key: "medianViews", label: "Median", align: "right", width: "minmax(84px,0.7fr)", hideBelow: "lg", tip: "The typical Short. More resistant to a single viral outlier than the average." },
-  { key: "bestShort", label: "Best Short", align: "right", width: "minmax(92px,0.7fr)", hideBelow: "lg" },
-  { key: "consistency", label: "Consistency", align: "right", width: "minmax(94px,0.7fr)", hideBelow: "xl", tip: "0–100. How tightly this channel's Shorts cluster around their median. High means dependable output rather than a few outliers carrying the total." },
-  { key: "subscribers", label: "Subs", align: "right", width: "minmax(72px,0.6fr)", hideBelow: "sm" },
-];
+function columnsFor(labels: ChannelTableLabels): Column[] {
+  return [
+    { key: "name", label: "Channel", align: "left", width: "minmax(200px,2.2fr)" },
+    { key: "hitRate", label: "Hit rate", align: "left", width: "minmax(118px,1.1fr)" },
+    { key: "shortsUploaded", label: labels.countColumn, align: "right", width: "minmax(72px,0.6fr)", tip: labels.countTip },
+    /*
+     * THE COLUMN IN THE BUG REPORT. It was labelled "Total views" with no tip —
+     * the only numeric column here without one, while its neighbours all carried
+     * theirs — so it read as "views this channel earned", which is what YouTube
+     * Studio and VidIQ report and is a different quantity entirely. The name and
+     * the sentence both already existed elsewhere in the app; this column simply
+     * never got them.
+     */
+    { key: "totalViews", label: labels.uploadViewsLabel, align: "right", width: "minmax(104px,0.8fr)", tip: labels.uploadViewsTip },
+    { key: "averageViews", label: "Avg views", align: "right", width: "minmax(88px,0.7fr)", hideBelow: "md" },
+    { key: "medianViews", label: "Median", align: "right", width: "minmax(84px,0.7fr)", hideBelow: "lg", tip: labels.medianTip },
+    { key: "bestShort", label: labels.bestColumn, align: "right", width: "minmax(92px,0.7fr)", hideBelow: "lg" },
+    { key: "consistency", label: "Consistency", align: "right", width: "minmax(94px,0.7fr)", hideBelow: "xl", tip: labels.consistencyTip },
+    { key: "subscribers", label: "Subs", align: "right", width: "minmax(72px,0.6fr)", hideBelow: "sm" },
+  ];
+}
 
-const GRID_TEMPLATE = `${COLUMNS.map((c) => c.width ?? "1fr").join(" ")} 40px`;
+/** The widths never move with the labels, so the template is a constant. */
+const GRID_TEMPLATE = `${columnsFor(SHORTS_TABLE_LABELS)
+  .map((c) => c.width ?? "1fr")
+  .join(" ")} 40px`;
 
 const HIDE_CLASS: Record<NonNullable<Column["hideBelow"]>, string> = {
   sm: "hidden sm:flex",
@@ -79,14 +120,18 @@ export function ChannelTable({
   sort,
   onSortChange,
   loading,
+  labels = SHORTS_TABLE_LABELS,
 }: {
   rows: readonly ChannelRow[];
   sort: SortState;
   onSortChange: (sort: SortState) => void;
   loading?: boolean;
+  /** The format's wording and link base. Defaults to the Shorts set. */
+  labels?: ChannelTableLabels;
 }) {
   const { period } = useFilters();
   const periodLabel = PERIOD_PRESET_BY_ID[period.preset]?.shortLabel ?? "Custom";
+  const columns = React.useMemo(() => columnsFor(labels), [labels]);
 
   return (
     <div className="overflow-hidden rounded-lg border border-border bg-surface">
@@ -104,7 +149,7 @@ export function ChannelTable({
         <div
           className="min-w-[720px]"
           role="table"
-          aria-label="Tracked channels ranked by Shorts hit rate"
+          aria-label={labels.tableAriaLabel}
           aria-rowcount={loading ? undefined : rows.length}
         >
           {/* --- Header --- */}
@@ -114,7 +159,7 @@ export function ChannelTable({
               style={{ gridTemplateColumns: GRID_TEMPLATE }}
               role="row"
             >
-              {COLUMNS.map((column) => (
+              {columns.map((column) => (
                 <SortableHeader
                   key={column.key}
                   column={column}
@@ -152,7 +197,12 @@ export function ChannelTable({
             {loading
               ? Array.from({ length: 6 }, (_, i) => <ChannelRowSkeleton key={i} />)
               : rows.map((row, index) => (
-                  <ChannelTableRow key={row.channel.id} row={row} rank={index + 1} />
+                  <ChannelTableRow
+                    key={row.channel.id}
+                    row={row}
+                    rank={index + 1}
+                    hrefBase={labels.hrefBase}
+                  />
                 ))}
           </div>
         </div>
@@ -221,7 +271,15 @@ function SortableHeader({
   );
 }
 
-function ChannelTableRow({ row, rank }: { row: ChannelRow; rank: number }) {
+function ChannelTableRow({
+  row,
+  rank,
+  hrefBase,
+}: {
+  row: ChannelRow;
+  rank: number;
+  hrefBase: string;
+}) {
   const { channel, metrics } = row;
 
   return (
@@ -239,7 +297,7 @@ function ChannelTableRow({ row, rank }: { row: ChannelRow; rank: number }) {
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-1.5">
             <Link
-              href={`/channels/${channel.id}`}
+              href={`${hrefBase}/${channel.id}`}
               className="truncate text-[13px] font-medium text-foreground transition-colors hover:text-accent"
               title={channel.displayName}
             >

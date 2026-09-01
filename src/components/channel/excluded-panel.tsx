@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, FilterX } from "lucide-react";
 import { api } from "@/lib/api-client";
 import type { DateRange } from "@/lib/analytics/types";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { formatCompactNumber, formatDate, formatDuration } from "@/lib/format";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -24,18 +25,26 @@ export function ExcludedPanel({
   channelId,
   range,
   excludedCount,
+  format = "shorts",
   className,
 }: {
   channelId: string;
   range: DateRange;
   excludedCount: number;
+  /**
+   * Which format's metrics the exclusions explain. The server answers a
+   * different list per format — for longform, "excluded" is Shorts plus
+   * everything unresolved — so the format is part of the query key: the two
+   * lists must never be served from one cache entry.
+   */
+  format?: NicheFormat;
   className?: string;
 }) {
   const [open, setOpen] = React.useState(false);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["excluded", channelId, range.startMs, range.endMs],
-    queryFn: () => api.getExcludedVideos(channelId, range),
+    queryKey: ["excluded", channelId, range.startMs, range.endMs, format],
+    queryFn: () => api.getExcludedVideos(channelId, range, format),
     // Only fetch when the user actually opens the panel.
     enabled: open,
     staleTime: 5 * 60_000,
@@ -56,11 +65,12 @@ export function ExcludedPanel({
           <div className="min-w-0">
             <div className="text-[13px] font-medium text-foreground">
               {excludedCount} stored {excludedCount === 1 ? "video" : "videos"} excluded
-              from Shorts metrics
+              from {format === "shorts" ? "Shorts" : "Long Form"} metrics
             </div>
             <div className="text-[12px] text-muted-foreground">
-              Long-form uploads and videos the classifier could not confirm. See
-              why each one was excluded.
+              {format === "shorts"
+                ? "Long-form uploads and videos the classifier could not confirm. See why each one was excluded."
+                : "Shorts and videos the classifier could not confirm. See why each one was excluded."}
             </div>
           </div>
         </div>
@@ -107,7 +117,14 @@ export function ExcludedPanel({
                       size="sm"
                       className="shrink-0"
                     >
-                      {video.classification === "uncertain" ? "Unresolved" : "Not a Short"}
+                      {video.classification === "uncertain"
+                        ? "Unresolved"
+                        : format === "shorts"
+                          ? "Not a Short"
+                          : // On the Long Form panel the confirmed exclusions
+                            // are the other product's videos, and naming them
+                            // is more useful than negating them.
+                            "A Short"}
                     </Badge>
                   </div>
 

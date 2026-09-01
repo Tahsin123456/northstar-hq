@@ -8,26 +8,28 @@ import { nicheColor } from "@/components/niches/niche-chip";
 import { useCanReadNicheEconomics } from "@/components/niches/niche-rpm-dialog";
 import { calculateMarketShare } from "@/lib/analytics/market-share";
 import {
-  NICHE_EARNINGS_DEFINITION,
   NICHE_EARNINGS_LABEL,
   NICHE_EARNINGS_NOTHING_PRICED,
   NICHE_EARNINGS_PARTIAL_TOTAL,
   NO_TOTAL_EXPLANATION,
   buildNicheEarnings,
+  nicheEarningsDefinition,
   type NicheEarningsRow,
 } from "@/lib/analytics/niche-earnings";
 import {
   ESTIMATED_RPM_CHIP,
   MEASURED_RPM_CHIP,
   UNPRICED_NICHE_SHORT,
-  UNPRICED_NICHE_SHORT_NO_SHORTS,
   formatEngagedViewShare,
   formatRpmBounds,
   rpmBounds,
   rpmQuoteUnit,
+  unpricedNicheNothingPublished,
 } from "@/lib/analytics/niche-rpm";
 import type { DateRange } from "@/lib/analytics/types";
 import type { ChannelRow } from "@/hooks/use-channel-analytics";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
+import { toNicheFormat } from "@/lib/niches/niche-format";
 import type { NicheDTO } from "@/lib/dto";
 import { formatMoney, formatMoneyCompact } from "@/lib/finance/money";
 import { formatCompactNumber } from "@/lib/format";
@@ -93,6 +95,10 @@ export function NicheEarningsPanel({
   range: DateRange;
 }) {
   const mayRead = useCanReadNicheEconomics();
+  // Which product's page mounted this panel — it picks the definition's noun
+  // ("Shorts" vs "long-form videos"), nothing arithmetical. Each ROW still
+  // reads its own niche's format for pricing and wording.
+  const pageFormat = useDatasetFormat();
 
   const panel = React.useMemo(() => {
     // Skips the per-niche share computation for a reader who would be shown
@@ -101,6 +107,10 @@ export function NicheEarningsPanel({
 
     return buildNicheEarnings(
       niches.map((niche) => {
+        // Narrowed once per niche: it picks both the pricing basis in
+        // `buildNicheEarnings` and which format's views the share below
+        // counts, so the denominator and the rate cannot disagree.
+        const format = toNicheFormat(niche.format);
         const members = rows.filter((row) =>
           row.channel.niches.some((n) => n.id === niche.id),
         );
@@ -121,12 +131,14 @@ export function NicheEarningsPanel({
           own.map((row) => ({ videos: row.videos })),
           others.map((row) => ({ videos: row.videos })),
           range,
+          format,
         );
 
         return {
           id: niche.id,
           name: niche.name,
           colorIndex: niche.colorIndex,
+          format,
           rpm: niche.rpm,
           ourViews: share.ourViews,
           competitorViews: share.competitorViews,
@@ -149,7 +161,7 @@ export function NicheEarningsPanel({
           {/* The definition, next to the heading, because the period selector
               at the top of this page makes the wrong reading the natural one.
               See `NICHE_EARNINGS_DEFINITION`. */}
-          <InfoTip>{NICHE_EARNINGS_DEFINITION}</InfoTip>
+          <InfoTip>{nicheEarningsDefinition(pageFormat)}</InfoTip>
         </h3>
 
         {panel.total !== null ? (
@@ -220,7 +232,7 @@ export function NicheEarningsPanel({
 
 /** One niche's line. Money where there is money, a sentence where there is not. */
 function NicheEarningsLine({ row }: { row: NicheEarningsRow }) {
-  const bounds = rpmBounds(row.rpm);
+  const bounds = rpmBounds(row.rpm, row.format);
   const measured = row.rpm.source === "derived";
 
   return (
@@ -233,10 +245,16 @@ function NicheEarningsLine({ row }: { row: NicheEarningsRow }) {
         />
         {/* Through to the dashboard filtered to this niche, which is where the
             reader goes next if a figure surprises them. Same destination the
-            niche card's title uses, so the two agree about what a niche name
-            clicks through to. */}
+            niche card's title uses — WHICH BRANCHES ON THE ROW'S FORMAT: a
+            Long Form niche clicks through to the Long Form overview, never to
+            the Shorts dashboard, where its id resolves to no niche and the
+            reader silently lands on unfiltered Shorts data. */}
         <Link
-          href={`/?niche=${encodeURIComponent(row.id)}`}
+          href={
+            row.format === "shorts"
+              ? `/?niche=${encodeURIComponent(row.id)}`
+              : `/longform?niche=${encodeURIComponent(row.id)}`
+          }
           className="truncate text-[13px] text-foreground transition-colors hover:text-accent"
         >
           {row.name}
@@ -301,7 +319,7 @@ function NicheEarningsLine({ row }: { row: NicheEarningsRow }) {
          */
         <span className="text-[11px] text-subtle-foreground">
           {row.state === "no_shorts"
-            ? UNPRICED_NICHE_SHORT_NO_SHORTS
+            ? unpricedNicheNothingPublished(row.format)
             : UNPRICED_NICHE_SHORT}
         </span>
       )}

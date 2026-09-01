@@ -1,6 +1,7 @@
 import { handle, handleMutation, readJson } from "@/server/http";
 import { errors } from "@/server/errors";
 import { requirePermission } from "@/server/auth/dal";
+import { resolveAllowedFormats } from "@/server/auth/format-scope";
 import {
   createNiche,
   createNicheSchema,
@@ -15,9 +16,13 @@ export function GET() {
   return handle(async () => {
     // Niches are how the dashboard is sliced, and the counts are channel data:
     // reading them is reading analytics, not administering them.
-    await requirePermission("analytics.view");
+    const actor = await requirePermission("analytics.view");
 
-    return { niches: await listNiches() };
+    // Every format this role's side of the operation covers — both for an
+    // admin, whose assignment checklist spans the whole team, one for
+    // everybody else. This is a scope, not a preference, so there is no
+    // parameter to send and nothing for `requireFormat` to validate.
+    return { niches: await listNiches({ formats: resolveAllowedFormats(actor.role) }) };
   });
 }
 

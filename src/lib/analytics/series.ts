@@ -1,5 +1,6 @@
-import { getShortsInDateRange } from "./filters";
+import { videosInDateRange } from "./filters";
 import { calculateHitRate, EMPTY_HIT_TALLY, tallyShorts } from "./hit-rate";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { median, roundTo, sum } from "./stats";
 import type {
   DateRange,
@@ -89,8 +90,12 @@ export function calculateHitRateSeries(
   videos: readonly JudgedVideo[],
   range: DateRange,
   granularity: SeriesGranularity = pickGranularity(range),
+  // Defaulted to shorts so every existing chart keeps meaning what it meant;
+  // the Long Form channel page passes "longform" and the buckets count that
+  // format's verdicts through the identical arithmetic.
+  format: NicheFormat = "shorts",
 ): HitRateSeriesPoint[] {
-  const shorts = getShortsInDateRange(videos, range);
+  const shorts = videosInDateRange(videos, range, format);
 
   const byBucket = new Map<number, JudgedVideo[]>();
   for (const short of shorts) {
@@ -152,6 +157,7 @@ export function calculateHitRateSeries(
 export function calculateHitRateTrend(
   videos: readonly JudgedVideo[],
   range: DateRange,
+  format: NicheFormat = "shorts",
 ): {
   delta: number;
   firstHalf: number;
@@ -161,8 +167,8 @@ export function calculateHitRateTrend(
 } | null {
   const midpoint = range.startMs + (range.endMs - range.startMs) / 2;
 
-  const first = getShortsInDateRange(videos, { startMs: range.startMs, endMs: midpoint });
-  const second = getShortsInDateRange(videos, { startMs: midpoint, endMs: range.endMs });
+  const first = videosInDateRange(videos, { startMs: range.startMs, endMs: midpoint }, format);
+  const second = videosInDateRange(videos, { startMs: midpoint, endMs: range.endMs }, format);
 
   const firstSummary = calculateHitRate(tallyShorts(first));
   const secondSummary = calculateHitRate(tallyShorts(second));

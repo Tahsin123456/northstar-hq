@@ -1,6 +1,7 @@
 import { median } from "./stats";
-import { getShortsInDateRange } from "./filters";
+import { videosInDateRange } from "./filters";
 import { hitContributionOf } from "./hit-rate";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import type { DateRange, JudgedVideo } from "./types";
 
 /**
@@ -177,8 +178,14 @@ export function calculateChannelBaseline(
   videos: readonly JudgedVideo[],
   baselineRange: DateRange,
   now: number,
+  // The format whose "typical video" this baseline describes. Defaulted so the
+  // whole existing Shorts product keeps calling exactly what it always called;
+  // the same format MUST be used here and in `calculateOutliers`' candidate
+  // selection, or a long-form video would be measured against a median of
+  // Shorts — a ratio with no meaning in either direction.
+  format: NicheFormat = "shorts",
 ): ChannelBaseline {
-  const shorts = getShortsInDateRange(videos, baselineRange);
+  const shorts = videosInDateRange(videos, baselineRange, format);
 
   // Settled Shorts only. A "typical Short" built partly from Shorts that are
   // not finished is not a description of the channel, it is a description of
@@ -233,6 +240,12 @@ export function calculateOutliers(
   range: DateRange,
   baselineRange: DateRange,
   now: number,
+  // One format for BOTH the candidates and their baselines — see the note on
+  // `calculateChannelBaseline`. A long-form video with no niche rule still
+  // falls back to the 7-day age floor via `isSettledForComparison`, which is
+  // short for the format but honest: it is a floor, not a claim of maturity,
+  // and any channel with a configured longform niche uses its own window.
+  format: NicheFormat = "shorts",
 ): OutlierShort[] {
   const results: OutlierShort[] = [];
 
@@ -242,9 +255,10 @@ export function calculateOutliers(
       channel.videos,
       baselineRange,
       now,
+      format,
     );
 
-    for (const video of getShortsInDateRange(channel.videos, range)) {
+    for (const video of videosInDateRange(channel.videos, range, format)) {
       const { viewsPerDay, ageDays } = calculateViewsPerDay(video, now);
 
       // A zero or absent median cannot produce a meaningful ratio.

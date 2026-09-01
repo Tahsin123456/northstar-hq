@@ -6,14 +6,16 @@ import { toast } from "sonner";
 import {
   ENGAGED_VIEWS_GLOSS,
   MAX_RPM_MAJOR_PER_THOUSAND,
-  RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND,
   formatRpm,
+  manualRpmBasis,
   maxRpmMinorPerMillion,
   parseRpmToMinorPerMillion,
+  rpmImplausibleMajorPerThousand,
   rpmQuoteUnit,
   rpmToInputText,
   rpmDigitsFor,
 } from "@/lib/analytics/niche-rpm";
+import { toNicheFormat } from "@/lib/niches/niche-format";
 import type { NicheDTO } from "@/lib/dto";
 import {
   buildNicheRpmPatch,
@@ -192,6 +194,19 @@ function NicheRpmForm({
   currency: string;
   onOpenChange: (open: boolean) => void;
 }) {
+  /*
+   * The niche's own format decides the UNIT this whole form speaks in.
+   *
+   * A Shorts range is quoted per 1,000 ENGAGED views — the unit the market
+   * quotes a Shorts RPM in, with the engaged-view share applied before it. A
+   * Long Form range is per 1,000 PLAIN views, no share applied, because that
+   * is how a long-form RPM is quoted everywhere somebody would copy one from.
+   * Same rule as `manualRpmBasis`, read from the same DTO field, so the label,
+   * the warning bound and the pricing arithmetic cannot disagree.
+   */
+  const format = toNicheFormat(niche.format);
+  const basis = manualRpmBasis(format);
+
   const seeded = React.useMemo(() => seedFields(niche, currency), [niche, currency]);
   const [lowValue, setLowValue] = React.useState(seeded.low);
   const [highValue, setHighValue] = React.useState(seeded.high);
@@ -231,7 +246,7 @@ function NicheRpmForm({
     if (parsed > maxRpmMinorPerMillion(currency)) {
       setError(
         `That is more than ${MAX_RPM_MAJOR_PER_THOUSAND} ${currency} ${rpmQuoteUnit(
-          "engaged",
+          basis,
         )}, which is higher than any format has ever paid — check the decimal point.`,
       );
       return { ok: false };
@@ -241,13 +256,16 @@ function NicheRpmForm({
 
   // The soft warning, shown while typing rather than on submit. A rate this
   // high is far more likely to be a decimal place in the wrong place than a
-  // considered estimate, and saying so before the save costs nothing.
+  // considered estimate, and saying so before the save costs nothing. The
+  // bound is per format — $10 for shorts, $50 for long form — because the two
+  // markets genuinely pay an order of magnitude apart, and warning long-form
+  // entries at the Shorts bound would cry wolf on almost every honest one.
   const implausible = React.useMemo(() => {
     const ceiling =
-      RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND * 10 ** rpmDigitsFor(currency);
+      rpmImplausibleMajorPerThousand(format) * 10 ** rpmDigitsFor(currency);
     const parsed = parseRpmToMinorPerMillion(highValue || lowValue, currency);
     return parsed !== null && parsed > ceiling;
-  }, [highValue, lowValue, currency]);
+  }, [highValue, lowValue, currency, format]);
 
   const halfFilled = Boolean(lowValue.trim()) !== Boolean(highValue.trim());
 
@@ -307,7 +325,7 @@ function NicheRpmForm({
                   : `${niche.name}: ${formatRpm(low.value ?? 0, currency)}–${formatRpm(
                       high.value ?? 0,
                       currency,
-                    )} ${rpmQuoteUnit("engaged")}`,
+                    )} ${rpmQuoteUnit(basis)}`,
                 {
                   description: unpriced
                     ? "No money figure is shown for this niche until somebody prices it again, or a monetized channel here starts reporting revenue."
@@ -328,24 +346,43 @@ function NicheRpmForm({
         <DialogTitle>{niche.name} RPM</DialogTitle>
         <DialogDescription>
           {/* RPM glossed on first use, because this dialog is where somebody
-              who has never met the term is asked to supply one. */}
-          RPM is revenue per 1,000 views. This is what 1,000 ENGAGED views in{" "}
-          {niche.name} are worth, as a low–high range — engaged views being the paid
-          subset YouTube actually counts, which is the unit a Shorts RPM is quoted
-          in everywhere else. Northstar assumes they are a set share of the public
-          view count, editable under Settings, and applies that share before this
-          rate. The result estimates how much the tracked niche is generating and
-          how much of it Northstar is capturing. If Northstar operates a monetized
-          channel here, that channel&rsquo;s own measured rate is used instead of
-          this — and that one already accounts for engagement, so it is applied to
-          the full view count.
+              who has never met the term is asked to supply one. The unit is
+              the format's own: engaged views for a Shorts niche, plain views
+              for a Long Form one — see `manualRpmBasis`. */}
+          {format === "shorts" ? (
+            <>
+              RPM is revenue per 1,000 views. This is what 1,000 ENGAGED views in{" "}
+              {niche.name} are worth, as a low–high range — engaged views being the
+              paid subset YouTube actually counts, which is the unit a Shorts RPM is
+              quoted in everywhere else. Northstar assumes they are a set share of
+              the public view count, editable under Settings, and applies that share
+              before this rate. The result estimates how much the tracked niche is
+              generating and how much of it Northstar is capturing. If Northstar
+              operates a monetized channel here, that channel&rsquo;s own measured
+              rate is used instead of this — and that one already accounts for
+              engagement, so it is applied to the full view count.
+            </>
+          ) : (
+            <>
+              RPM is revenue per 1,000 views. This is what 1,000 views in{" "}
+              {niche.name} are worth, as a low–high range — per 1,000 plain views,
+              the unit a long-form RPM is quoted in everywhere else. No engaged-view
+              share applies: unlike a Shorts rate, this one is multiplied by the
+              full public view count. The result estimates how much the tracked
+              niche is generating and how much of it Northstar is capturing. If
+              Northstar operates a monetized channel here, that channel&rsquo;s own
+              measured rate is used instead of this.
+            </>
+          )}
         </DialogDescription>
       </DialogHeader>
 
       <DialogBody className="flex flex-col gap-3">
-        {/* Only for a reader who is actually looking at a pre-existing range.
+        {/* Only for a reader who is actually looking at a pre-existing range,
+            and only on a SHORTS niche — the unit change it describes is the
+            engaged-view one, which never applied to Long Form.
             See `RPM_UNIT_CHANGED_NOTICE`. */}
-        {seeded.low || seeded.high ? (
+        {format === "shorts" && (seeded.low || seeded.high) ? (
           <p
             role="note"
             className="rounded-md border border-accent/30 bg-accent-subtle px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground"
@@ -397,7 +434,7 @@ function NicheRpmForm({
             id="niche-rpm-unit"
             className="text-[13px] font-medium leading-none text-foreground"
           >
-            {currency} {rpmQuoteUnit("engaged")}
+            {currency} {rpmQuoteUnit(basis)}
           </span>
 
           <div className="grid grid-cols-2 gap-3">
@@ -445,20 +482,33 @@ function NicheRpmForm({
 
         <FieldHint>
           A range rather than a single number, because this is a judgement and not a
-          measurement. Shorts rates are usually well under {formatRpm(
-            10 ** rpmDigitsFor(currency) / 10,
-            currency,
+          measurement.{" "}
+          {format === "shorts" ? (
+            <>
+              Shorts rates are usually well under {formatRpm(
+                10 ** rpmDigitsFor(currency) / 10,
+                currency,
+              )}{" "}
+              {rpmQuoteUnit(basis)}.
+            </>
+          ) : (
+            <>
+              This is per 1,000 views — no engaged-view share applies to a
+              long-form rate, so it is multiplied by the full view count.
+            </>
           )}{" "}
-          {rpmQuoteUnit("engaged")}. Leave both empty to clear the estimate.
+          Leave both empty to clear the estimate.
         </FieldHint>
 
-        {/* THE GLOSS, at the point of entry. This is the box where a rate
-            quoted in the wrong unit does its damage: type a per-raw-view figure
-            here and every money figure in the niche doubles. Saying what
-            engaged views are, right under the field, is cheaper than any
-            validation could be — the two units are both plausible numbers and
-            no parser can tell them apart. */}
-        <FieldHint>{ENGAGED_VIEWS_GLOSS}</FieldHint>
+        {/* THE GLOSS, at the point of entry, for the format the term applies
+            to. This is the box where a rate quoted in the wrong unit does its
+            damage: on a Shorts niche, type a per-raw-view figure here and
+            every money figure in the niche doubles. Saying what engaged views
+            are, right under the field, is cheaper than any validation could be
+            — the two units are both plausible numbers and no parser can tell
+            them apart. A Long Form niche has no engaged step, so the gloss
+            would only introduce the confusion it exists to remove. */}
+        {basis === "engaged" ? <FieldHint>{ENGAGED_VIEWS_GLOSS}</FieldHint> : null}
 
         {/*
           Said where the empty boxes are, because empty boxes are the thing that
@@ -484,9 +534,11 @@ function NicheRpmForm({
 
         {implausible ? (
           <FieldHint tone="danger">
-            That is above {RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND} {currency}{" "}
-            {rpmQuoteUnit("engaged")}. Shorts rates are two orders of magnitude below
-            that, so check the decimal point before saving.
+            That is above {rpmImplausibleMajorPerThousand(format)} {currency}{" "}
+            {rpmQuoteUnit(basis)}.{" "}
+            {format === "shorts"
+              ? "Shorts rates are two orders of magnitude below that, so check the decimal point before saving."
+              : "Only the very best-paying long-form verticals reach that, so check the decimal point before saving."}
           </FieldHint>
         ) : null}
       </DialogBody>

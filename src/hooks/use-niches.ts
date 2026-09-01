@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import type { OwnershipType } from "@/lib/dto";
 import type { NicheKind } from "@/lib/niches/niche-kind";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { useInvalidateDataset } from "./use-dataset";
 
 /**
@@ -64,8 +65,17 @@ function useInvalidateNicheCatalogue() {
 export function useCreateNiche() {
   const invalidate = useInvalidateNicheCatalogue();
   return useMutation({
-    mutationFn: (payload: { name: string; hitThreshold?: number; kind?: NicheKind }) =>
-      api.createNiche(payload),
+    mutationFn: (payload: {
+      name: string;
+      hitThreshold?: number;
+      kind?: NicheKind;
+      /**
+       * Which format list the niche joins. The Long Form niches page sends
+       * "longform"; every Shorts surface keeps sending nothing, and the
+       * server resolves that to the caller's own side via `requireFormat`.
+       */
+      format?: NicheFormat;
+    }) => api.createNiche(payload),
     onSuccess: () => invalidate(),
   });
 }

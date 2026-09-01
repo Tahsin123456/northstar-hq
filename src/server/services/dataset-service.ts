@@ -25,8 +25,13 @@ import { errors } from "@/server/errors";
 import { toChannelDTO, toExcludedVideoDTO, toVideoDTO } from "@/server/mappers";
 import type { DatasetChannelDTO, DatasetDTO, ExcludedVideoDTO } from "@/lib/dto";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
+import {
+  DEFAULT_NICHE_FORMAT,
+  isVideoOfFormat,
+  type NicheFormat,
+} from "@/lib/niches/niche-format";
 import { getCurrentOrgId, getCurrentOrgSettings } from "./user-service";
-import { listNiches } from "./niche-service";
+import { listNiches, nicheFormatWhere } from "./niche-service";
 import { listContentTypes } from "./content-type-service";
 import { getNoteCounts, listCollections, listSavedShorts } from "./research-service";
 import { channelDataSources } from "./youtube-oauth-service";
@@ -129,9 +134,39 @@ function videoSelect(organizationId: string) {
   } as const;
 }
 
+/**
+ * The `where` fragment that narrows tracked channels to ONE FORMAT'S PRODUCT:
+ * channels filed under at least one niche of that format, plus channels filed
+ * under nothing at all.
+ *
+ * UNFILED CHANNELS APPEAR IN BOTH FORMATS, deliberately. A channel nobody has
+ * categorised belongs to no side of the operation yet, and hiding it from one
+ * dashboard would make "file this channel" a task only ever visible from the
+ * other — the same reasoning that keeps unfiled channels visible to a Head in
+ * `niche-scope.ts`.
+ *
+ * Composed with `trackedChannelNicheFilter` under `AND`, never by spreading:
+ * both fragments can carry a `niches` key, and a naive `{...a, ...b}` would
+ * silently drop whichever narrowing spread first — for a niche-scoped editor
+ * that would be a security regression, not a cosmetic one.
+ */
+function trackedChannelFormatFilter(format: NicheFormat): Prisma.TrackedChannelWhereInput {
+  return {
+    OR: [
+      { niches: { none: {} } },
+      { niches: { some: { niche: nicheFormatWhere(format) } } },
+    ],
+  };
+}
+
 export async function buildDataset(
-  options: { lookbackDays?: number } = {},
+  options: { lookbackDays?: number; format?: NicheFormat } = {},
 ): Promise<DatasetDTO> {
+  // Shorts when nobody says otherwise — the product every existing caller
+  // means. The route resolves the caller's entitlement through `requireFormat`
+  // before this default can apply, so the default is a convenience for
+  // internal callers, never a way past the format boundary.
+  const format = options.format ?? DEFAULT_NICHE_FORMAT;
   // How far back we keep videos decides how much shared quota a refresh spends
   // and how much history the canonical Video rows carry, so it is a team
   // setting: one person widening it would silently change everyone's dataset.
@@ -159,11 +194,17 @@ export async function buildDataset(
     // The team's tracker, not the caller's: two people in one organization must
     // open the dashboard on the same channels and the same numbers.
     prisma.trackedChannel.findMany({
-      // Two independent narrowings, both in the query: the organization decides
-      // whose tracker this is, the niche filter decides which of it this member
-      // is entitled to. A niche-scoped member with no assignments matches no
-      // rows at all — see `trackedChannelNicheFilter`.
-      where: { organizationId, isActive: true, ...trackedChannelNicheFilter(visibleNiches) },
+      // Three independent narrowings, all in the query: the organization
+      // decides whose tracker this is, the niche filter decides which of it
+      // this member is entitled to, and the format filter decides which SIDE
+      // of the operation the payload describes. The last two both speak about
+      // `niches`, so they compose under `AND` rather than by spreading — see
+      // `trackedChannelFormatFilter` for why a spread would clobber one.
+      where: {
+        organizationId,
+        isActive: true,
+        AND: [trackedChannelNicheFilter(visibleNiches), trackedChannelFormatFilter(format)],
+      },
       include: {
         niches: { include: { niche: true } },
         /*
@@ -211,8 +252,11 @@ export async function buildDataset(
     }),
     // Shipped with the dataset so the niche filter, the Niches page and the
     // assignment menus all read from one payload. Niche filtering is then a
-    // client-side predicate like every other filter — no refetch.
-    listNiches(),
+    // client-side predicate like every other filter — no refetch. Narrowed to
+    // THIS dataset's format: the owner's decision is separate niche lists per
+    // format, and a Shorts payload carrying Long Form niches would offer them
+    // in every Shorts menu.
+    listNiches({ formats: [format] }),
     // THE catalogue — one flat, org-wide list, and the same read the
     // management screen makes. There is nothing to group and nothing to
     // narrow: any of these tags may go on any channel or Short, so the client
@@ -264,7 +308,12 @@ export async function buildDataset(
         dataSources.get(row.channel.youtubeChannelId) ?? "public",
       ),
       videos,
-      excludedCount: videos.filter((v) => !v.isShort).length,
+      // FORMAT-RELATIVE, and byte-identical for shorts: `!isVideoOfFormat(v,
+      // "shorts")` is literally `!(isShort === true)`, the expression this
+      // always was. For longform the complement is Shorts plus uncertain —
+      // everything outside that format's analytics, which is what "excluded"
+      // means on the page that renders this number.
+      excludedCount: videos.filter((v) => !isVideoOfFormat(v, format)).length,
       unclassifiedCount: videos.filter((v) => v.classification === "uncertain").length,
     };
   });
@@ -299,8 +348,15 @@ export async function buildDataset(
  */
 export async function getExcludedVideos(
   channelId: string,
-  options: { startMs?: number; endMs?: number; limit?: number } = {},
+  options: { startMs?: number; endMs?: number; limit?: number; format?: NicheFormat } = {},
 ): Promise<ExcludedVideoDTO[]> {
+  // Which format's metrics the exclusions explain. For shorts the predicate is
+  // the one this endpoint always ran (`isShort: false`); for longform,
+  // "excluded" is everything that is not positively long-form — Shorts and
+  // uncertain both, `classification != "not_short"`. An unreadable stored
+  // classification therefore lands in the EXCLUDED list, the conservative
+  // direction, matching `toNicheFormat`'s fail-closed reasoning.
+  const format = options.format ?? DEFAULT_NICHE_FORMAT;
   const [organizationId, visibleNiches] = await Promise.all([
     getCurrentOrgId(),
     getVisibleNicheIds(),
@@ -315,8 +371,20 @@ export async function getExcludedVideos(
   // this endpoint is precisely where a niche-scoped member would otherwise read
   // a channel the list never showed them — and folding the two conditions into
   // one query means "not ours" and "not yours" produce the identical 404.
+  //
+  // THE FORMAT FILTER RIDES ALONG FOR THE SAME REASON. The dataset already
+  // refuses to ship a channel outside the requested format's product, and this
+  // endpoint reads the very rows that product excludes — for longform,
+  // "excluded" IS the channel's Shorts catalogue. Without the format fragment a
+  // longs-role caller could read any Shorts-only channel's full Shorts list by
+  // id, having been 403'd the same figures from `/api/dataset?format=shorts`.
+  // Composed under `AND`, never spread — both fragments speak about `niches`.
   const tracking = await prisma.trackedChannel.findFirst({
-    where: { organizationId, channelId, ...trackedChannelNicheFilter(visibleNiches) },
+    where: {
+      organizationId,
+      channelId,
+      AND: [trackedChannelNicheFilter(visibleNiches), trackedChannelFormatFilter(format)],
+    },
     select: { id: true },
   });
   if (!tracking) throw errors.notFound("channel");
@@ -324,7 +392,9 @@ export async function getExcludedVideos(
   const rows = await prisma.video.findMany({
     where: {
       channelId,
-      isShort: false,
+      ...(format === "shorts"
+        ? { isShort: false }
+        : { classification: { not: "not_short" } }),
       ...(options.startMs || options.endMs
         ? {
             publishedAt: {

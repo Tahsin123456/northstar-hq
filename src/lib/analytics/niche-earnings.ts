@@ -5,6 +5,7 @@ import {
   type NicheValue,
   type ProjectedMoney,
 } from "./niche-rpm";
+import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-format";
 
 /**
  * =========================================================================
@@ -71,6 +72,13 @@ export interface NicheEarningsInput {
   readonly name: string;
   readonly colorIndex: number;
   /**
+   * The niche's format, already narrowed from the DTO. Decides how a
+   * hand-entered rate is priced — engaged for shorts, raw for long form — via
+   * `rpmBounds`. Optional so the existing Shorts panel builder and its tests
+   * keep meaning what they meant; absent reads as shorts.
+   */
+  readonly format?: NicheFormat;
+  /**
    * The resolved rate, or `null` when the reader may not see economics.
    *
    * ONE NULL FOR ONE MEANING, matching `NicheDTO.rpm`: null is "withheld", and
@@ -105,6 +113,9 @@ export interface NicheEarningsRow {
   readonly id: string;
   readonly name: string;
   readonly colorIndex: number;
+  /** Carried through from the input so the row's renderer quotes the rate on
+   * the same basis the arithmetic priced it with. */
+  readonly format: NicheFormat;
   readonly state: NicheEarningsState;
   /** The resolution, so the row can name its rate, its basis and its reasons. */
   readonly rpm: NicheRpmResolution;
@@ -213,7 +224,8 @@ export function buildNicheEarnings(
     // disclosure about a niche they were not sent.
     if (niche.rpm === null) continue;
 
-    const bounds = rpmBounds(niche.rpm);
+    const format = niche.format ?? DEFAULT_NICHE_FORMAT;
+    const bounds = rpmBounds(niche.rpm, format);
     const value = calculateNicheValue({
       ourViews: niche.ourViews,
       competitorViews: niche.competitorViews,
@@ -226,6 +238,7 @@ export function buildNicheEarnings(
       id: niche.id,
       name: niche.name,
       colorIndex: niche.colorIndex,
+      format,
       state:
         bounds === null
           ? "unpriced"
@@ -382,6 +395,17 @@ export const NICHE_EARNINGS_LABEL = "What each niche is generating";
  */
 export const NICHE_EARNINGS_DEFINITION =
   "For each niche, the Shorts published in the selected period are priced at that niche's RPM. Read the period carefully: it chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. Views earned inside a period would need view history, which is collected by automatic refresh — currently switched off. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
+
+/** The Long Form panel's copy of the definition — the uploads are not Shorts there. */
+export const NICHE_EARNINGS_DEFINITION_LONGFORM =
+  "For each niche, the long-form videos published in the selected period are priced at that niche's RPM. Read the period carefully: it chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. Views earned inside a period would need view history, which is collected by automatic refresh — currently switched off. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
+
+/** The definition for the panel a page of the given format mounts. */
+export function nicheEarningsDefinition(format: NicheFormat): string {
+  return format === "shorts"
+    ? NICHE_EARNINGS_DEFINITION
+    : NICHE_EARNINGS_DEFINITION_LONGFORM;
+}
 
 /** Why no niche has a figure — the state of this deployment today. */
 export const NICHE_EARNINGS_NOTHING_PRICED =

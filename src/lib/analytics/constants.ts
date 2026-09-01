@@ -131,6 +131,16 @@ export const HIT_RATE_DEFINITION =
 
 export const HIT_RATE_FORMULA = "hits ÷ decided Shorts × 100";
 
+/**
+ * The same definition with the Long Form product's unit in it. Written out in
+ * full rather than derived by string surgery, for the reason
+ * `TOTAL_VIEWS_DEFINITION_LONGFORM` gives: pinned user-facing copy must not be
+ * a function of another sentence's exact phrasing. The example window is
+ * longer because that is the example a long-form rule would actually use.
+ */
+export const HIT_RATE_DEFINITION_LONGFORM =
+  "A hit is a video that reached its niche's view threshold within that niche's hit window of publishing — for example 1,000,000 views within 30 days. Hit rate is the share of DECIDED long-form videos uploaded in the selected period that managed it. Videos still inside their window are not counted in either half: they are unfinished, not failures. Videos whose window closed with no view history recorded inside it are excluded too, and counted separately, because they did eventually pass the bar and nobody can say whether that took two days or two years.";
+
 /** What the two excluded populations are, for a caption under a rate. */
 export const HIT_RATE_PENDING_EXPLANATION =
   "Still inside its hit window. Not a hit and not a miss yet — the verdict lands on its own when the window closes.";
@@ -302,6 +312,19 @@ export const TOTAL_VIEWS_VS_STUDIO =
 export const UPLOAD_VIEWS_TIP = `${TOTAL_VIEWS_DEFINITION} ${TOTAL_VIEWS_VS_STUDIO}`;
 
 /**
+ * The same disclosure with the Long Form product's unit in it.
+ *
+ * Written out rather than string-replaced from the Shorts sentence, because
+ * this is pinned user-facing copy: a `.replace` chain would make the wording a
+ * function of another sentence's exact phrasing, which is how a copy edit in
+ * one place silently rewrites the other.
+ */
+export const TOTAL_VIEWS_DEFINITION_LONGFORM =
+  "Upload views is the sum of the current view counts of long-form videos uploaded during the selected period. It is not views earned during the period: a video uploaded three days ago contributes all of its lifetime views, and a video uploaded before the period contributes none. Unlike hit rate, this figure is deliberately a LIFETIME total and has no window — it describes reach, not whether the work met a bar in time.";
+
+export const UPLOAD_VIEWS_TIP_LONGFORM = `${TOTAL_VIEWS_DEFINITION_LONGFORM} ${TOTAL_VIEWS_VS_STUDIO}`;
+
+/**
  * Why the Studio-style figure is ABSENT rather than approximated.
  *
  * Same principle as the revenue service's four states: "we could not ask" must
@@ -341,6 +364,12 @@ export function uploadViewsTip(snapshotDays: number | null): string {
   return `${UPLOAD_VIEWS_TIP} ${VIEWS_EARNED_NOT_AVAILABLE}${viewHistoryNote(snapshotDays)}`;
 }
 
+/** The Long Form surfaces' version of the tip above — same shape, its unit. */
+export function uploadViewsTipLongform(snapshotDays: number | null): string {
+  if (snapshotDays === null) return UPLOAD_VIEWS_TIP_LONGFORM;
+  return `${UPLOAD_VIEWS_TIP_LONGFORM} ${VIEWS_EARNED_NOT_AVAILABLE}${viewHistoryNote(snapshotDays)}`;
+}
+
 /**
  * ==========================================================================
  * THE OTHER HALF OF THE RULE: THE WINDOW
@@ -358,6 +387,22 @@ export const MAX_HIT_WINDOW_HOURS = 8_760;
 
 /** Offered by the window control, in ascending order. Hours, shown as days. */
 export const HIT_WINDOW_PRESETS = [24, 48, 72, 168, 336, 720] as const;
+
+/**
+ * The window presets for a LONG FORM niche — days and weeks, not hours.
+ *
+ * A long-form video's arc is slower than a Short's: nothing meaningful is
+ * decided at 24 or 48 hours, and offering those would invite windows that
+ * judge every upload a miss before its audience arrives. 7 days to 180 days,
+ * inside the same MIN/MAX bounds; the shorts list is untouched, and the
+ * dialog picks per niche format rather than either constant moving.
+ */
+export const HIT_WINDOW_PRESETS_LONGFORM = [168, 336, 720, 1440, 2160, 4320] as const;
+
+/** The window presets that suit one format's niches. */
+export function hitWindowPresetsFor(format: "shorts" | "longform"): readonly number[] {
+  return format === "longform" ? HIT_WINDOW_PRESETS_LONGFORM : HIT_WINDOW_PRESETS;
+}
 
 /**
  * There is NO DEFAULT WINDOW, and that is deliberate.

@@ -5,14 +5,15 @@ import * as React from "react";
 import { Target } from "lucide-react";
 import { toast } from "sonner";
 import {
-  HIT_WINDOW_PRESETS,
   MAX_HIT_WINDOW_HOURS,
   MAX_THRESHOLD,
   MIN_HIT_WINDOW_HOURS,
   MIN_THRESHOLD,
   THRESHOLD_PRESETS,
+  hitWindowPresetsFor,
 } from "@/lib/analytics/constants";
 import { formatHitWindow } from "@/lib/analytics/hit-rate";
+import { toNicheFormat } from "@/lib/niches/niche-format";
 import { useOrgBaseCurrency } from "@/hooks/use-org-currency";
 import type { NicheDTO } from "@/lib/dto";
 import {
@@ -450,7 +451,11 @@ function NicheThresholdForm({
         </div>
 
         <div className="flex flex-wrap gap-1.5">
-          {HIT_WINDOW_PRESETS.map((preset) => (
+          {/* The niche's own format picks the preset list: hours-to-days for a
+              Shorts niche (unchanged), days-to-months for a Long Form one,
+              where "reach the bar in 24 hours" is a rule nobody would mean.
+              Typing any window inside the shared bounds still works. */}
+          {hitWindowPresetsFor(toNicheFormat(niche.format)).map((preset) => (
             <button
               key={preset}
               type="button"

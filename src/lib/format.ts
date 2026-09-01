@@ -155,6 +155,31 @@ export function youtubeThumbnailUrl(videoId: string): string {
 }
 
 /**
+ * The high-resolution 16:9 frame, when YouTube has rendered one.
+ *
+ * 1280x720, and NOT GUARANTEED: `maxresdefault` exists only for uploads whose
+ * source was HD, and returns a 404 with the grey placeholder body otherwise —
+ * the same real-error property `youtubeShortsPosterUrl` documents, so an
+ * `onError` fallback is mandatory here too. `longformPosterSourceFor` pairs it
+ * with `youtubeHqThumbnailUrl` below.
+ */
+export function youtubeMaxResThumbnailUrl(videoId: string): string {
+  return `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
+}
+
+/**
+ * The always-present medium frame — 480x360, generated for every video.
+ *
+ * NOTE THE SHAPE: 4:3, not 16:9. YouTube letterboxes the 16:9 frame into it
+ * with black bars top and bottom, which is why the long-form poster draws it
+ * `object-cover` inside a 16:9 box — the crop removes exactly the bars and
+ * nothing of the frame.
+ */
+export function youtubeHqThumbnailUrl(videoId: string): string {
+  return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+}
+
+/**
  * THE PORTRAIT FRAME OF A SHORT, from the id alone.
  *
  * `mqdefault.jpg` above is 320x180 WHATEVER SHAPE THE VIDEO IS. For a 9:16

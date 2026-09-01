@@ -12,6 +12,7 @@ import {
   effectiveContentTypeIds,
 } from "@/lib/content-types/resolve";
 import type { DateRange } from "@/lib/analytics/types";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import type { ChannelDTO, DatasetDTO, NicheRefDTO, OwnershipType } from "@/lib/dto";
 import type {
   ContentTypeFilter,
@@ -43,7 +44,15 @@ export interface FeedShort extends OutlierShort {
 }
 
 export interface FeedOptions {
-  /** Window the Shorts themselves must fall inside. */
+  /**
+   * Which format's videos the feed scores. Absent means shorts — every
+   * existing page. The narrowing happens inside `calculateOutliers`, on both
+   * the candidates and their baselines, so a long-form video is only ever
+   * measured against its channel's typical long-form video. Uncertain videos
+   * are in neither format's feed — `isVideoOfFormat`'s pinned rule.
+   */
+  readonly format?: NicheFormat;
+  /** Window the videos themselves must fall inside. */
   readonly range: DateRange;
   /**
    * Window used to compute each channel's median baseline.
@@ -102,6 +111,7 @@ export function useShortsFeed(
   const viewerId = useSession().user.id;
 
   const {
+    format = "shorts",
     range,
     baselineRange,
     niche,
@@ -192,6 +202,7 @@ export function useShortsFeed(
       // `now` is 0 until the clock store subscribes; fall back to the range end
       // so views-per-day is never computed against the epoch.
       now === 0 ? range.endMs : now,
+      format,
     );
 
     const enriched: FeedShort[] = [];
@@ -214,6 +225,7 @@ export function useShortsFeed(
     return sortOutliers(enriched, sort) as FeedShort[];
   }, [
     dataset,
+    format,
     range,
     baselineRange,
     niche,

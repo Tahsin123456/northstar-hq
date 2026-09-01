@@ -6,12 +6,7 @@ import { FiltersUrlSync } from "@/components/providers/filters-url-sync";
 import { SessionProvider } from "@/components/providers/session-provider";
 import { getActor, toActorDTO } from "@/server/auth/dal";
 import { needsSetup } from "@/server/services/auth-service";
-import {
-  DEFAULT_PERIOD_PRESET,
-  DEFAULT_THRESHOLD,
-  PERIOD_PRESETS,
-} from "@/lib/analytics/constants";
-import type { PeriodPresetId } from "@/lib/analytics/types";
+import { loadTeamDefaults } from "./team-defaults";
 
 /**
  * The authenticated half of the application.
@@ -28,35 +23,8 @@ import type { PeriodPresetId } from "@/lib/analytics/types";
  */
 export const dynamic = "force-dynamic";
 
-/**
- * Team defaults for the period and threshold controls.
- *
- * These now come from OrganizationSettings rather than the individual, because
- * a hit rate that means different things to two colleagues is not a metric.
- */
-async function loadTeamDefaults(): Promise<{
-  threshold: number;
-  periodPreset: PeriodPresetId;
-}> {
-  try {
-    const { getCurrentOrgSettings } = await import("@/server/services/user-service");
-    const settings = await getCurrentOrgSettings();
-    return {
-      threshold: settings.defaultThreshold,
-      periodPreset: periodPresetForDays(settings.defaultPeriodDays),
-    };
-  } catch {
-    // Only reached if the settings row cannot be read at all. The built-in
-    // defaults keep the app renderable; they are never silently substituted for
-    // an authorisation failure, because the actor check above has already run.
-    return { threshold: DEFAULT_THRESHOLD, periodPreset: DEFAULT_PERIOD_PRESET };
-  }
-}
-
-function periodPresetForDays(days: number): PeriodPresetId {
-  const match = PERIOD_PRESETS.find((preset) => preset.days === days);
-  return match ? match.id : DEFAULT_PERIOD_PRESET;
-}
+// The period/threshold team defaults moved to `./team-defaults` so the
+// /longform segment's own provider can seed the identical numbers.
 
 export default async function AuthenticatedLayout({
   children,

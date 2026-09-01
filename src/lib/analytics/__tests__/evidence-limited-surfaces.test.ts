@@ -321,13 +321,19 @@ describe("no surface is left reading .rate where it needs a measurement", () => 
   });
 
   it("the channel page passes a reference line only where there is an average", () => {
-    const source = readSource("app/(app)/channels/[id]/page.tsx");
+    // The page body lives in the shared component now — both channel routes
+    // (Shorts and Long Form) render it, so this is still the one place the
+    // property can regress.
+    const source = readSource("components/channel/channel-detail-body.tsx");
     expect(source).toContain("averageHitRate={measuredRate(metrics.hits)}");
     expect(source).not.toContain("averageHitRate={metrics.hits.rate}");
   });
 
   it("the channel page resolves one state for the whole page", () => {
-    const source = readSource("app/(app)/channels/[id]/page.tsx");
+    // The page body lives in the shared component now — both channel routes
+    // (Shorts and Long Form) render it, so this is still the one place the
+    // property can regress.
+    const source = readSource("components/channel/channel-detail-body.tsx");
     expect(source).toContain("resolveHitDisplayState");
     // "0 hit of 6 decided" in success green, four inches under a KpiCards tile
     // showing an em dash for the same number.

@@ -12,7 +12,12 @@ import { ShortDetailDialog, type ShortDetailTarget } from "./short-detail-dialog
 import { ShortPlayerDialog, type ShortPlayerTarget } from "./short-player-dialog";
 import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
 import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
-import { SHORTS_CARD_GRID, SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
+import {
+  LONGFORM_POSTER_FRAME,
+  SHORTS_CARD_GRID,
+  SHORTS_POSTER_FRAME,
+} from "@/lib/shorts/feed-layout";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { cn } from "@/lib/utils";
 
 /**
@@ -45,6 +50,7 @@ export function ShortsFeed({
   emptyTitle = "No Shorts match these filters",
   emptyDescription,
   limit = 100,
+  format = "shorts",
 }: {
   shorts: readonly FeedShort[];
   dataset: DatasetDTO | undefined;
@@ -53,6 +59,12 @@ export function ShortsFeed({
   emptyTitle?: string;
   emptyDescription?: React.ReactNode;
   limit?: number;
+  /**
+   * Which product's feed this is. Threads to every card (poster shape, channel
+   * link), to the loading skeleton (so it predicts the shape the cards will
+   * settle into), and to the player dialog (16:9 sizing, watch-page link).
+   */
+  format?: NicheFormat;
 }) {
   const [openShort, setOpenShort] = React.useState<FeedShort | null>(null);
   const [playingShort, setPlayingShort] = React.useState<FeedShort | null>(null);
@@ -115,7 +127,12 @@ export function ShortsFeed({
                 stands in for is worse than none: the page settles by jumping,
                 which is the moment a reader loses their place. */}
             <div className="bg-surface-sunken">
-              <Skeleton className={cn(SHORTS_POSTER_FRAME, "rounded-none")} />
+              <Skeleton
+                className={cn(
+                  format === "shorts" ? SHORTS_POSTER_FRAME : LONGFORM_POSTER_FRAME,
+                  "rounded-none",
+                )}
+              />
             </div>
             <div className="flex flex-col gap-2 p-3">
               <Skeleton className="h-3 w-11/12" />
@@ -157,6 +174,7 @@ export function ShortsFeed({
             rank={showRank ? index + 1 : undefined}
             noteCount={noteCounts[short.video.id] ?? 0}
             resolution={contentTypeIndex.get(short.video.id) ?? EMPTY_RESOLUTION}
+            format={format}
             onPlayShort={setPlayingShort}
             onOpenShort={setOpenShort}
           />
@@ -177,6 +195,7 @@ export function ShortsFeed({
           leaving a Short talking to an empty page. */}
       <ShortPlayerDialog
         short={playerTarget}
+        format={format}
         open={playingShort !== null}
         onOpenChange={(open) => {
           if (!open) setPlayingShort(null);
@@ -187,6 +206,7 @@ export function ShortsFeed({
           leaving the feed. */}
       <ShortDetailDialog
         short={detailTarget}
+        format={format}
         open={openShort !== null}
         onOpenChange={(open) => {
           if (!open) setOpenShort(null);

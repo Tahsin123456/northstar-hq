@@ -12,22 +12,24 @@ import {
   RPM_NOT_MEASURED_BECAUSE,
   RPM_REJECTION_EXPLANATION,
   RPM_WINDOW_DAYS,
-  TRACKED_NICHE_VALUE_DEFINITION,
   TRACKED_NICHE_VALUE_LABEL,
   UNCONVERTIBLE_NICHE_SHORT,
   UNPRICED_NICHE_EXPLANATION,
   UNPRICED_NICHE_SHORT,
-  UNPRICED_NICHE_SHORT_NO_SHORTS,
   calculateNicheValue,
+  trackedNicheValueDefinition,
+  unpricedNicheNothingPublished,
   engagedViewShareNote,
   formatEngagedViewShare,
   formatRpmBounds,
+  manualRpmBasis,
   rpmBounds,
   rpmQuoteUnit,
   type NicheRpmResolution,
   type ProjectedMoney,
   type RpmChannelOutcome,
 } from "@/lib/analytics/niche-rpm";
+import { toNicheFormat, type NicheFormat } from "@/lib/niches/niche-format";
 import type { NicheDTO } from "@/lib/dto";
 import { formatMoney, formatMoneyCompact } from "@/lib/finance/money";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
@@ -175,7 +177,12 @@ export function NicheValueStrip({
    */
   if (rpm === null) return null;
 
-  const bounds = rpmBounds(rpm);
+  // The niche's own format decides how a hand-entered rate is read — engaged
+  // for shorts, raw for long form — and it travels on the DTO, so nothing has
+  // to be threaded from the page. Re-narrowed at this boundary per the DTO's
+  // own rule: the wire type is `string`.
+  const format = toNicheFormat(niche.format);
+  const bounds = rpmBounds(rpm, format);
   const value = calculateNicheValue({
     ourViews,
     competitorViews,
@@ -206,8 +213,10 @@ export function NicheValueStrip({
               period selects which uploads count, not which views were earned
               during it, and this figure sits between two period stats beside a
               period selector — so without this it reads as "what this niche
-              made last month", which it is not. */}
-          <InfoTip>{TRACKED_NICHE_VALUE_DEFINITION}</InfoTip>
+              made last month", which it is not. Selected on the niche's own
+              format: the Shorts sentence about engaged views would state the
+              OPPOSITE of a Long Form niche's arithmetic. */}
+          <InfoTip>{trackedNicheValueDefinition(format)}</InfoTip>
         </span>
         {bounds !== null ? <SourceChip measured={rpm.source === "derived"} /> : null}
       </div>
@@ -218,14 +227,14 @@ export function NicheValueStrip({
         <div className="flex flex-col gap-1">
           <span
             className="text-[12px] text-subtle-foreground"
-            aria-label={`${TRACKED_NICHE_VALUE_LABEL}: ${UNPRICED_NICHE_SHORT_NO_SHORTS}. ${NO_SHORTS_TO_PRICE_EXPLANATION}`}
+            aria-label={`${TRACKED_NICHE_VALUE_LABEL}: ${unpricedNicheNothingPublished(format)}. ${NO_SHORTS_TO_PRICE_EXPLANATION}`}
           >
-            {UNPRICED_NICHE_SHORT_NO_SHORTS}
+            {unpricedNicheNothingPublished(format)}
           </span>
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {NO_SHORTS_TO_PRICE_EXPLANATION}
           </p>
-          <RateLine rpm={rpm} />
+          <RateLine rpm={rpm} format={format} />
         </div>
       ) : (
         <>
@@ -277,7 +286,7 @@ export function NicheValueStrip({
             </p>
           ) : null}
 
-          <RateLine rpm={rpm} />
+          <RateLine rpm={rpm} format={format} />
         </>
       )}
     </div>
@@ -293,8 +302,8 @@ export function NicheValueStrip({
  * they can only believe — and a fact that exists only on hover does not exist
  * on a printout, in a screenshot, or to a keyboard user.
  */
-function RateLine({ rpm }: { rpm: NicheRpmResolution }) {
-  const bounds = rpmBounds(rpm);
+function RateLine({ rpm, format }: { rpm: NicheRpmResolution; format: NicheFormat }) {
+  const bounds = rpmBounds(rpm, format);
   if (bounds === null) return null;
 
   if (rpm.source === "derived") {
@@ -336,8 +345,10 @@ function RateLine({ rpm }: { rpm: NicheRpmResolution }) {
               lowMinorPerMillion: rpm.supersededRange.lowMinorPerMillion,
               highMinorPerMillion: rpm.supersededRange.highMinorPerMillion,
               currency: rpm.supersededRange.currency,
-              basis: "engaged",
-            })} ${rpmQuoteUnit("engaged")} is stored but not used here.`
+              // The unit a hand-entered range for THIS format is quoted on —
+              // engaged for shorts, raw for long form.
+              basis: manualRpmBasis(format),
+            })} ${rpmQuoteUnit(manualRpmBasis(format))} is stored but not used here.`
           : DERIVED_RPM_EXPLANATION}
       </p>
     );
@@ -421,12 +432,16 @@ function UnpricedNiche({
       ? rpm.unconvertibleRange
       : null;
 
+  // Same rule as everywhere on this strip: the stored range is quoted on the
+  // NICHE'S format's manual basis, never on a hardcoded one.
+  const format = toNicheFormat(niche.format);
+
   if (unconvertible !== null) {
     const stored = formatRpmBounds({
       lowMinorPerMillion: unconvertible.lowMinorPerMillion,
       highMinorPerMillion: unconvertible.highMinorPerMillion,
       currency: unconvertible.currency,
-      basis: "engaged",
+      basis: manualRpmBasis(format),
     });
     return (
       <div className="flex flex-col gap-1">
@@ -437,7 +452,7 @@ function UnpricedNiche({
           {UNCONVERTIBLE_NICHE_SHORT}
         </span>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {stored} {rpmQuoteUnit("engaged")} is stored for {niche.name}.{" "}
+          {stored} {rpmQuoteUnit(manualRpmBasis(format))} is stored for {niche.name}.{" "}
           {MANUAL_RPM_UNCONVERTIBLE_EXPLANATION}
         </p>
         <WhereToSetTheRate />

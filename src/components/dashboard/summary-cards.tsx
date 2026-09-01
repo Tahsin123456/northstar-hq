@@ -23,6 +23,31 @@ import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { TrendIndicator } from "@/components/metrics/trend-indicator";
 
 /**
+ * The strings that name a format on this strip, as one object for the same
+ * reason `ChannelTableLabels` exists: the Long Form overview reuses the whole
+ * card by swapping words, and the default set renders every existing Shorts
+ * page byte-identically. `hrefBase` rides along because the Top-channel link
+ * must lead into the same product the numbers describe.
+ */
+export interface SummaryCardsLabels {
+  readonly uploadedLabel: string;
+  readonly perUnit: string;
+  readonly noneInPeriod: string;
+  readonly noChannelHasUploads: string;
+  readonly uploadViewsTip: (snapshotDays: number | null) => string;
+  readonly hrefBase: string;
+}
+
+export const SHORTS_SUMMARY_LABELS: SummaryCardsLabels = {
+  uploadedLabel: "Shorts uploaded",
+  perUnit: "per Short",
+  noneInPeriod: "No Shorts in period",
+  noChannelHasUploads: "No channel has Shorts this period",
+  uploadViewsTip,
+  hrefBase: "/channels",
+};
+
+/**
  * Portfolio-level summary.
  *
  * One card, five figures, hairline dividers — rather than five separate cards.
@@ -39,6 +64,7 @@ export function SummaryCards({
   previousSummary,
   viewsDefinition,
   loading,
+  labels = SHORTS_SUMMARY_LABELS,
 }: {
   summary: PortfolioSummary;
   previousSummary?: PortfolioSummary;
@@ -49,6 +75,8 @@ export function SummaryCards({
    */
   viewsDefinition?: ViewsDefinitionDTO | null;
   loading?: boolean;
+  /** The format's wording and link base. Defaults to the Shorts set. */
+  labels?: SummaryCardsLabels;
 }) {
   /*
    * "Not configured" is read off the POOLED VERDICTS, not off the threshold
@@ -156,7 +184,7 @@ export function SummaryCards({
 
       <div className="border-b border-border p-5 md:border-b-0 lg:border-b-0">
         <Stat
-          label="Shorts uploaded"
+          label={labels.uploadedLabel}
           value={formatNumber(summary.totalShorts)}
           caption={
             previousSummary ? (
@@ -183,15 +211,15 @@ export function SummaryCards({
           label={UPLOAD_VIEWS_LABEL_LONG}
           value={formatCompactNumber(summary.totalViews)}
           hint={
-            <InfoTip>{uploadViewsTip(viewsDefinition?.snapshotDays ?? null)}</InfoTip>
+            <InfoTip>{labels.uploadViewsTip(viewsDefinition?.snapshotDays ?? null)}</InfoTip>
           }
           caption={
             previousSummary ? (
               <TrendIndicator trend={trends.views} valueFormat="views" />
             ) : summary.totalShorts > 0 ? (
-              `${formatCompactNumber(summary.totalViews / summary.totalShorts)} per Short`
+              `${formatCompactNumber(summary.totalViews / summary.totalShorts)} ${labels.perUnit}`
             ) : (
-              "No Shorts in period"
+              labels.noneInPeriod
             )
           }
         />
@@ -312,7 +340,7 @@ export function SummaryCards({
             ) : pooled.excluded > 0 ? (
               `Nothing decided yet · ${formatNumber(pooled.excluded)} excluded`
             ) : (
-              "No Shorts in period"
+              labels.noneInPeriod
             )
           }
         />
@@ -324,7 +352,7 @@ export function SummaryCards({
           value={
             summary.topChannel ? (
               <Link
-                href={`/channels/${summary.topChannel.id}`}
+                href={`${labels.hrefBase}/${summary.topChannel.id}`}
                 className="block truncate transition-colors hover:text-accent"
                 title={summary.topChannel.name}
               >
@@ -347,7 +375,7 @@ export function SummaryCards({
                     // enter with. Naming a "top" channel out of a field of
                     // arithmetic zeros would crown whichever one sorted first.
                     "No channel has a measured hit rate this period"
-                  : "No channel has Shorts this period"
+                  : labels.noChannelHasUploads
           }
         />
       </div>

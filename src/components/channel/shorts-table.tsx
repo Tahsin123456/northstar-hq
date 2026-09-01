@@ -23,7 +23,9 @@ import {
   formatThresholdRatio,
   youtubeShortsUrl,
   youtubeThumbnailUrl,
+  youtubeWatchUrl,
 } from "@/lib/format";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -77,9 +79,16 @@ type Direction = "asc" | "desc";
 export function ShortsTable({
   shorts,
   threshold,
+  format = "shorts",
   className,
 }: {
   shorts: readonly EvaluatedShort[];
+  /**
+   * Which format's videos the (already-filtered) list holds. Decides the
+   * words, the row links (/shorts/ vs /watch) and the thumbnail's shape —
+   * the sorting, selection and verdict machinery is format-blind.
+   */
+  format?: NicheFormat;
   /**
    * The view bar the screen is exploring with, or `null` when the niche in view
    * has none configured.
@@ -92,6 +101,9 @@ export function ShortsTable({
   threshold: number | null;
   className?: string;
 }) {
+  // The unit noun, once — same convention as `KpiCards`.
+  const one = format === "shorts" ? "Short" : "video";
+  const many = format === "shorts" ? "Shorts" : "videos";
   const [sortKey, setSortKey] = React.useState<ShortsSortKey>("publishedAt");
   const [direction, setDirection] = React.useState<Direction>("desc");
   const [filter, setFilter] = React.useState<ShortsFilter>("all");
@@ -192,7 +204,7 @@ export function ShortsTable({
     return (
       <div className={cn("rounded-lg border border-border bg-surface", className)}>
         <EmptyState
-          title="No Shorts in this period"
+          title={`No ${many} in this period`}
           description="Try a longer period, or refresh the channel to pull in newer uploads."
         />
       </div>
@@ -205,7 +217,7 @@ export function ShortsTable({
       {selectedIds.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2 border-b border-border bg-accent-subtle px-4 py-2">
           <span className="tnum text-[12px] font-medium text-foreground">
-            {selectedIds.length} {selectedIds.length === 1 ? "Short" : "Shorts"} selected
+            {selectedIds.length} {selectedIds.length === 1 ? one : many} selected
           </span>
           <BulkContentTypeButton
             videoIds={selectedIds}
@@ -264,8 +276,8 @@ export function ShortsTable({
                     onCheckedChange={toggleAllVisible}
                     aria-label={
                       allVisibleSelected
-                        ? "Deselect every Short in view"
-                        : "Select every Short in view"
+                        ? `Deselect every ${one} in view`
+                        : `Select every ${one} in view`
                     }
                   />
                 </th>
@@ -276,7 +288,7 @@ export function ShortsTable({
               />
               <th scope="col" className="px-2 py-2">
                 <span className="text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
-                  Short
+                  {format === "shorts" ? "Short" : "Video"}
                 </span>
               </th>
               <th scope="col" className="w-[150px] px-2 py-2">
@@ -309,7 +321,7 @@ export function ShortsTable({
                 tip={
                   threshold === null
                     ? UNCONFIGURED_RULE_EXPLANATION
-                    : `LIFETIME views as a multiple of the ${formatCompactNumber(threshold)} bar above. 1.0× is exactly at the line. This is not how close the Short came to being a hit — that is measured at the window's close, and it is in the Outcome tooltip where a reading exists.`
+                    : `LIFETIME views as a multiple of the ${formatCompactNumber(threshold)} bar above. 1.0× is exactly at the line. This is not how close the ${one} came to being a hit — that is measured at the window's close, and it is in the Outcome tooltip where a reading exists.`
                 }
               />
               <SortHeader
@@ -349,6 +361,7 @@ export function ShortsTable({
               <ShortRow
                 key={short.id}
                 short={short}
+                format={format}
                 resolution={contentTypeIndex.get(short.id) ?? EMPTY_RESOLUTION}
                 selectable={canManage}
                 isSelected={selected.has(short.id)}
@@ -361,7 +374,7 @@ export function ShortsTable({
 
       {sorted.length === 0 ? (
         <div className="px-4 py-8 text-center text-[13px] text-subtle-foreground">
-          No Shorts match this filter.
+          No {many} match this filter.
         </div>
       ) : null}
     </div>
@@ -370,17 +383,23 @@ export function ShortsTable({
 
 function ShortRow({
   short,
+  format,
   resolution,
   selectable,
   isSelected,
   onToggleSelected,
 }: {
   short: EvaluatedShort;
+  format: NicheFormat;
   resolution: ContentTypeResolution;
   selectable: boolean;
   isSelected: boolean;
   onToggleSelected: () => void;
 }) {
+  const watchUrl =
+    format === "shorts"
+      ? youtubeShortsUrl(short.youtubeVideoId)
+      : youtubeWatchUrl(short.youtubeVideoId);
   return (
     <tr
       className={cn(
@@ -405,7 +424,7 @@ function ShortRow({
 
       <td className={cn("py-2 pr-0", selectable ? "pl-2" : "pl-4")}>
         <a
-          href={youtubeShortsUrl(short.youtubeVideoId)}
+          href={watchUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="block"
@@ -416,19 +435,24 @@ function ShortRow({
           <img
             src={youtubeThumbnailUrl(short.youtubeVideoId)}
             alt=""
-            width={36}
-            height={48}
+            width={format === "shorts" ? 36 : 64}
+            height={format === "shorts" ? 48 : 36}
             loading="lazy"
             decoding="async"
             referrerPolicy="no-referrer"
-            className="h-12 w-9 rounded object-cover ring-1 ring-border"
+            // The chip matches the video's shape — see `ShortDetailDialog`.
+            className={
+              format === "shorts"
+                ? "h-12 w-9 rounded object-cover ring-1 ring-border"
+                : "h-9 w-16 rounded object-cover ring-1 ring-border"
+            }
           />
         </a>
       </td>
 
       <td className="min-w-0 px-2 py-2">
         <a
-          href={youtubeShortsUrl(short.youtubeVideoId)}
+          href={watchUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex max-w-full items-center gap-1.5 text-[13px] text-foreground transition-colors hover:text-accent"

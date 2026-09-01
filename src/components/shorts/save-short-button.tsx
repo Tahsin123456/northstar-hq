@@ -5,6 +5,7 @@ import { Bookmark, BookmarkCheck, Check, FolderPlus, Plus } from "lucide-react";
 import { toast } from "sonner";
 import type { FeedShort } from "@/hooks/use-shorts-feed";
 import { useDataset } from "@/hooks/use-dataset";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import {
   useCreateCollection,
   useSaveShort,
@@ -45,6 +46,13 @@ export function SaveShortButton({
   size?: "icon-sm" | "sm";
 }) {
   const { data } = useDataset();
+  // The subtree's product decides the NOUN in this control's labels — the
+  // button is mounted on both feeds, and "Save this Short" over a 20-minute
+  // video is the pay-attention-to-me kind of wrong. Read from context rather
+  // than a prop for the same reason `useDataset` reads it: every existing
+  // Shorts call site keeps meaning what it always meant, untouched.
+  const format = useDatasetFormat();
+  const noun = format === "shorts" ? "Short" : "video";
   const save = useSaveShort();
   const unsave = useUnsaveShort();
   const setCollections = useSetSavedCollections();
@@ -98,7 +106,7 @@ export function SaveShortButton({
       {
         onSuccess: () => toast.success("Saved", { description: short.video.title }),
         onError: (e) =>
-          toast.error("Could not save that Short", {
+          toast.error(`Could not save that ${noun}`, {
             description: e instanceof Error ? e.message : undefined,
           }),
       },
@@ -150,7 +158,7 @@ export function SaveShortButton({
       size={size}
       onClick={handleToggle}
       loading={pending}
-      aria-label={isSaved ? "Remove from saved" : "Save this Short"}
+      aria-label={isSaved ? "Remove from saved" : `Save this ${noun}`}
       aria-pressed={isSaved}
       className={cn(
         "transition-opacity",
@@ -167,7 +175,7 @@ export function SaveShortButton({
     <div className="flex items-center">
       <Tooltip>
         <TooltipTrigger asChild>{saveButton}</TooltipTrigger>
-        <TooltipContent>{isSaved ? "Saved — click to remove" : "Save this Short"}</TooltipContent>
+        <TooltipContent>{isSaved ? "Saved — click to remove" : `Save this ${noun}`}</TooltipContent>
       </Tooltip>
 
       {/* Collection filing only appears once a Short is actually saved. */}

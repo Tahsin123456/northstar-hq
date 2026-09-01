@@ -6,7 +6,9 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Bookmark,
+  Clapperboard,
   Coins,
+  Film,
   ShieldCheck,
   Wallet,
   Flame,
@@ -42,6 +44,19 @@ interface NavItem {
    * concern rather than a security one.
    */
   requires?: readonly Permission[];
+  /**
+   * A Shorts surface — hidden from an actor whose `contentScope` is "longs".
+   *
+   * PER ITEM, not per section, and the granularity is load-bearing: Notes and
+   * Saved live in the same "Intelligence" section as Winners and Outliers, are
+   * format-neutral, and stay for everybody — hiding whole sections would take
+   * them from exactly the people the spec keeps them for. Sections whose every
+   * item is hidden are already dropped by the existing empty-section rule.
+   *
+   * Same affordance-not-boundary caveat as `requires`: the API refuses a
+   * longs-role's `?format=shorts` regardless of what this renders.
+   */
+  shortsOnly?: boolean;
 }
 
 interface NavSection {
@@ -67,24 +82,39 @@ const NAV_SECTIONS: NavSection[] = [
       // Compare is gone, and nothing replaced it. The Overview table already
       // ranks every channel on the same metrics and sorts by any of them, so
       // the one thing Compare added over it was a six-channel ceiling.
-      { href: "/", label: "Overview", icon: LayoutDashboard },
-      { href: "/our-vs-market", label: "Our vs Market", icon: Swords },
+      { href: "/", label: "Overview", icon: LayoutDashboard, shortsOnly: true },
+      { href: "/our-vs-market", label: "Our vs Market", icon: Swords, shortsOnly: true },
     ],
   },
   {
     label: "Intelligence",
     items: [
-      { href: "/winners", label: "Winners", icon: Flame },
-      { href: "/outliers", label: "Outliers", icon: TrendingUp },
+      { href: "/winners", label: "Winners", icon: Flame, shortsOnly: true },
+      { href: "/outliers", label: "Outliers", icon: TrendingUp, shortsOnly: true },
+      // Notes and Saved are format-neutral and stay for every role — the
+      // reason `shortsOnly` is an item flag rather than a section one.
       { href: "/notes", label: "Notes", icon: StickyNote },
       { href: "/saved", label: "Saved", icon: Bookmark },
     ],
   },
   {
+    // The other side of the operation, as its own place to do the work.
+    // `longs.view` is held by admin and the two longs roles only, so a
+    // shorts-role user never sees this section at all — and an admin gains it
+    // beside everything they already had, which is the one visible sidebar
+    // change for them.
+    label: "Long Form",
+    items: [
+      { href: "/longform", label: "Overview", icon: Clapperboard, requires: ["longs.view"] },
+      { href: "/longform/videos", label: "Videos", icon: Film, requires: ["longs.view"] },
+      { href: "/longform/niches", label: "Niches", icon: Layers, requires: ["longs.view"] },
+    ],
+  },
+  {
     label: "Tracker",
     items: [
-      { href: "/channels", label: "Channels", icon: Tv2, matchPrefix: true },
-      { href: "/niches", label: "Niches", icon: Layers },
+      { href: "/channels", label: "Channels", icon: Tv2, matchPrefix: true, shortsOnly: true },
+      { href: "/niches", label: "Niches", icon: Layers, shortsOnly: true },
       // Beside Niches because they are the two taxonomies — which slice of the
       // operation owns a channel, and what the work itself is — and a reader
       // looking for one is usually deciding between them.
@@ -94,7 +124,11 @@ const NAV_SECTIONS: NavSection[] = [
       // niche first, which is the answer to a question nobody asks in those
       // words: you go looking for "content types", not for the niche you
       // happened to define them under.
-      { href: "/content-types", label: "Content Types", icon: Shapes },
+      //
+      // `shortsOnly` even though the tags themselves are format-neutral: the
+      // PAGE is built over the Shorts dataset, and a longs-role user reaching
+      // it would meet the 403 with nothing they could do there.
+      { href: "/content-types", label: "Content Types", icon: Shapes, shortsOnly: true },
     ],
   },
   {
@@ -149,18 +183,28 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const session = useOptionalSession();
 
+  // Which side of the operation the signed-in role is about, straight off the
+  // session's ActorDTO — the same resolved value the server derived, so the
+  // sidebar cannot disagree with the role table.
+  const contentScope = session?.user.contentScope;
+
   // Sections whose every item is hidden are dropped entirely, so a Channel
   // Director does not see an empty "Administration" heading advertising that
-  // there is something there they cannot reach.
+  // there is something there they cannot reach — and a longs-role user does
+  // not see a "Tracker" heading over nothing once its items are all Shorts.
   const visibleSections = React.useMemo(
     () =>
       NAV_SECTIONS.map((section) => ({
         ...section,
-        items: section.items.filter(
-          (item) => !item.requires || (session?.canAny(item.requires) ?? false),
-        ),
+        items: section.items.filter((item) => {
+          // Shorts surfaces disappear for a longs-scoped role. "all" (admin)
+          // and "shorts" both keep them, so for every current user this
+          // filter removes nothing.
+          if (item.shortsOnly && contentScope === "longs") return false;
+          return !item.requires || (session?.canAny(item.requires) ?? false);
+        }),
       })).filter((section) => section.items.length > 0),
-    [session],
+    [session, contentScope],
   );
 
   return (

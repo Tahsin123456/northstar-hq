@@ -263,8 +263,14 @@ function formatGapLine(gap: PayrollMessageGap): string {
   }
 
   // A RULE GAP: never judged. Not hits, and the line does not say hits.
-  const shorts = gap.shortCount === 1 ? "Short" : "Shorts";
-  return `${gap.nicheName}: ${gap.shortCount} ${shorts} not counted, ${lacks}`;
+  //
+  // "video(s)", NOT "Short(s)" — the one deliberate wording change Shorts
+  // users see from the Long Form deploy, owner-approved. The same monthly run
+  // now pays both formats, so this line can describe a Long Form niche's
+  // uncounted uploads, and "3 Shorts not counted" under a Long Form niche
+  // name would be wrong on its face. The count itself is exact and unchanged.
+  const videos = gap.shortCount === 1 ? "video" : "videos";
+  return `${gap.nicheName}: ${gap.shortCount} ${videos} not counted, ${lacks}`;
 }
 
 /**
@@ -284,7 +290,10 @@ function formatGapLine(gap: PayrollMessageGap): string {
  */
 function gapNotice(input: PayrollMessageInput): string {
   return [
-    "Some Shorts earned nothing this month.",
+    // "videos", not "Shorts" — the sentence can now be about either format's
+    // gaps. See the note in `formatGapLine`; the pledged middle sentence
+    // below is untouched.
+    "Some videos earned nothing this month.",
     "A hit bonus needs three things from a niche: a view threshold, a window to reach it in, and what one hit is worth.",
     "You set those under Niches.",
     "Nobody's salary is affected — only the hit bonus.",

@@ -18,7 +18,8 @@ import { ShortContentTypePanel } from "@/components/content-types/short-content-
 import { NotesPanel } from "@/components/notes/notes-panel";
 import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
 import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
-import { youtubeShortsUrl, youtubeThumbnailUrl } from "@/lib/format";
+import { youtubeShortsUrl, youtubeThumbnailUrl, youtubeWatchUrl } from "@/lib/format";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
  * One Short, on its own.
@@ -71,30 +72,51 @@ export function ShortDetailDialog({
   short,
   open,
   onOpenChange,
+  format = "shorts",
 }: {
   /** `null` keeps the dialog closed and its body unmounted. */
   short: ShortDetailTarget | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Which product opened this. Everything structural — notes, niche chips,
+   * the content-type panel — is format-neutral; what moves is the naming
+   * ("Short" vs "Video"), the outward links (/shorts/ vs /watch) and where
+   * the channel name leads, so a long-form reader stays inside the Long Form
+   * pages rather than being dropped onto the Shorts channel page.
+   */
+  format?: NicheFormat;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle className="pr-6">Short</DialogTitle>
+          <DialogTitle className="pr-6">
+            {format === "shorts" ? "Short" : "Video"}
+          </DialogTitle>
           <DialogDescription className="truncate">
             {short?.title ?? ""}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="flex flex-col gap-4 pt-0">
-          {open && short ? <ShortDetailBody short={short} /> : null}
+          {open && short ? <ShortDetailBody short={short} format={format} /> : null}
         </DialogBody>
       </DialogContent>
     </Dialog>
   );
 }
 
-function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
+function ShortDetailBody({
+  short,
+  format,
+}: {
+  short: ShortDetailTarget;
+  format: NicheFormat;
+}) {
+  const watchUrl =
+    format === "shorts"
+      ? youtubeShortsUrl(short.youtubeVideoId)
+      : youtubeWatchUrl(short.youtubeVideoId);
   /*
    * Read live rather than taken as a prop.
    *
@@ -111,7 +133,7 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
     <>
       <div className="flex items-start gap-3">
         <a
-          href={youtubeShortsUrl(short.youtubeVideoId)}
+          href={watchUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="shrink-0"
@@ -120,18 +142,25 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
           <img
             src={youtubeThumbnailUrl(short.youtubeVideoId)}
             alt=""
-            width={44}
-            height={60}
+            width={format === "shorts" ? 44 : 80}
+            height={format === "shorts" ? 60 : 45}
             loading="lazy"
             decoding="async"
             referrerPolicy="no-referrer"
-            className="h-[60px] w-11 rounded object-cover ring-1 ring-border"
+            // The chip matches the video's own shape — a portrait crop of a
+            // 16:9 frame would show the middle sliver of a landscape
+            // composition, so the long-form chip is a small 16:9 box instead.
+            className={
+              format === "shorts"
+                ? "h-[60px] w-11 rounded object-cover ring-1 ring-border"
+                : "h-[45px] w-20 rounded object-cover ring-1 ring-border"
+            }
           />
         </a>
 
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           <a
-            href={youtubeShortsUrl(short.youtubeVideoId)}
+            href={watchUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex max-w-full items-center gap-1.5 text-[13px] font-medium text-foreground transition-colors hover:text-accent"
@@ -142,7 +171,11 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
           </a>
 
           <Link
-            href={`/channels/${short.channelId}`}
+            href={
+              format === "shorts"
+                ? `/channels/${short.channelId}`
+                : `/longform/channels/${short.channelId}`
+            }
             className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground transition-colors hover:text-accent"
           >
             <Avatar src={short.channelAvatarUrl} name={short.channelName} size={14} />
@@ -175,7 +208,7 @@ function ShortDetailBody({ short }: { short: ShortDetailTarget }) {
       <NotesPanel
         targetType="video"
         targetId={short.videoId}
-        title="Notes on this Short"
+        title={format === "shorts" ? "Notes on this Short" : "Notes on this video"}
         compact
         className="border-0 bg-transparent"
       />

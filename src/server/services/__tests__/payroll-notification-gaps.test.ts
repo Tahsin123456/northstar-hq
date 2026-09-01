@@ -195,7 +195,7 @@ describe("the run's own report reaches the chat", () => {
     // Joined on user id. Mia shares nothing with John's gap and must not
     // inherit it — a name-based join would have put it on both.
     expect(miaBlock).not.toContain("GTA");
-    expect(message).toContain("Some Shorts earned nothing this month.");
+    expect(message).toContain("Some videos earned nothing this month.");
   });
 
   /**
@@ -212,7 +212,7 @@ describe("the run's own report reaches the chat", () => {
     // No gap line and no explainer: an absence of information, never a claim
     // that nothing was skipped.
     expect(message).not.toContain("not paid, no hit payment set");
-    expect(message).not.toContain("Some Shorts earned nothing");
+    expect(message).not.toContain("Some videos earned nothing");
   });
 
   /**
@@ -223,7 +223,7 @@ describe("the run's own report reaches the chat", () => {
    */
   it("stays silent for an empty report, exactly as for a missing one", async () => {
     await send([]);
-    expect(sentMessage()).not.toContain("Some Shorts earned nothing");
+    expect(sentMessage()).not.toContain("Some videos earned nothing");
   });
 
   it("changes no figure in the message it sends", async () => {
@@ -245,7 +245,7 @@ describe("the run's own report reaches the chat", () => {
     expect(message).toContain("Total Northstar Studios Payroll: $3,800");
     // And no amount anywhere near a gap line, because there is no rate to state.
     const gapLine = message.split("\n").find((line) => line.startsWith("Science")) ?? "";
-    expect(gapLine).toBe("Science: 3 Shorts not counted, no hit threshold set");
+    expect(gapLine).toBe("Science: 3 videos not counted, no hit threshold set");
   });
 
   it("still sends exactly one message", async () => {
@@ -300,7 +300,7 @@ describe("an admin-initiated send", () => {
     // The pay is all there. Only the explanation is missing.
     expect(message).toContain("John — Editor");
     expect(message).toContain("Total Northstar Studios Payroll: $3,800");
-    expect(message).not.toContain("Some Shorts earned nothing");
+    expect(message).not.toContain("Some videos earned nothing");
     expect(message).not.toContain("Hit bonuses went unpaid");
   });
 

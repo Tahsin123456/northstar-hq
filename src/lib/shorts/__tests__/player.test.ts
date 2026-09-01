@@ -173,9 +173,15 @@ describe("the player dialog cannot outgrow the window", () => {
    * to go below its content size, which is the whole failure.
    */
   it("shrinks the player rather than overflowing", () => {
-    expect(dialog).toContain("flex max-h-[calc(100dvh-2rem)] max-w-[420px] flex-col");
+    // The width cap moved into a per-format branch when the dialog learned
+    // 16:9 (Long Form buys width; the Shorts dialog keeps its 420px), so the
+    // three properties are asserted separately rather than as one class run.
+    expect(dialog).toContain("flex max-h-[calc(100dvh-2rem)] flex-col");
+    expect(dialog).toContain("max-w-[420px]");
     expect(dialog).toContain("min-h-0 flex-1");
-    expect(dialog).toContain("min-h-0 w-auto max-w-full");
+    // The Shorts frame still derives width from its height, bounded both ways.
+    expect(dialog).toContain('"aspect-[9/16] h-[min(70dvh,560px)] w-auto max-w-full"');
+    expect(dialog).toContain("min-h-0 overflow-hidden");
   });
 
   /**

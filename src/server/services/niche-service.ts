@@ -51,9 +51,11 @@
  */
 
 import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
 import { errors } from "@/server/errors";
 import { actorCan, requireActor } from "@/server/auth/dal";
+import { requireFormat, resolveAllowedFormats } from "@/server/auth/format-scope";
 import {
   MAX_HIT_WINDOW_HOURS,
   MAX_THRESHOLD,
@@ -66,7 +68,12 @@ import {
   maxRpmMinorPerMillion,
 } from "@/lib/analytics/niche-rpm";
 import { NICHE_KINDS, type NicheKind } from "@/lib/niches/niche-kind";
-import { DEFAULT_NICHE_FORMAT, toNicheFormat } from "@/lib/niches/niche-format";
+import {
+  DEFAULT_NICHE_FORMAT,
+  NICHE_FORMATS,
+  toNicheFormat,
+  type NicheFormat,
+} from "@/lib/niches/niche-format";
 import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
@@ -137,6 +144,22 @@ async function assertMayConfigureRpm(): Promise<void> {
 /** True when the caller sent the field at all, an explicit null included. */
 function sent(input: object, key: string): boolean {
   return key in input && (input as Record<string, unknown>)[key] !== undefined;
+}
+
+/**
+ * The `where` fragment that narrows niche rows to one format's list.
+ *
+ * The shorts branch is `format != "longform"` rather than `format ==
+ * "shorts"`, and the asymmetry is the point: `toNicheFormat` reads anything
+ * that is not exactly "longform" as shorts — the fail-closed direction — and a
+ * query that disagreed with the narrower would make a garbage-valued row
+ * visible in neither list, which is exactly the silent disappearance the
+ * fail-closed rule exists to prevent.
+ */
+export function nicheFormatWhere(format: NicheFormat): Prisma.NicheWhereInput {
+  return format === "longform"
+    ? { format: "longform" }
+    : { format: { not: "longform" } };
 }
 
 /** How many accent colours the niche chips cycle through (`--chart-1..6`). */
@@ -313,6 +336,17 @@ export const createNicheSchema = z.object({
   colorIndex: z.number().int().min(0).max(NICHE_COLOR_COUNT - 1).optional(),
   /** Absent means production — the column default, and the inclusive answer. */
   kind: nicheKindSchema.optional(),
+  /**
+   * Which format list the niche joins. Absent means "whatever this role's
+   * side of the operation is" — see `createNiche`, where `requireFormat`
+   * resolves it. The schema only rules out garbage strings; WHO may say
+   * "longform" is the service's decision, not a shape question.
+   */
+  format: z
+    .enum(NICHE_FORMATS as unknown as [NicheFormat, ...NicheFormat[]], {
+      message: "A niche is either a Shorts niche or a Long Form one.",
+    })
+    .optional(),
   hitThreshold: z.number().int().min(MIN_THRESHOLD).max(MAX_THRESHOLD).nullable().optional(),
   hitWindowHours: z
     .number()
@@ -411,11 +445,21 @@ async function mayReadHitPayment(): Promise<boolean> {
   return actorCan("settings.manage");
 }
 
-export async function listNiches(): Promise<NicheDTO[]> {
+export async function listNiches(
+  options: {
+    /**
+     * Which format lists to return. Absent means every format — the reading
+     * the standalone catalogue and the admin assignment checklist want, where
+     * the caller's entitlement was already resolved by the route. A single
+     * entry narrows to that list; both entries are the same as absent.
+     */
+    formats?: readonly NicheFormat[];
+  } = {},
+): Promise<NicheDTO[]> {
   const organizationId = await getCurrentOrgId();
   const includePay = await mayReadHitPayment();
 
-  const niches = await listNicheRows(organizationId);
+  const niches = await listNicheRows(organizationId, options.formats);
 
   /*
    * Resolved once for the whole catalogue, AFTER the rows are in hand.
@@ -454,11 +498,19 @@ async function resolveOneNicheRpm(
 }
 
 /** The catalogue read, split out so `listNiches` can name its own row type. */
-function listNicheRows(organizationId: string) {
+function listNicheRows(organizationId: string, formats?: readonly NicheFormat[]) {
+  // A list naming both formats is no narrowing at all, and expressing it as
+  // one would need an OR of the two fragments only to match every row anyway.
+  const narrowed =
+    formats !== undefined &&
+    !(formats.includes("shorts") && formats.includes("longform"));
   return prisma.niche.findMany({
     // The whole team shares one taxonomy, so this lists the organization's
     // niches rather than the ones the signed-in user happened to create.
-    where: { organizationId },
+    where: {
+      organizationId,
+      ...(narrowed ? nicheFormatWhere(formats[0] ?? DEFAULT_NICHE_FORMAT) : {}),
+    },
     orderBy: [{ sortOrder: "asc" }, { name: "asc" }],
     include: {
       // The byline. An admin looking at a niche that still needs a threshold
@@ -479,10 +531,27 @@ export async function createNiche(input: {
   name: string;
   colorIndex?: number;
   kind?: NicheKind;
+  format?: NicheFormat;
   hitThreshold?: number | null;
   hitWindowHours?: number | null;
   hitPaymentMinor?: number | null;
 }): Promise<NicheDTO> {
+  /*
+   * WHICH FORMAT LIST THE ROW JOINS, decided here and not in the route, for
+   * the file's standing reason: a service function is reachable from anywhere
+   * on the server, and a rule enforced one layer up holds only for the callers
+   * that happen to exist today. `requireFormat` is the whole check —
+   *
+   *   • a sent format the role is not entitled to is REFUSED with a 403, never
+   *     stripped: a head_of_shorts who typed "longform" must be told, not
+   *     handed a Shorts niche they believe is a Long Form one;
+   *   • an absent format resolves to the role's own side of the operation —
+   *     shorts for every shorts role and for admin (first allowed), longform
+   *     for the longs roles. That last case is a deliberate behaviour change
+   *     for longs roles, who change completely under this deploy.
+   */
+  const actor = await requireActor();
+  const format = requireFormat(actor.role, input.format);
   // The rule check comes before anything is read or written. An employee's
   // create request that carries any of the three numbers is REFUSED, not
   // quietly stripped: silently dropping one would create the niche and tell
@@ -507,14 +576,16 @@ export async function createNiche(input: {
 
   // Uniqueness is per organization AND per format: one team cannot hold two
   // Shorts "GTA" niches, but another team's "GTA" is a different row and must
-  // not block this one — and a Long Form "GTA" will be a different row too,
-  // once anything can create one. Today every niche this function makes is a
-  // Shorts niche, so the check reads exactly as it always did.
+  // not block this one — and a Long Form "GTA" is a different row from the
+  // Shorts one, so the dedup looks in the SAME list the create below writes
+  // into. Using the requested format here is load-bearing: a lookup pinned to
+  // shorts would let a Long Form "GTA" collide with — or silently reuse — a
+  // Shorts row.
   const existing = await prisma.niche.findUnique({
     where: {
       organizationId_format_slug: {
         organizationId,
-        format: DEFAULT_NICHE_FORMAT,
+        format,
         slug,
       },
     },
@@ -541,12 +612,11 @@ export async function createNiche(input: {
       // portfolio hit rate the moment it was created, which is a number moving
       // for a reason nobody chose. Opting OUT of the scorecard is deliberate.
       kind: input.kind ?? "production",
-      // Shorts, explicitly, even though the column defaults the same way: this
-      // deploy's API schemas accept no format field, so every niche anybody
-      // can create today IS a Shorts niche, and stating it here means the day
-      // a caller CAN say "longform" is a visible change to this line rather
-      // than a silent reinterpretation of a database default.
-      format: DEFAULT_NICHE_FORMAT,
+      // The format `requireFormat` resolved above — the visible change the
+      // old comment on this line promised. A caller CAN say "longform" now,
+      // and what lands here has been validated against the actor's own side
+      // of the operation rather than trusted from the request.
+      format,
       // Null when an employee created it, and null is a real state now: the
       // niche exists, works as a filter, and reports no hit rate until an admin
       // says what a hit is.
@@ -626,6 +696,22 @@ export async function updateNiche(
   // tenant read as "not found" rather than as someone else's row.
   const niche = await prisma.niche.findFirst({ where: { id: nicheId, organizationId } });
   if (!niche) throw errors.notFound("niche");
+
+  /*
+   * THE ROW'S OWN FORMAT IS A SCOPE, and it is checked here like `format` is
+   * on create: a head_of_shorts holding `niches.manage` may organise the
+   * Shorts taxonomy, not the Long Form one, and the API layer is the
+   * boundary that says so. Checked in the service for the file's standing
+   * reason — any server caller reaches this function, not just today's route.
+   *
+   * Note the schema deliberately accepts NO `format` field on update: a
+   * rename never moves a niche between formats (see the clash check below),
+   * and a format change would silently re-file every channel under it into
+   * the other product. What is validated here is WHO may touch the row at
+   * all, not a request to move it.
+   */
+  const actor = await requireActor();
+  requireFormat(actor.role, toNicheFormat(niche.format));
 
   const data: {
     name?: string;
@@ -785,6 +871,14 @@ export async function deleteNiche(nicheId: string): Promise<{ unassignedChannels
   });
   if (!niche) throw errors.notFound("niche");
 
+  // The same two lines `updateNiche` runs, for the stronger reason: a
+  // head_of_shorts refused a RENAME of a longform niche must not be able to
+  // DELETE the same row — the destructive act cannot be the unguarded one.
+  // The row's own format is the scope, checked in the service so every server
+  // caller meets it, not just today's route.
+  const actor = await requireActor();
+  requireFormat(actor.role, toNicheFormat(niche.format));
+
   /*
    * THERE IS NO CONTENT-TYPE GUARD ANY MORE, and its absence is the correct
    * outcome rather than an oversight.
@@ -819,6 +913,7 @@ export async function setChannelNiches(
   nicheIds: readonly string[],
 ): Promise<void> {
   const organizationId = await getCurrentOrgId();
+  const actor = await requireActor();
 
   const tracking = await prisma.trackedChannel.findFirst({
     where: { organizationId, channelId },
@@ -837,16 +932,44 @@ export async function setChannelNiches(
     // choice, a stranger's is not.
     const owned = await prisma.niche.findMany({
       where: { id: { in: unique }, organizationId },
-      select: { id: true },
+      select: { id: true, format: true },
     });
     if (owned.length !== unique.length) {
       throw errors.invalidInput("One or more of those niches no longer exists.");
     }
+    /*
+     * FILING A CHANNEL UNDER A NICHE PLACES IT IN THAT NICHE'S PRODUCT, so
+     * each target niche's format is checked against the caller — the same
+     * `requireFormat` that guards create, update and delete. Without this, a
+     * longs role holding `channels.manage` could file any Shorts-only channel
+     * under a longform niche and pull its whole video history into their own
+     * dataset — a self-service path around the boundary `/api/dataset`
+     * enforces (and a shorts role has the mirror-image write).
+     */
+    for (const niche of owned) {
+      requireFormat(actor.role, toNicheFormat(niche.format));
+    }
   }
+
+  /*
+   * SET SEMANTICS, WITHIN THE CALLER'S OWN SIDE OF THE OPERATION. The delete
+   * used to be wholesale, which made "assign these" carry a second, silent
+   * power: a longs role sending their complete longform list — or an empty
+   * one — would also strip every SHORTS filing off the channel, assignments
+   * their own product never even shows them. So a single-format caller's
+   * replace only touches join rows to niches of their format; what they
+   * cannot file into, they cannot unfile from. An admin's set stays wholesale
+   * across both formats, exactly as before. The shorts side is scoped through
+   * `nicheFormatWhere`, so a garbage-valued stored format is deletable by the
+   * shorts side — the list `toNicheFormat` files it under.
+   */
+  const allowed = resolveAllowedFormats(actor.role);
+  const deleteScope =
+    allowed.length === 1 ? { niche: nicheFormatWhere(allowed[0]) } : {};
 
   await prisma.$transaction([
     prisma.trackedChannelNiche.deleteMany({
-      where: { trackedChannelId: tracking.id },
+      where: { trackedChannelId: tracking.id, ...deleteScope },
     }),
     ...(unique.length > 0
       ? [
@@ -890,7 +1013,13 @@ export async function resolveOrCreateNiches(
       ids.push(existing.id);
       continue;
     }
-    const created = await createNiche({ name: trimmed });
+    // "shorts" EXPLICITLY, not left to the role default: the lookup above
+    // deduplicates in the Shorts list, so the create must write into the same
+    // one or an import would mint rows the lookup can never find again. For a
+    // longs-role caller `requireFormat` refuses this — which is the boundary
+    // working: this import path feeds the Shorts tracker, and a role whose
+    // side of the operation is Long Form has no business minting rows in it.
+    const created = await createNiche({ name: trimmed, format: DEFAULT_NICHE_FORMAT });
     ids.push(created.id);
   }
   return ids;

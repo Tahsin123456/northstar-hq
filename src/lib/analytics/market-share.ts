@@ -1,5 +1,6 @@
-import { getShortsInDateRange } from "./filters";
+import { videosInDateRange } from "./filters";
 import { roundTo, sum } from "./stats";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import type { AnalyticsVideo, DateRange } from "./types";
 
 /**
@@ -42,10 +43,14 @@ export function calculateMarketShare(
   ourChannels: readonly { videos: readonly AnalyticsVideo[] }[],
   competitorChannels: readonly { videos: readonly AnalyticsVideo[] }[],
   range: DateRange,
+  // Which format's views make up the tracked market. Defaulted to shorts so
+  // every existing surface — the niche cards, Our vs Market, the earnings
+  // panel — keeps computing exactly what it always did.
+  format: NicheFormat = "shorts",
 ): MarketShare {
-  const ourShorts = ourChannels.flatMap((c) => getShortsInDateRange(c.videos, range));
+  const ourShorts = ourChannels.flatMap((c) => videosInDateRange(c.videos, range, format));
   const competitorShorts = competitorChannels.flatMap((c) =>
-    getShortsInDateRange(c.videos, range),
+    videosInDateRange(c.videos, range, format),
   );
 
   const ourViews = sum(ourShorts.map((s) => s.views));
@@ -120,10 +125,14 @@ export function calculateMarketShareSeries(
   competitorChannels: readonly { videos: readonly AnalyticsVideo[] }[],
   range: DateRange,
   granularity: ShareGranularity = pickShareGranularity(range),
+  // Same default and same reasoning as `calculateMarketShare` above. No Long
+  // Form surface draws this series yet; the parameter exists so the two
+  // functions cannot drift apart on which views they count.
+  format: NicheFormat = "shorts",
 ): MarketSharePoint[] {
-  const ourShorts = ourChannels.flatMap((c) => getShortsInDateRange(c.videos, range));
+  const ourShorts = ourChannels.flatMap((c) => videosInDateRange(c.videos, range, format));
   const competitorShorts = competitorChannels.flatMap((c) =>
-    getShortsInDateRange(c.videos, range),
+    videosInDateRange(c.videos, range, format),
   );
 
   const ourByBucket = new Map<number, number>();

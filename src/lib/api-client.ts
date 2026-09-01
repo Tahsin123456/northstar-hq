@@ -31,6 +31,7 @@ import type {
   FinanceKind,
 } from "@/lib/finance/types";
 import type { NicheKind } from "@/lib/niches/niche-kind";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
  * Response and input types imported straight from the services that produce
@@ -312,8 +313,18 @@ export interface NotificationSettingsPatch {
 }
 
 export const api = {
-  /** The full tracker payload. Every filter is derived from this client-side. */
-  getDataset: (): Promise<DatasetDTO> => request<DatasetDTO>("/api/dataset"),
+  /**
+   * The full tracker payload for ONE format. Every filter is derived from this
+   * client-side.
+   *
+   * The format is sent EXPLICITLY, shorts included, and that is the boundary
+   * working rather than noise: a longs-role user reaching a Shorts page gets a
+   * 403 from `?format=shorts` — the server refusing to answer a question
+   * outside their scope — instead of silently receiving their own default
+   * dataset under Shorts labels.
+   */
+  getDataset: (format: NicheFormat = "shorts"): Promise<DatasetDTO> =>
+    request<DatasetDTO>(`/api/dataset?format=${format}`),
 
   listChannels: (includeRemoved = false): Promise<{ channels: ChannelDTO[] }> =>
     request(`/api/channels?includeRemoved=${includeRemoved}`),
@@ -350,6 +361,13 @@ export const api = {
     hitThreshold?: number;
     /** Absent means production — the column default and the inclusive answer. */
     kind?: NicheKind;
+    /**
+     * Which format list the niche joins. Absent means the caller's own side
+     * of the operation — the server resolves it through `requireFormat` — so
+     * every existing Shorts surface keeps sending exactly what it always did.
+     * The Long Form niches page sends "longform" explicitly.
+     */
+    format?: NicheFormat;
   }): Promise<{ niche: NicheDTO }> =>
     request("/api/niches", { method: "POST", body: JSON.stringify(payload) }),
 
@@ -645,9 +663,17 @@ export const api = {
   getExcludedVideos: (
     id: string,
     range?: { startMs: number; endMs: number },
+    // Explicit like `getDataset`'s, for the same reason: what "excluded"
+    // means is a fact about a format, and a longs-role reader on a Shorts
+    // surface should meet the 403, not a silently different list.
+    format: NicheFormat = "shorts",
   ): Promise<{ videos: ExcludedVideoDTO[] }> => {
-    const params = range ? `?startMs=${range.startMs}&endMs=${range.endMs}` : "";
-    return request(`/api/channels/${id}/excluded${params}`);
+    const params = new URLSearchParams({ format });
+    if (range) {
+      params.set("startMs", String(range.startMs));
+      params.set("endMs", String(range.endMs));
+    }
+    return request(`/api/channels/${id}/excluded?${params.toString()}`);
   },
 
   // --- History ---
