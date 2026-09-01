@@ -115,6 +115,9 @@ function dataset(channels: DatasetDTO["channels"]): DatasetDTO {
         colorIndex: 0,
         kind: "production",
         slug: "gta",
+        // The format every niche in the running product has. Dark on the
+        // wire today; the report reads nothing from it.
+        format: "shorts",
         hitPaymentMinor: null,
         hitThreshold: null,
         hitWindowHours: null,

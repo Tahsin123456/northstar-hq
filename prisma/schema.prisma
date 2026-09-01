@@ -379,6 +379,33 @@ model Niche {
   /// what lets "our hit rate" mean ours.
   kind String @default("production")
 
+  /// "shorts" | "longform".
+  ///
+  /// WHICH SIDE OF THE OPERATION THIS NICHE BELONGS TO. The studio is adding
+  /// Long Form, and the owner's decision is SEPARATE NICHE LISTS PER FORMAT
+  /// rather than one list wearing two hats: "GTA" as a Shorts niche and "GTA"
+  /// as a Long Form niche are different bodies of work with different channels,
+  /// different rules and different people accountable for them, and a single
+  /// row would force every rule column to answer for both at once. The widened
+  /// unique below is that decision made structural — the same slug may exist
+  /// once per format, so the two lists cannot collide and cannot merge.
+  ///
+  /// THE RULE COLUMNS NEED NO DUPLICATION, and that is the payoff of separate
+  /// rows rather than a format column on some shared rule table. A Long Form
+  /// "GTA" niche is simply another Niche row: it gets its own `hitThreshold`,
+  /// its own `hitWindowHours`, its own `hitPaymentMinor` and its own RPM range
+  /// for free, because they are columns on the row that carries the format.
+  /// Nothing about how a hit is defined, priced or paid had to learn the word
+  /// "format" for this to work.
+  ///
+  /// A String rather than an enum, per the portability contract at the top of
+  /// this file — narrowed to a union in src/lib/niches/niche-format.ts and
+  /// validated at every boundary, the same treatment `kind` gets one column up.
+  /// Defaults to "shorts" because every niche that exists today IS a Shorts
+  /// niche: the default is what makes this migration a no-op for the running
+  /// product rather than a reclassification of anybody's data.
+  format String @default("shorts")
+
   /// What counts as a hit in this niche, in views.
   ///
   /// Nullable on purpose: null means "inherit the account default" rather than
@@ -504,7 +531,7 @@ model Niche {
   notes        Note[]
   memberNiches MemberNiche[]
 
-  @@unique([organizationId, slug])
+  @@unique([organizationId, format, slug])
   @@index([organizationId, sortOrder])
   @@index([createdById])
   @@map("niches")
@@ -695,6 +722,11 @@ model Video {
   @@index([channelId, publishedAt])
   @@index([channelId, isShort, publishedAt])
   @@index([channelId, isShort, viewCount])
+  /// The long-form read path. Long Form selects on `classification` alone —
+  /// `"not_short"`, never `NOT isShort`, because `isShort: false` also covers
+  /// videos the classifier could not resolve — so it needs the classification
+  /// analogue of the `isShort` index two lines up.
+  @@index([channelId, classification, publishedAt])
   @@index([publishedAt])
   @@map("videos")
 }

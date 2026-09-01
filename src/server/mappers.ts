@@ -25,6 +25,7 @@ import type {
 } from "@/lib/dto";
 import { isOwnershipType } from "@/lib/dto";
 import { toNicheKind } from "@/lib/niches/niche-kind";
+import { toNicheFormat } from "@/lib/niches/niche-format";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
 import {
   normalizeEngagedViewShare,
@@ -120,6 +121,10 @@ export function toNicheDTO(
   return {
     ...toNicheRefDTO(niche),
     slug: niche.slug,
+    // Narrowed exactly as `kind` is above: the column is a portable `String`,
+    // and an unreadable value reads as "shorts" so a bad row lands in the list
+    // the team actually looks at instead of a Long Form list nobody opens yet.
+    format: toNicheFormat(niche.format),
     // Carried, never coerced. `null` is "nobody has said what a hit here is
     // worth" — a state every payroll surface reports, not a zero it pays.
     //

@@ -120,6 +120,10 @@ export function DistributionPanel({
       comments: null,
       durationSeconds: 0,
       isShort: true,
+      // Synthetic rows faking Shorts, so they say so on both columns: the
+      // history endpoint only ever reconstructs Shorts, and a fabricated
+      // "uncertain" here would drop every row out of both formats' filters.
+      classification: "short",
       hit: null,
     }));
 

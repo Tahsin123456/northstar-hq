@@ -97,6 +97,19 @@ export interface NicheRefDTO {
 export interface NicheDTO extends NicheRefDTO {
   readonly slug: string;
   /**
+   * "shorts" | "longform" — which side of the operation this niche belongs to.
+   * See src/lib/niches/niche-format.ts, the one home of the word.
+   *
+   * DARK TODAY, DELIBERATELY. It ships on the wire so the catalogue is already
+   * format-aware when the Long Form surfaces land, but no UI reads it yet, the
+   * create/update API schemas do not accept it, and every existing niche maps
+   * to "shorts" — so its presence changes nothing anybody currently renders.
+   * Typed `string` like `classification` on `VideoDTO` rather than the union:
+   * the value is narrowed by `toNicheFormat` at the mapper, and a client must
+   * re-narrow at its own boundary rather than trusting the wire.
+   */
+  readonly format: string;
+  /**
    * What ONE hit in this niche pays, in minor units.
    *
    * `null` means UNCONFIGURED, exactly as the two rule columns below do: nobody

@@ -46,6 +46,38 @@ describe("role catalogue", () => {
     }
   });
 
+  /**
+   * Which side of the operation each role belongs to, pinned role by role.
+   *
+   * `contentScope` is dark today — `resolveAllowedFormats` reads it and
+   * nothing calls that yet — which is precisely why the table is pinned now:
+   * when the Long Form surfaces land, this value silently decides which
+   * format's lists and numbers every account sees, and a role whose scope
+   * drifted in the meantime would ship that drift as an access change on day
+   * one. Written from the role brief, not the implementation, like everything
+   * else in this file.
+   */
+  it("pins every role to its side of the operation", () => {
+    const EXPECTED_SCOPE: Record<(typeof ROLES)[number], "shorts" | "longs" | "all"> = {
+      admin: "all",
+      head_of_shorts: "shorts",
+      head_of_longs: "longs",
+      short_form_editor: "shorts",
+      long_form_editor: "longs",
+      short_form_clip_producer: "shorts",
+    };
+    for (const role of ROLES) {
+      expect(roleDefinition(role).contentScope, role).toBe(EXPECTED_SCOPE[role]);
+    }
+  });
+
+  it("scopes an unrecognised role to shorts — the fail-closed side", () => {
+    // The least-privileged fallback role is a Shorts role, so a typo'd or
+    // hand-edited role string sees the product every current account already
+    // sees, never an extra format.
+    expect(roleDefinition("chief_wizard").contentScope).toBe("shorts");
+  });
+
   it("falls closed for an unrecognised role", () => {
     // A typo, a downgrade, a hand-edited row: none of them may grant more than
     // the least privileged role.

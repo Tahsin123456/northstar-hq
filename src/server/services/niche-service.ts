@@ -66,6 +66,7 @@ import {
   maxRpmMinorPerMillion,
 } from "@/lib/analytics/niche-rpm";
 import { NICHE_KINDS, type NicheKind } from "@/lib/niches/niche-kind";
+import { DEFAULT_NICHE_FORMAT, toNicheFormat } from "@/lib/niches/niche-format";
 import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
@@ -504,10 +505,19 @@ export async function createNiche(input: {
   const name = input.name.trim();
   const slug = toSlug(name);
 
-  // Uniqueness is per organization: one team cannot hold two "GTA" niches, but
-  // another team's "GTA" is a different row and must not block this one.
+  // Uniqueness is per organization AND per format: one team cannot hold two
+  // Shorts "GTA" niches, but another team's "GTA" is a different row and must
+  // not block this one — and a Long Form "GTA" will be a different row too,
+  // once anything can create one. Today every niche this function makes is a
+  // Shorts niche, so the check reads exactly as it always did.
   const existing = await prisma.niche.findUnique({
-    where: { organizationId_slug: { organizationId, slug } },
+    where: {
+      organizationId_format_slug: {
+        organizationId,
+        format: DEFAULT_NICHE_FORMAT,
+        slug,
+      },
+    },
   });
   if (existing) {
     throw errors.invalidInput(`A niche called “${existing.name}” already exists.`);
@@ -531,6 +541,12 @@ export async function createNiche(input: {
       // portfolio hit rate the moment it was created, which is a number moving
       // for a reason nobody chose. Opting OUT of the scorecard is deliberate.
       kind: input.kind ?? "production",
+      // Shorts, explicitly, even though the column defaults the same way: this
+      // deploy's API schemas accept no format field, so every niche anybody
+      // can create today IS a Shorts niche, and stating it here means the day
+      // a caller CAN say "longform" is a visible change to this line rather
+      // than a silent reinterpretation of a database default.
+      format: DEFAULT_NICHE_FORMAT,
       // Null when an employee created it, and null is a real state now: the
       // niche exists, works as a filter, and reports no hit rate until an admin
       // says what a hit is.
@@ -629,8 +645,19 @@ export async function updateNiche(
     const name = update.name.trim();
     const slug = toSlug(name);
     if (slug !== niche.slug) {
+      // The clash that matters is within the row's OWN format list — a rename
+      // never moves a niche between formats, so a Long Form "GTA" (once one
+      // can exist) must not block renaming a Shorts niche to "GTA". Narrowed
+      // through `toNicheFormat` so an unreadable stored value collides in the
+      // Shorts list, the same fail-direction the mapper uses.
       const clash = await prisma.niche.findUnique({
-        where: { organizationId_slug: { organizationId, slug } },
+        where: {
+          organizationId_format_slug: {
+            organizationId,
+            format: toNicheFormat(niche.format),
+            slug,
+          },
+        },
       });
       if (clash) {
         throw errors.invalidInput(`A niche called “${clash.name}” already exists.`);
@@ -847,8 +874,17 @@ export async function resolveOrCreateNiches(
     const slug = toSlug(trimmed);
     // Reuses the team's existing niche when the name already exists, so an
     // import does not mint a duplicate "Gaming" alongside a colleague's.
+    // Shorts explicitly: this import path feeds the Shorts tracker, and
+    // `createNiche` below only mints Shorts niches, so the lookup and the
+    // create must agree on which format list they are deduplicating in.
     const existing = await prisma.niche.findUnique({
-      where: { organizationId_slug: { organizationId, slug } },
+      where: {
+        organizationId_format_slug: {
+          organizationId,
+          format: DEFAULT_NICHE_FORMAT,
+          slug,
+        },
+      },
     });
     if (existing) {
       ids.push(existing.id);

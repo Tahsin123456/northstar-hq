@@ -10,6 +10,7 @@ import {
   makePending,
   makeShort,
   makeShortsWithHits,
+  makeUncertain,
   makeUnknown,
   makeUnscoreable,
 } from "./factories";
@@ -274,6 +275,34 @@ describe("Example 7 — long-form exclusion", () => {
     // And long-form must not land in the exclusions either: it is not an
     // unjudged Short, it is not a Short.
     expect(metrics.hits.excluded).toBe(0);
+  });
+
+  it("counts UNCERTAIN videos in excludedLongform — the displayed number must not change", () => {
+    /*
+     * `excludedLongform` has always been the complement of the Shorts filter:
+     * everything in the window that is not a positively-identified Short,
+     * which sweeps in videos the classifier could not resolve. The strict
+     * long-form selector (`classification === "not_short"`) now exists and
+     * deliberately does NOT feed this figure — it would report 2 here, and
+     * this number is rendered on the KPI cards today. The pin is the exact
+     * pre-format value: 2 long-form + 1 uncertain = 3.
+     */
+    const videos = [
+      makeHit({ views: 1_500_000, publishedAt: daysAgo(5, NOW) }),
+      makeLongform({ views: 9_000_000, publishedAt: daysAgo(6, NOW) }),
+      makeLongform({ views: 8_000_000, publishedAt: daysAgo(7, NOW) }),
+      makeUncertain({ views: 7_000_000, publishedAt: daysAgo(8, NOW) }),
+      // Outside the window: contributes to nothing, in either direction.
+      makeUncertain({ views: 6_000_000, publishedAt: daysAgo(90, NOW) }),
+    ];
+
+    const metrics = calculateChannelMetrics({ videos, range: range(30), threshold: BAR });
+
+    expect(metrics.totalShorts).toBe(1);
+    expect(metrics.excludedLongform).toBe(3);
+    // And the uncertain video's views stay out of every Shorts figure, exactly
+    // as they always did.
+    expect(metrics.totalViews).toBe(1_500_000);
   });
 
   it("a channel with only long-form uploads has no hit rate, not 0%", () => {

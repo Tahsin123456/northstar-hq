@@ -7,7 +7,7 @@ import {
   type HitRateSummary,
   type HitTally,
 } from "./hit-rate";
-import { getLongformInDateRange, getShortsInDateRange } from "./filters";
+import { getShortsInDateRange, isWithinRange } from "./filters";
 import { measuredRate } from "./hit-display";
 import {
   consistencyScore,
@@ -98,7 +98,24 @@ export function calculateChannelMetrics(
 
     consistencyScore: consistencyScore(views),
 
-    excludedLongform: getLongformInDateRange(videos, range).length,
+    /*
+     * Everything in the window that is NOT a Short — deliberately NOT the
+     * strict `getLongformInDateRange` selector.
+     *
+     * The strict selector counts only `classification === "not_short"`; this
+     * figure has always been the complement of the Shorts filter, which also
+     * sweeps in videos the classifier could not resolve. Those are different
+     * numbers on any channel with uncertain videos, and this one is DISPLAYED
+     * — "N long-form videos were excluded" on the KPI cards — so switching it
+     * would change a rendered value for users whose product must not move.
+     * The complement is also the honest claim for this caption: it exists to
+     * prove that everything outside the Shorts metric was excluded, and an
+     * uncertain video IS excluded. Counted as in-range minus format-matched
+     * rather than with a second predicate, so it cannot drift from the filter
+     * it is the complement of.
+     */
+    excludedLongform:
+      videos.filter((v) => isWithinRange(v.publishedAt, range)).length - totalShorts,
   };
 }
 

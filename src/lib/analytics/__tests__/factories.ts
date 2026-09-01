@@ -30,6 +30,14 @@ let counter = 0;
 
 export function makeVideo(overrides: Partial<JudgedVideo> = {}): JudgedVideo {
   counter += 1;
+  // `classification` follows the FINAL `isShort` unless the test pins it,
+  // matching the real classifier's invariant that `isShort: true` only ever
+  // pairs with "short". The false side defaults to "uncertain" rather than
+  // "not_short" on purpose: a bare `isShort: false` fixture has said nothing
+  // about being long-form, and defaulting it into the long-form population
+  // would hand tests the exact conflation `isVideoOfFormat` exists to refuse.
+  // `makeLongform` states "not_short" explicitly.
+  const isShort = overrides.isShort ?? true;
   return {
     id: `row-${counter}`,
     youtubeVideoId: `vid${String(counter).padStart(8, "0")}`,
@@ -40,6 +48,7 @@ export function makeVideo(overrides: Partial<JudgedVideo> = {}): JudgedVideo {
     comments: null,
     durationSeconds: 30,
     isShort: true,
+    classification: isShort ? "short" : "uncertain",
     // No verdict unless the test asks for one. See the header.
     hit: null,
     ...overrides,
@@ -51,7 +60,25 @@ export function makeShort(overrides: Partial<JudgedVideo> = {}): JudgedVideo {
 }
 
 export function makeLongform(overrides: Partial<JudgedVideo> = {}): JudgedVideo {
-  return makeVideo({ durationSeconds: 620, ...overrides, isShort: false });
+  return makeVideo({
+    durationSeconds: 620,
+    classification: "not_short",
+    ...overrides,
+    isShort: false,
+  });
+}
+
+/**
+ * A video the classifier could not resolve. In NEITHER format's analytics:
+ * `isShort` is false so it never enters a Shorts metric, and "uncertain" is
+ * not "not_short" so it never enters a long-form one either.
+ */
+export function makeUncertain(overrides: Partial<JudgedVideo> = {}): JudgedVideo {
+  return makeVideo({
+    classification: "uncertain",
+    ...overrides,
+    isShort: false,
+  });
 }
 
 /** The rule most fixtures are judged by: a million views inside seven days. */

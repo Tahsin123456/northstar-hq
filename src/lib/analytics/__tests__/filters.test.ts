@@ -6,8 +6,16 @@ import {
   isWithinRange,
   sortByPublishedDesc,
   sortByViewsDesc,
+  videosInDateRange,
 } from "../filters";
-import { DAY_MS, daysAgo, makeLongform, makeShort, makeVideo } from "./factories";
+import {
+  DAY_MS,
+  daysAgo,
+  makeLongform,
+  makeShort,
+  makeUncertain,
+  makeVideo,
+} from "./factories";
 
 const NOW = Date.UTC(2026, 5, 1);
 const RANGE_30D = { startMs: NOW - 30 * DAY_MS, endMs: NOW };
@@ -57,6 +65,57 @@ describe("getLongformInDateRange", () => {
       makeLongform({ publishedAt: daysAgo(90, NOW) }),
     ];
     expect(getLongformInDateRange(videos, RANGE_30D)).toHaveLength(1);
+  });
+
+  it("excludes videos the classifier could not resolve — the strict selector", () => {
+    // `isShort: false` is TWO populations, and only one of them is long-form.
+    // The selector reads `classification === "not_short"`, never `!isShort`,
+    // so an uncertain video lands in NEITHER format's list.
+    const uncertain = makeUncertain({ publishedAt: daysAgo(2, NOW) });
+    expect(getLongformInDateRange([uncertain], RANGE_30D)).toHaveLength(0);
+    expect(getShortsInDateRange([uncertain], RANGE_30D)).toHaveLength(0);
+  });
+});
+
+describe("videosInDateRange", () => {
+  /** Shorts, long-form and an uncertain video, all inside the window. */
+  const mixed = [
+    makeShort({ views: 100, publishedAt: daysAgo(2, NOW) }),
+    makeShort({ views: 200, publishedAt: daysAgo(40, NOW) }),
+    makeLongform({ views: 300, publishedAt: daysAgo(3, NOW) }),
+    makeLongform({ views: 400, publishedAt: daysAgo(50, NOW) }),
+    makeUncertain({ views: 500, publishedAt: daysAgo(4, NOW) }),
+  ];
+
+  it("shorts path returns byte-identical results to getShortsInDateRange", () => {
+    // The alias is the ten call sites the whole Shorts product runs on, so
+    // "same" here means SAME: equal length, equal order, and the very same
+    // row objects — not lookalikes.
+    const viaFormat = videosInDateRange(mixed, RANGE_30D, "shorts");
+    const viaAlias = getShortsInDateRange(mixed, RANGE_30D);
+    expect(viaFormat).toEqual(viaAlias);
+    expect(viaFormat.length).toBe(viaAlias.length);
+    viaFormat.forEach((video, i) => {
+      expect(Object.is(video, viaAlias[i])).toBe(true);
+    });
+  });
+
+  it("longform path selects not_short only — never the complement of isShort", () => {
+    const longform = videosInDateRange(mixed, RANGE_30D, "longform");
+    expect(longform.map((v) => v.views)).toEqual([300]);
+    // The uncertain video (views: 500) appears in NEITHER format.
+    expect(videosInDateRange(mixed, RANGE_30D, "shorts").map((v) => v.views)).toEqual([100]);
+  });
+
+  it("applies the half-open window identically for both formats", () => {
+    const atStartShort = makeShort({ publishedAt: RANGE_30D.startMs });
+    const atEndShort = makeShort({ publishedAt: RANGE_30D.endMs });
+    const atStartLong = makeLongform({ publishedAt: RANGE_30D.startMs });
+    const atEndLong = makeLongform({ publishedAt: RANGE_30D.endMs });
+    const videos = [atStartShort, atEndShort, atStartLong, atEndLong];
+
+    expect(videosInDateRange(videos, RANGE_30D, "shorts")).toEqual([atStartShort]);
+    expect(videosInDateRange(videos, RANGE_30D, "longform")).toEqual([atStartLong]);
   });
 });
 

@@ -33,6 +33,21 @@ export interface AnalyticsVideo {
    * `server/services/youtube/shorts-detector`.
    */
   readonly isShort: boolean;
+  /**
+   * The classifier's full verdict: "short" | "not_short" | "uncertain".
+   *
+   * Carried alongside `isShort` because the boolean cannot answer the
+   * long-form question. `isShort: false` conflates positively-identified
+   * long-form with videos the classifier could not resolve, and the two must
+   * land differently: long-form belongs to Long Form analytics, uncertain
+   * belongs to NEITHER format. `isVideoOfFormat` in
+   * `src/lib/niches/niche-format.ts` is the one place that reads the pair.
+   *
+   * `VideoDTO` already ships this field, so the real pipeline satisfies the
+   * widened shape unchanged — only synthetic rows built in-memory had to say
+   * which population they fake.
+   */
+  readonly classification: string;
 }
 
 /**

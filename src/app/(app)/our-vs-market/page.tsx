@@ -953,6 +953,10 @@ function DistributionComparison({
       comments: null,
       durationSeconds: 0,
       isShort: true,
+      // Synthetic rows faking Shorts — consistent on both columns, as the
+      // real classifier would be, so no format filter can disagree with the
+      // `isShort` the line above already claims.
+      classification: "short",
       hit: null,
     })),
     threshold,
@@ -968,6 +972,8 @@ function DistributionComparison({
       comments: null,
       durationSeconds: 0,
       isShort: true,
+      // Same fabricated-Short consistency as the "Ours" pool above.
+      classification: "short",
       hit: null,
     })),
     threshold,

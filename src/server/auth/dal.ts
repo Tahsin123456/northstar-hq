@@ -273,6 +273,17 @@ export interface ActorDTO {
   readonly email: string | null;
   readonly role: string;
   readonly roleLabel: string;
+  /**
+   * Which side of the operation the role belongs to — "shorts" | "longs" |
+   * "all", straight off the role table's `contentScope`.
+   *
+   * Dark today: nothing in the client reads it yet. It ships now so the
+   * session payload is already format-aware when the Long Form surfaces land,
+   * and it is derived here — beside `roleLabel`, from the same
+   * `roleDefinition` call — so the client can never hold a scope the role
+   * table would disagree with.
+   */
+  readonly contentScope: "shorts" | "longs" | "all";
   readonly organizationName: string;
   readonly permissions: readonly Permission[];
 }
@@ -284,6 +295,10 @@ export function toActorDTO(actor: AuthenticatedActor): ActorDTO {
     email: actor.email,
     role: actor.role,
     roleLabel: roleDefinition(actor.role).label,
+    // Same source as the label one line up, including its fail-closed
+    // resolution: an unknown role reads as the least-privileged one, whose
+    // scope is "shorts" — the product every current account already sees.
+    contentScope: roleDefinition(actor.role).contentScope,
     organizationName: actor.organizationName,
     permissions: [...actor.permissions],
   };
