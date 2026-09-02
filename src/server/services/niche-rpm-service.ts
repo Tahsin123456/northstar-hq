@@ -20,6 +20,7 @@ import {
   type RpmWindow,
 } from "@/lib/analytics/niche-rpm";
 import { getCurrentOrgId, getCurrentOrgSettings } from "./user-service";
+import { viewsGainedByChannel } from "./views-gained-service";
 
 /**
  * =========================================================================
@@ -47,36 +48,18 @@ import { getCurrentOrgId, getCurrentOrgSettings } from "./user-service";
  * not receive them for niches they are not assigned to.
  *
  * ---------------------------------------------------------------------------
- * WHAT THIS RETURNS TODAY, ON THIS DEPLOYMENT
+ * THE VIEW DENOMINATOR IS MEASURED ELSEWHERE
  * ---------------------------------------------------------------------------
- * `{ source: "none" }` or `{ source: "manual" }` for every niche, and that is
- * the correct answer rather than a degraded one. `OrganizationSettings.
- * autoRefreshEnabled` is false, so nothing is writing `VideoSnapshot` rows; with
- * no view history there is no denominator, every own channel is rejected with
- * `no_view_history`, and the hand-entered range is the only path to a number.
- * The reason travels to the screen so an owner can see that the missing piece
- * is a settings decision rather than a bug.
+ * The snapshot-delta measurement lives in `views-gained-service.ts`, shared
+ * with the niche money figures so "views gained" can never mean two things on
+ * two screens. What stays here is this caller's own reading of the result:
+ * channel-wide (no format filter — the revenue it divides is what the whole
+ * channel earned), and with a covered-nothing channel treated as ABSENT so it
+ * resolves to `viewsGained: null` and the judge's `no_view_history` sentence.
+ * Automatic refresh writes the `VideoSnapshot` series this depends on; a
+ * channel still rejected for view history is one the history has not yet
+ * grown to bracket, not a settings decision waiting to be made.
  */
-
-const DAY_MS = 86_400_000;
-
-/**
- * How far before the window's start a view reading may be and still bracket it.
- *
- * A video's views at the window's start come from the last snapshot taken at or
- * before that instant. Searching backwards without limit would mean loading a
- * channel's entire snapshot history to answer a question about one month, so
- * the search is bounded — and a video whose most recent reading is older than
- * this is treated as UNCOVERED rather than as having stood still.
- *
- * The bound is deliberately far wider than any sync cadence the app offers, so
- * it only ever excludes a video the collector has genuinely stopped seeing. The
- * cost of being wrong is bounded in the safe direction as well: an uncovered
- * video is dropped from the denominator, which the coverage floor in
- * `judgeRpmChannel` then measures and refuses if too much of the library is
- * missing.
- */
-const SNAPSHOT_LOOKBACK_DAYS = 60;
 
 /**
  * Who may see what a niche pays, and what the studio earns inside it.
@@ -242,7 +225,7 @@ async function judgeOwnChannelsByNiche(params: {
     connectionStateByYouTubeChannel(organizationId),
     revenueDaysInWindow(organizationId, channelIds, window),
     channelsWithRevenueBefore(organizationId, channelIds, window),
-    viewsGainedByChannel(organizationId, channelIds, window),
+    channelViewDeltas(organizationId, channelIds, window),
     exchangeRatesToBase(organizationId, baseCurrency),
   ]);
   const visible = visibleNiches === null ? null : new Set(visibleNiches);
@@ -458,124 +441,46 @@ interface ChannelViewDelta {
 }
 
 /**
- * Views gained across the window, per own channel, from the snapshot series.
+ * This caller's reading of the shared views-gained measurement.
  *
- * THE ONLY HONEST SOURCE FOR THIS NUMBER, and the reason the whole derived rate
- * is unavailable today. `Channel.viewCount` and `Video.viewCount` are lifetime
- * totals that are overwritten on every sync, so neither can say what a period
- * earned; `ChannelRevenueDay` carries no view metric. `VideoSnapshot` is the
- * only append-only series, and with `autoRefreshEnabled` false nothing is
- * writing to it.
+ * The measurement itself — snapshot bracketing, the zero-baseline rule for
+ * videos born inside the window, kept negative deltas, the dropped uncovered
+ * video — lives in `views-gained-service.ts` and is shared with the niche
+ * money figures, so "views gained" cannot mean two things on two screens.
+ * Two decisions belong to THIS caller and are made here:
  *
- * CHANNEL-WIDE, WITH NO `isShort` FILTER, and that is deliberate rather than an
+ * CHANNEL-WIDE, WITH NO FORMAT FILTER, and that is deliberate rather than an
  * oversight. The revenue this will be divided into is what the whole channel
- * earned — the Analytics request sends no content-type filter, so long-form and
- * YouTube Premium are both in it. Filtering the denominator to Shorts alone
- * would inflate the rate by every long-form dollar, which on a channel with a
- * back catalogue is not a correction but a multiple.
+ * earned — the Analytics request sends no content-type filter, so long-form
+ * and YouTube Premium are both in it. Filtering the denominator to Shorts
+ * alone would inflate the rate by every long-form dollar, which on a channel
+ * with a back catalogue is not a correction but a multiple.
  *
- * A VIDEO WITH NO READING AT THE WINDOW'S START IS DROPPED, NOT ZERO-BASED.
- * Its views at that instant are genuinely unknown, and assuming zero would
- * credit the window with a lifetime of views. Dropping shrinks the denominator
- * and therefore inflates the rate, which is why the count of dropped videos is
- * returned as `coverage` and why `judgeRpmChannel` refuses below 90%.
+ * A CHANNEL WITH NOT ONE BRACKETED VIDEO IS ABSENT, NOT ZERO. A zero here
+ * would be a measurement saying "this channel gained no views in twenty-eight
+ * days", and dividing a month of revenue by it would produce either an
+ * infinity or, worse, a rate that looked plausible. The absence becomes
+ * `viewsGained: null`, which `judgeRpmChannel` reports as `no_view_history` —
+ * a sentence an owner can act on, because the fix is waiting for the history
+ * automatic refresh records to grow long enough to bracket the window. The
+ * shared service keeps such channels in its map (the niche caller counts them
+ * toward coverage), so the omission is re-applied at this boundary, where
+ * that meaning belongs.
  */
-async function viewsGainedByChannel(
+async function channelViewDeltas(
   organizationId: string,
   channelIds: readonly string[],
   window: RpmWindow,
 ): Promise<ReadonlyMap<string, ChannelViewDelta>> {
-  const endDate = new Date(window.endMs);
-  const lookbackFrom = new Date(window.startMs - SNAPSHOT_LOOKBACK_DAYS * DAY_MS);
-
-  const videos = await prisma.video.findMany({
-    where: {
-      channelId: { in: [...channelIds] },
-      publishedAt: { lt: endDate },
-      // Reachability through this organization's own tracker. `Video` and
-      // `VideoSnapshot` are global deduplicated rows with no tenant column, so
-      // this is the only thing that makes the history ours to read.
-      channel: { trackedBy: { some: { organizationId, isActive: true } } },
-    },
-    select: {
-      id: true,
-      channelId: true,
-      publishedAt: true,
-      snapshots: {
-        where: { capturedAt: { gte: lookbackFrom, lt: endDate } },
-        select: { capturedAt: true, viewCount: true },
-        orderBy: { capturedAt: "asc" },
-      },
-    },
-  });
-
-  const totals = new Map<string, { gained: number; covered: number; total: number }>();
-
-  for (const video of videos) {
-    const bucket = totals.get(video.channelId) ?? { gained: 0, covered: 0, total: 0 };
-    bucket.total += 1;
-
-    // Views at the window's close: the last reading taken before it. The
-    // current lifetime total is NOT a substitute — it is today's number, and
-    // using it would credit the window with everything earned since.
-    const atEnd = lastAtOrBefore(video.snapshots, window.endMs);
-
-    if (atEnd !== null) {
-      if (video.publishedAt !== null && video.publishedAt.getTime() >= window.startMs) {
-        // Published inside the window, so it started at nothing. This is the
-        // one case where a zero baseline is a fact rather than an assumption.
-        bucket.gained += atEnd;
-        bucket.covered += 1;
-      } else {
-        const atStart = lastAtOrBefore(video.snapshots, window.startMs);
-        if (atStart !== null) {
-          // Views can fall when YouTube purges inflated counts, and a negative
-          // delta is real. It is kept rather than clamped: clamping every
-          // negative to zero would bias the denominator upward and the rate
-          // downward, one video at a time.
-          bucket.gained += atEnd - atStart;
-          bucket.covered += 1;
-        }
-      }
-    }
-
-    totals.set(video.channelId, bucket);
-  }
+  const gained = await viewsGainedByChannel({ organizationId, channelIds, window });
 
   const map = new Map<string, ChannelViewDelta>();
-  for (const [channelId, bucket] of totals) {
-    /*
-     * NOT ONE READING BRACKETS THIS WINDOW, so there is no delta — absent, not
-     * zero.
-     *
-     * This is the branch that runs today, for every own channel. A zero here
-     * would be a measurement saying "this channel gained no views in
-     * twenty-eight days", and dividing a month of revenue by it would produce
-     * either an infinity or, worse, a rate that looked plausible. The absence
-     * becomes `viewsGained: null`, which `judgeRpmChannel` reports as
-     * `no_view_history` — a sentence an owner can act on, because the action is
-     * turning on automatic refresh.
-     */
-    if (bucket.covered === 0) continue;
+  for (const [channelId, entry] of gained) {
+    if (entry.coveredVideos === 0) continue;
     map.set(channelId, {
-      viewsGained: bucket.gained,
-      coverage: bucket.total === 0 ? 0 : bucket.covered / bucket.total,
+      viewsGained: entry.viewsGained,
+      coverage: entry.totalVideos === 0 ? 0 : entry.coveredVideos / entry.totalVideos,
     });
   }
-
   return map;
-}
-
-/** The last reading at or before an instant, in views, or null when there is none. */
-function lastAtOrBefore(
-  snapshots: readonly { capturedAt: Date; viewCount: bigint }[],
-  atMs: number,
-): number | null {
-  let best: { capturedAt: Date; viewCount: bigint } | null = null;
-  for (const snapshot of snapshots) {
-    const capturedMs = snapshot.capturedAt.getTime();
-    if (capturedMs > atMs) continue;
-    if (best === null || capturedMs > best.capturedAt.getTime()) best = snapshot;
-  }
-  return best === null ? null : Number(best.viewCount);
 }

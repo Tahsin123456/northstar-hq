@@ -30,6 +30,7 @@ import { api } from "@/lib/api-client";
 import type { MyProfileDTO, OrganizationSettingsDTO, PersonalSettingsDTO } from "@/lib/dto";
 import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 import { DATASET_KEY } from "@/hooks/use-dataset";
+import { VIEWS_GAINED_KEY } from "@/hooks/use-views-gained";
 import { THRESHOLD_PRESETS } from "@/lib/analytics/constants";
 import {
   ENGAGED_VIEWS_GLOSS,
@@ -484,6 +485,10 @@ function OrganizationSection({
       // lookback changes how much history the dataset returns.
       queryClient.invalidateQueries({ queryKey: SETTINGS_KEY });
       queryClient.invalidateQueries({ queryKey: DATASET_KEY });
+      // The engaged-view share on every niche's RPM resolution travels in the
+      // dataset, but the gains it multiplies are this payload's — refetch both
+      // so a changed assumption cannot price yesterday's deltas.
+      queryClient.invalidateQueries({ queryKey: VIEWS_GAINED_KEY });
       toast.success("Settings saved");
     },
     onError: (error) =>

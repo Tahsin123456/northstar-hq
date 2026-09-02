@@ -2,10 +2,17 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  NICHE_EARNINGS_DEFINITION,
+  NICHE_EARNINGS_DEFINITION_LONGFORM,
   buildNicheEarnings,
+  hasUsableGainsHistory,
+  measuredSpanNote,
+  measuredSpanNoteFrom,
   type NicheEarningsInput,
 } from "../niche-earnings";
 import {
+  TRACKED_NICHE_VALUE_DEFINITION,
+  TRACKED_NICHE_VALUE_DEFINITION_LONGFORM,
   resolveNicheRpm,
   rpmWindowEndingAt,
   type NicheRpmResolution,
@@ -19,6 +26,11 @@ import {
  * The owner's seventh request has two halves and the second one is the one that
  * needs pinning: "this should only be visible to Admins."
  *
+ * WHAT IS PRICED CHANGED — views GAINED during the period, from the snapshot
+ * series, instead of the lifetime views of the period's uploads — and with it
+ * came a fourth refusal: a period the view history cannot cover well enough is
+ * answered in words, never with a figure priced from an incomplete count.
+ *
  * WHY THIS IS TESTED AS A PURE FUNCTION AND NOT AS A COMPONENT. The runner here
  * is Node with no DOM — `vitest.config.ts` sets `environment: "node"` and only
  * collects `*.test.ts` — so a rendered assertion is not available. That is not
@@ -28,12 +40,6 @@ import {
  * `disclosed: false` is what the component keys off. Testing the builder tests
  * the boundary; testing the component would only test that somebody remembered
  * to write an `if`.
- *
- * The server side of the same gate is already pinned in
- * `niche-rpm-disclosure.test.ts` (the DTO withholds the resolution) and
- * `niche-rpm-permission.test.ts` (the write needs both permissions). This file
- * covers the third link: that the new surface built on top of them cannot
- * reconstruct anything from what it was given.
  */
 
 const WINDOW = rpmWindowEndingAt(Date.UTC(2026, 7, 31, 14, 30));
@@ -74,8 +80,9 @@ function niche(overrides: Partial<NicheEarningsInput> = {}): NicheEarningsInput 
     name: "GTA",
     colorIndex: 0,
     rpm: pricedRpm(),
-    ourViews: 2_000_000,
-    competitorViews: 8_000_000,
+    ourViewsGained: 2_000_000,
+    competitorViewsGained: 8_000_000,
+    measured: { coveredVideos: 10, totalVideos: 10 },
     ownChannelIds: ["chan_1"],
     ...overrides,
   };
@@ -131,16 +138,58 @@ describe("who the earnings panel is built for", () => {
   });
 });
 
-describe("what the panel says when it cannot say a number", () => {
+describe("the coverage floor under every dollar figure", () => {
   /**
-   * THE STATE OF THIS DEPLOYMENT TODAY, for every niche.
-   *
-   * Nothing writes `VideoSnapshot` rows while `autoRefreshEnabled` is false, so
-   * no rate can be derived, and no range has been entered. The panel must say
-   * that rather than render a column of zeros — "$0" under a niche's name is a
-   * claim that the niche generates nothing, which is a statement about the
-   * catalogue rather than about what the app can currently see.
+   * 0.9 — `RPM_MIN_SNAPSHOT_COVERAGE`, the DOLLAR floor — and the boundary is
+   * pinned from both sides. An uncovered video's views are silently missing
+   * from the gains sum, so below the floor the figure would be priced from an
+   * incomplete count: words. AT the floor the bounded understatement is
+   * accepted, exactly as the derived-RPM judge accepts it: money.
    */
+  it("refuses money at coverage 0.899 and grants it at exactly 0.9", () => {
+    const below = buildNicheEarnings([
+      niche({ measured: { coveredVideos: 899, totalVideos: 1000 } }),
+    ]);
+    const at = buildNicheEarnings([
+      niche({ measured: { coveredVideos: 900, totalVideos: 1000 } }),
+    ]);
+
+    expect(below.rows[0]!.state).toBe("insufficient_history");
+    expect(below.pricedCount).toBe(0);
+    expect(below.total).toBeNull();
+
+    expect(at.rows[0]!.state).toBe("priced");
+    expect(at.total).toEqual({ lowMinor: 3_000, highMinor: 6_000, currency: "USD" });
+  });
+
+  /** No measurement at all is the same refusal said harder. */
+  it("treats a niche the endpoint could not measure as insufficient history", () => {
+    const panel = buildNicheEarnings([niche({ measured: null })]);
+
+    expect(panel.rows[0]!.state).toBe("insufficient_history");
+    expect(panel.total).toBeNull();
+    expect(panel.noTotalReason).toBe("no_usable_history");
+  });
+
+  /**
+   * A library of zero videos is NOT thin history — there is nothing the
+   * measurement failed to cover. It is a niche with nothing to gain, which is
+   * the no-gains state's job to say.
+   */
+  it("does not call an empty library insufficient", () => {
+    expect(hasUsableGainsHistory({ coveredVideos: 0, totalVideos: 0 })).toBe(true);
+    const panel = buildNicheEarnings([
+      niche({
+        ourViewsGained: 0,
+        competitorViewsGained: 0,
+        measured: { coveredVideos: 0, totalVideos: 0 },
+      }),
+    ]);
+    expect(panel.rows[0]!.state).toBe("no_gains");
+  });
+});
+
+describe("what the panel says when it cannot say a number", () => {
   it("reports nothing priced rather than a portfolio worth zero", () => {
     const panel = buildNicheEarnings([
       niche({ rpm: unpricedRpm() }),
@@ -157,16 +206,16 @@ describe("what the panel says when it cannot say a number", () => {
   });
 
   /**
-   * A priced niche that published nothing in the selected period prices to zero
+   * A priced, fully measured niche that gained nothing prices to zero
    * correctly, and must still not print "$0": that reads as a claim about the
    * niche rather than about the period on screen. Same rule as the niche card.
    */
-  it("separates 'nothing published in this period' from 'nobody has priced it'", () => {
+  it("separates 'nothing gained in this period' from 'nobody has priced it'", () => {
     const panel = buildNicheEarnings([
-      niche({ ourViews: 0, competitorViews: 0 }),
+      niche({ ourViewsGained: 0, competitorViewsGained: 0 }),
     ]);
 
-    expect(panel.rows[0]!.state).toBe("no_shorts");
+    expect(panel.rows[0]!.state).toBe("no_gains");
     expect(panel.pricedCount).toBe(0);
     // The view figures are real and are zero; it is the MONEY that must not be
     // rendered as a figure.
@@ -178,27 +227,21 @@ describe("what the panel says when it cannot say a number", () => {
    * =========================================================================
    * THE PANEL MUST NOT TELL AN OWNER WHO HAS PRICED A NICHE THAT HE HAS NOT
    * =========================================================================
-   * `pricedCount` is zero in TWO different situations — nobody entered a rate,
-   * and everybody's rate had nothing to price — and the panel used to key its
-   * headline sentence off the count, so the second state rendered "No niche has
-   * a rate yet, so there is nothing to price."
-   *
-   * That is not a hypothetical ordering of events. It is what the owner sees
-   * the moment he enters his first RPM and then narrows the period, which is
-   * the obvious next thing to do after pricing a niche. The rows underneath
-   * were already saying the opposite and correct thing, and were being thrown
-   * away. The reason now distinguishes the two so the panel can keep them.
+   * `pricedCount` is zero in THREE different situations — nobody entered a
+   * rate, every rated niche gained nothing, and the history cannot cover the
+   * period — and they are three different instructions to the owner. The
+   * headline keys off which of them actually holds.
    */
-  it("does not claim a niche is unpriced when it is priced but published nothing", () => {
+  it("does not claim a niche is unpriced when it is priced but gained nothing", () => {
     const panel = buildNicheEarnings([
-      niche({ id: "a", ourViews: 0, competitorViews: 0 }),
-      niche({ id: "b", name: "Finance", ourViews: 0, competitorViews: 0 }),
+      niche({ id: "a", ourViewsGained: 0, competitorViewsGained: 0 }),
+      niche({ id: "b", name: "Finance", ourViewsGained: 0, competitorViewsGained: 0 }),
     ]);
 
     expect(panel.pricedCount).toBe(0);
-    expect(panel.noTotalReason).toBe("nothing_published");
+    expect(panel.noTotalReason).toBe("nothing_gained");
     // Every row has a rate. "Nothing priced" would be a false statement.
-    expect(panel.rows.map((row) => row.state)).toEqual(["no_shorts", "no_shorts"]);
+    expect(panel.rows.map((row) => row.state)).toEqual(["no_gains", "no_gains"]);
   });
 
   /** The genuinely unpriced case still reports itself as such. */
@@ -209,29 +252,57 @@ describe("what the panel says when it cannot say a number", () => {
   });
 
   /**
-   * A mix: one niche has a rate but published nothing, another has no rate.
+   * A mix: one niche has a rate but gained nothing, another has no rate.
    * Neither is priced, and the honest reading is the one that does not accuse
    * the owner of having priced nothing — a rate does exist.
    */
-  it("prefers 'nothing published' when at least one niche does have a rate", () => {
+  it("prefers 'nothing gained' when at least one niche does have a rate", () => {
     const panel = buildNicheEarnings([
-      niche({ id: "a", ourViews: 0, competitorViews: 0 }),
+      niche({ id: "a", ourViewsGained: 0, competitorViewsGained: 0 }),
       niche({ id: "b", name: "Finance", rpm: unpricedRpm() }),
     ]);
 
     expect(panel.pricedCount).toBe(0);
-    expect(panel.noTotalReason).toBe("nothing_published");
+    expect(panel.noTotalReason).toBe("nothing_gained");
+  });
+
+  /**
+   * When every rate-bearing niche is below the coverage floor, the honest
+   * headline is about the HISTORY: "gained nothing" would assert a
+   * measurement that never happened, and "nothing priced" would deny a rate
+   * the owner entered.
+   */
+  it("reports no_usable_history when every rated niche is below the floor", () => {
+    const panel = buildNicheEarnings([
+      niche({ id: "a", measured: { coveredVideos: 1, totalVideos: 10 } }),
+      niche({ id: "b", name: "Finance", measured: null }),
+      niche({ id: "c", name: "Sport", rpm: unpricedRpm() }),
+    ]);
+
+    expect(panel.pricedCount).toBe(0);
+    expect(panel.noTotalReason).toBe("no_usable_history");
+  });
+
+  /** One measured no-gains niche outranks the thin-history headline: a real
+   * measurement exists, so the period genuinely paid nothing measurable. */
+  it("prefers 'nothing gained' over 'no usable history' when one niche measured", () => {
+    const panel = buildNicheEarnings([
+      niche({ id: "a", ourViewsGained: 0, competitorViewsGained: 0 }),
+      niche({ id: "b", name: "Finance", measured: null }),
+    ]);
+
+    expect(panel.noTotalReason).toBe("nothing_gained");
   });
 });
 
-describe("the portfolio total", () => {
+describe("the arithmetic on gains", () => {
   /**
    * The ordinary case. Two niches, no shared channel, both priced in the base
    * currency: the totals add.
    *
-   * 2,000,000 raw views of ours at 50% engaged is 1,000,000 priced views, which
-   * at $0.03–$0.06 per 1,000 engaged views is $30.00–$60.00. Two such niches
-   * total $60.00–$120.00. Written out rather than derived, so a broken
+   * 2,000,000 gained views of ours at 50% engaged is 1,000,000 priced views,
+   * which at $0.03–$0.06 per 1,000 engaged views is $30.00–$60.00. Two such
+   * niches total $60.00–$120.00. Written out rather than derived, so a broken
    * implementation cannot agree with a broken expectation.
    */
   it("adds Northstar's own share across niches that share no channel", () => {
@@ -244,20 +315,41 @@ describe("the portfolio total", () => {
     expect(panel.total).toEqual({ lowMinor: 6_000, highMinor: 12_000, currency: "USD" });
   });
 
+  /** Capture is gained-over-gained: 2M of 10M tracked gains is 20%. */
+  it("computes the capture percentage from the gained views", () => {
+    const panel = buildNicheEarnings([niche()]);
+
+    expect(panel.rows[0]!.value.capturePercent).toBe(20);
+    expect(panel.rows[0]!.value.trackedNicheViews).toBe(10_000_000);
+  });
+
+  /**
+   * A NEGATIVE SUM CLAMPS TO ZERO VIEWS, NEVER TO NEGATIVE MONEY. Purges can
+   * pull a channel's period delta below zero, and the raw figure is a real
+   * fact about views — but "-$12" is not an amount of revenue that exists.
+   * The clamp lives in `calculateNicheValue` and is pinned HERE because this
+   * is the first caller that can actually feed it a negative.
+   */
+  it("clamps a negative gains sum to zero rather than pricing negative money", () => {
+    const panel = buildNicheEarnings([
+      niche({ ourViewsGained: -500_000, competitorViewsGained: 1_000_000 }),
+    ]);
+
+    const value = panel.rows[0]!.value;
+    expect(value.ourViews).toBe(0);
+    expect(value.trackedNicheViews).toBe(1_000_000);
+    expect(value.ourRevenue).toEqual({ lowMinor: 0, highMinor: 0, currency: "USD" });
+    expect(value.trackedRevenue!.lowMinor).toBeGreaterThan(0);
+  });
+
   /**
    * =========================================================================
    * THE DOUBLE-COUNT, WHICH IS THE WHOLE REASON THE TOTAL IS ALLOWED TO BE NULL
    * =========================================================================
-   * `niche-rpm-service` states the rule it is protecting: "A CHANNEL IN TWO
-   * NICHES IS JUDGED ONCE AND COUNTED IN BOTH, which is correct for a RATE ...
-   * What must never be done with the result is to add the niche totals together
-   * into a portfolio figure, because that would count the channel twice."
-   *
-   * This panel is the first surface in the app that sums across niches at all,
-   * so it is the first place that rule could be broken. There is no correction
-   * available — the same views would have to be priced at two different rates,
-   * and silently picking one is how a portfolio number becomes fiction — so the
-   * total is withheld and the per-niche figures, each correct on its own, stay.
+   * `niche-rpm-service` states the rule it is protecting: a channel in two
+   * niches is measured once and counted in BOTH — correct per niche, and
+   * never addable across them, because the same views would be priced at two
+   * different rates.
    */
   it("refuses a total when one channel is filed under two priced niches", () => {
     const panel = buildNicheEarnings([
@@ -323,20 +415,9 @@ describe("the portfolio total", () => {
  * THE TOTAL MUST NOT CLAIM A COVERAGE IT DOES NOT HAVE
  * =========================================================================
  * The sum can only include niches that HAVE a rate — an unpriced niche is
- * unknown, not zero, so there is nothing to add. That is correct arithmetic
- * under a label that was not: the panel printed "Northstar's share, all
- * niches" over it, so with two of eight niches priced it asserted a portfolio
- * figure while six were silently missing, and `noTotalReason` stayed null so no
- * caveat rendered anywhere.
- *
- * The module's own contract on the field says "Never a partial sum presented as
- * a total". The sum is worth keeping; what had to go was the claim. So the
- * label is derived from the same counts the sum was built from, and the panel
- * renders whatever it is handed rather than a sentence written at design time.
- *
- * The same fix covers the scoped reader: `rows` is already narrowed to the
- * niches a member was assigned, so counting rows describes what THEY were sent,
- * where "all niches" described a catalogue they cannot see.
+ * unknown, not zero, so there is nothing to add. The label is derived from the
+ * same counts the sum was built from, and the panel renders whatever it is
+ * handed rather than a sentence written at design time.
  */
 describe("what the total says it covers", () => {
   it("does not present a partial sum as the whole portfolio", () => {
@@ -348,7 +429,7 @@ describe("what the total says it covers", () => {
         rpm: unpricedRpm(),
         // Larger than the priced niche, which is the point: what is left out
         // is unbounded, so the subtotal can be arbitrarily far from the truth.
-        ourViews: 50_000_000,
+        ourViewsGained: 50_000_000,
         ownChannelIds: ["chan_2"],
       }),
     ]);
@@ -393,13 +474,85 @@ describe("what the total says it covers", () => {
   });
 });
 
+describe("the measured-span label", () => {
+  it("says exactly how much of the period the history covers", () => {
+    expect(measuredSpanNote(9, 30)).toBe(
+      "Measured over the last 9 of 30 days — view history begins there.",
+    );
+  });
+
+  it("is singular-safe", () => {
+    expect(measuredSpanNote(1, 1)).toBe(
+      "Measured over the last 1 of 1 day — view history begins there.",
+    );
+  });
+
+  const DAY_MS = 86_400_000;
+  const END = Date.UTC(2026, 7, 31);
+
+  it("derives the note from the server's own echo of the request", () => {
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 9 * DAY_MS,
+        endMs: END,
+      }),
+    ).toBe("Measured over the last 9 of 30 days — view history begins there.");
+  });
+
+  it("says nothing when the whole period was measured", () => {
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 30 * DAY_MS,
+        endMs: END,
+      }),
+    ).toBeNull();
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: null,
+        endMs: END,
+      }),
+    ).toBeNull();
+  });
+});
+
+/**
+ * =========================================================================
+ * THE WORDS — the period means what the selector implies, and nothing claims
+ * automatic refresh is off any more (it has been on since September).
+ * =========================================================================
+ */
+describe("the copy tells the gained-views truth", () => {
+  const readSource = (relative: string): string =>
+    readFileSync(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)), "utf8");
+
+  it("defines the panel figure as views gained during the period", () => {
+    expect(NICHE_EARNINGS_DEFINITION).toContain("gained during the selected period");
+    expect(NICHE_EARNINGS_DEFINITION_LONGFORM).toContain("gained during the selected period");
+    expect(TRACKED_NICHE_VALUE_DEFINITION).toContain("gained during the selected period");
+    expect(TRACKED_NICHE_VALUE_DEFINITION_LONGFORM).toContain(
+      "gained during the selected period",
+    );
+  });
+
+  it("no longer claims automatic refresh is switched off, anywhere it did", () => {
+    for (const relative of [
+      "lib/analytics/niche-earnings.ts",
+      "lib/analytics/niche-rpm.ts",
+      "server/services/niche-rpm-service.ts",
+    ]) {
+      expect(readSource(relative)).not.toContain("currently switched off");
+    }
+  });
+});
+
 /**
  * The panel is JSX and this runner has no DOM, so the one thing that cannot be
  * asserted through `buildNicheEarnings` is that the component actually RENDERS
- * the label it is handed. That is precisely where the bug lived: the builder was
- * always correct about what it summed, and the header ignored it in favour of a
- * sentence written at design time. A source assertion is the available check,
- * and it is the same technique `niche-card-controls.test.ts` uses.
+ * what it is handed. A source assertion is the available check, and it is the
+ * same technique `niche-card-controls.test.ts` uses.
  */
 describe("the panel renders the label rather than asserting its own", () => {
   const panelSource = readFileSync(
@@ -423,8 +576,8 @@ describe("the panel renders the label rather than asserting its own", () => {
 
   /**
    * The empty state must key off the REASON, not off `pricedCount === 0` —
-   * those differ exactly when a priced niche published nothing, which is the
-   * state that produced a false sentence.
+   * those differ exactly when a priced niche gained nothing or the history is
+   * thin, which are the states that produced a false sentence.
    */
   it("keys its empty state off the reason rather than the count", () => {
     expect(panelSource).toContain('panel.noTotalReason === "nothing_priced"');
@@ -434,5 +587,13 @@ describe("the panel renders the label rather than asserting its own", () => {
   it("renders the caveat when the total omits niches", () => {
     expect(panelSource).toContain("panel.totalIsPartial");
     expect(panelSource).toContain("NICHE_EARNINGS_PARTIAL_TOTAL");
+  });
+
+  /** A failed gains read is words, and a pending one is skeletons — never a
+   * stale figure under a fresh period label. */
+  it("handles the fetch states in words and skeletons", () => {
+    expect(panelSource).toContain("VIEWS_GAINED_UNAVAILABLE");
+    expect(panelSource).toContain("Skeleton");
+    expect(panelSource).toContain("measuredSpanNoteFrom");
   });
 });

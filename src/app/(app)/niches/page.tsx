@@ -55,6 +55,7 @@ import {
   NicheRpmDialog,
   RPM_MENU_ITEM_LABEL,
   useCanConfigureRpm,
+  useCanReadNicheEconomics,
 } from "@/components/niches/niche-rpm-dialog";
 import { NicheValueStrip } from "@/components/niches/niche-value-strip";
 import { NotesPanel } from "@/components/notes/notes-panel";
@@ -63,10 +64,11 @@ import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
 import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
+import { nicheGainedById, useNicheViewsGained } from "@/hooks/use-views-gained";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
-import { calculateMarketShare } from "@/lib/analytics/market-share";
-import type { NicheDTO } from "@/lib/dto";
+import { measuredSpanNoteFrom } from "@/lib/analytics/niche-earnings";
+import type { NicheDTO, NicheViewsGainedEntryDTO } from "@/lib/dto";
 import {
   NICHE_KIND_DESCRIPTION,
   NICHE_KIND_LABEL,
@@ -97,6 +99,32 @@ export default function NichesPage() {
   const [createOpen, setCreateOpen] = React.useState(false);
 
   const rows = useChannelRows(data);
+
+  /*
+   * ONE views-gained read for the whole grid, at page level.
+   *
+   * Every card's money strip prices views GAINED in the period, which is a
+   * server-side snapshot delta rather than a re-slice of the dataset — see
+   * `use-views-gained.ts`. Fetching per card would be one request per niche
+   * for slices of the same response; fetching here, with the same key the
+   * Overview panel uses, means the two surfaces share one cached measurement
+   * and cannot price the same period differently. Disabled for a reader
+   * without finance access: their `rpm` is null on every niche, no strip
+   * renders, and the read would be waste.
+   */
+  const { range } = useFilters();
+  const pageFormat = useDatasetFormat();
+  const canReadEconomics = useCanReadNicheEconomics();
+  const gainsQuery = useNicheViewsGained(pageFormat, range, canReadEconomics);
+  const gains: NicheGainsView = React.useMemo(
+    () => ({
+      byId: gainsQuery.data === undefined ? null : nicheGainedById(gainsQuery.data),
+      loading: canReadEconomics && gainsQuery.isPending,
+      error: gainsQuery.isError,
+      note: gainsQuery.data === undefined ? null : measuredSpanNoteFrom(gainsQuery.data),
+    }),
+    [canReadEconomics, gainsQuery.data, gainsQuery.isPending, gainsQuery.isError],
+  );
 
   /*
    * Unconfigured niches float to the top.
@@ -219,8 +247,8 @@ export default function NichesPage() {
                 <UnconfiguredSummary count={unconfiguredCount} />
               ) : null}
 
-              <NicheKindGroup kind="production" niches={production} rows={rows} />
-              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} />
+              <NicheKindGroup kind="production" niches={production} rows={rows} gains={gains} />
+              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} gains={gains} />
             </>
           )}
 
@@ -247,14 +275,25 @@ export default function NichesPage() {
  * Renders nothing when the group is empty. An account with no watchlist niches
  * should not carry a heading explaining a concept it is not using.
  */
+/** The page-level views-gained read, as every card consumes it. */
+interface NicheGainsView {
+  readonly byId: ReadonlyMap<string, NicheViewsGainedEntryDTO> | null;
+  readonly loading: boolean;
+  readonly error: boolean;
+  /** "Measured over the last N of M days…" when the history falls short. */
+  readonly note: string | null;
+}
+
 function NicheKindGroup({
   kind,
   niches,
   rows,
+  gains,
 }: {
   kind: NicheKind;
   niches: readonly NicheDTO[];
   rows: readonly ChannelRow[];
+  gains: NicheGainsView;
 }) {
   if (niches.length === 0) return null;
 
@@ -274,7 +313,7 @@ function NicheKindGroup({
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {niches.map((niche) => (
-          <NicheCard key={niche.id} niche={niche} rows={rows} />
+          <NicheCard key={niche.id} niche={niche} rows={rows} gains={gains} />
         ))}
       </div>
     </section>
@@ -284,9 +323,11 @@ function NicheKindGroup({
 function NicheCard({
   niche,
   rows,
+  gains,
 }: {
   niche: NicheDTO;
   rows: readonly ChannelRow[];
+  gains: NicheGainsView;
 }) {
   const { range } = useFilters();
   /*
@@ -359,33 +400,18 @@ function NicheCard({
   const summary = React.useMemo(() => calculatePortfolioSummary(entries), [entries]);
 
   /*
-   * The two view totals the money strip prices: ours, and everybody else we
-   * track in this niche.
+   * The money strip's view totals no longer come from this card.
    *
-   * `calculateMarketShare` already splits exactly this way and already carries
-   * the honesty rules — a share of nothing is `null`, and the denominator is
-   * the TRACKED set rather than the market. Reusing it means the money figure
-   * and the share on the dashboard are built from one view measure rather than
-   * two that can drift.
-   *
-   * NOTE WHICH VIEW MEASURE THAT IS: current lifetime views of Shorts PUBLISHED
-   * in the period, per `getShortsInDateRange`. It is not views EARNED in the
-   * period, which needs the snapshot series nothing is currently writing. That
-   * distinction is why this figure is only ever used to size the niche and is
-   * never fed back into deriving a rate — pairing lifetime views of new videos
-   * with a month of revenue produces a number with no interpretation.
+   * They used to be `calculateMarketShare` over the members' videos — lifetime
+   * views of what was PUBLISHED in the period. The money now prices views
+   * GAINED in the period, which is a snapshot delta the browser cannot
+   * compute from the dataset, so the page fetches it once (see `NichesPage`)
+   * and each card receives its own niche's slice through `gains`. The upload
+   * measure keeps every job it still has — the hit rate, the Shorts count,
+   * the market-share percentages elsewhere — because "how did recent output
+   * do?" and "what did the period pay?" are different questions, and only the
+   * second one is money.
    */
-  const share = React.useMemo(() => {
-    const own = members.filter((row) => row.channel.ownershipType === "own");
-    const others = members.filter((row) => row.channel.ownershipType !== "own");
-    return calculateMarketShare(
-      own.map((row) => ({ videos: row.videos })),
-      others.map((row) => ({ videos: row.videos })),
-      range,
-      format,
-    );
-  }, [members, range, format]);
-
   const best = summary.topChannel;
   /*
    * The top channel's OWN verdicts, so the range printed beside its rate is its
@@ -555,8 +581,10 @@ function NicheCard({
             access — see the note on `NicheDTO.rpm`. */}
         <NicheValueStrip
           niche={niche}
-          ourViews={share.ourViews}
-          competitorViews={share.competitorViews}
+          gained={gains.byId?.get(niche.id) ?? null}
+          loading={gains.loading}
+          error={gains.error}
+          measuredNote={gains.note}
         />
 
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">

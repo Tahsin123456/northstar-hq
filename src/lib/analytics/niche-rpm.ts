@@ -31,11 +31,11 @@ import type { NicheFormat } from "@/lib/niches/niche-format";
  *      point, not a range, because it is measured. It overrides everything,
  *      including a range somebody typed.
  *   2. MANUAL — no own channel here clears the bar in (1), so the hand-entered
- *      low–high range applies. This is the fallback in the owner's ordering and
- *      the ONLY path that produces a number on this deployment today: with
- *      `OrganizationSettings.autoRefreshEnabled` false nothing is writing
- *      `VideoSnapshot` rows, so views-gained-in-a-window — the denominator every
- *      derived rate needs — is not computable for any channel.
+ *      low–high range applies. This is the fallback in the owner's ordering,
+ *      and it stays the common path in practice: a derived rate needs the
+ *      `VideoSnapshot` history automatic refresh records to reach all the way
+ *      across the 28-day window, which each channel grows into rather than
+ *      starts with.
  *   3. NOTHING. Not zero. Zero is the claim that a niche pays nothing, which is
  *      a statement about the world; "none" is the absence of a statement. They
  *      render as opposite sentences and are never allowed to collapse into each
@@ -525,8 +525,9 @@ export type RpmChannelRejection =
   /** Money arrived on too few of the days to be a rate rather than an event. */
   | "too_few_earning_days"
   /**
-   * No view history spanning the window. Today this is every channel: nothing
-   * is writing snapshots, so there is no denominator to divide by.
+   * No view history spanning the window, so there is no denominator to
+   * divide by. The state every channel starts in until the history automatic
+   * refresh records grows long enough to bracket the window.
    */
   | "no_view_history"
   /** Snapshots exist but cover too little of the library to trust the delta. */
@@ -1221,7 +1222,7 @@ export function projectRevenue(
  * to survive into every label, tooltip and export.
  */
 export const TRACKED_NICHE_VALUE_DEFINITION =
-  "Tracked niche revenue prices the Shorts views of the channels currently tracked for this niche at its RPM — revenue per 1,000 views. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Note which views are priced: the lifetime views to date of the Shorts PUBLISHED in the selected period, exactly as the hit rate counts them. The period chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. A hand-entered rate is applied to ENGAGED views only — the paid subset of the view count, set under Settings — while a rate measured from Northstar's own channel already accounts for engagement and is applied to the full count.";
+  "Tracked niche revenue prices the Shorts views the channels currently tracked for this niche gained during the selected period at its RPM — revenue per 1,000 views. This counts every view earned in the period — including views picked up by older uploads — not just the views of what was published recently, and it can only be measured from the day the app started recording view history: when the period reaches further back than the history does, the figure covers the recorded days and the label says so. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. A hand-entered rate is applied to ENGAGED views only — the paid subset of the view count, set under Settings — while a rate measured from Northstar's own channel already accounts for engagement and is applied to the full count.";
 
 /**
  * The long-form counterpart, WHOSE LAST SENTENCE INVERTS. On a Long Form niche
@@ -1233,7 +1234,7 @@ export const TRACKED_NICHE_VALUE_DEFINITION =
  * the basis rules exist to prevent.
  */
 export const TRACKED_NICHE_VALUE_DEFINITION_LONGFORM =
-  "Tracked niche revenue prices the long-form views of the channels currently tracked for this niche at its RPM — revenue per 1,000 views. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Note which views are priced: the lifetime views to date of the videos PUBLISHED in the selected period, exactly as the hit rate counts them. The period chooses which uploads are in the figure, not which views or revenue were earned during it, so this is what those uploads are worth in total rather than what the niche made last month. Every rate here — entered or measured — is applied to the full view count: long-form RPM is quoted per 1,000 views, and no engaged-view share applies.";
+  "Tracked niche revenue prices the long-form views the channels currently tracked for this niche gained during the selected period at its RPM — revenue per 1,000 views. This counts every view earned in the period — including views picked up by older uploads — not just the views of what was published recently, and it can only be measured from the day the app started recording view history: when the period reaches further back than the history does, the figure covers the recorded days and the label says so. It is not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove competitors — and where the RPM is a hand-entered estimate the money is an estimate too. Every rate here — entered or measured — is applied to the full view count: long-form RPM is quoted per 1,000 views, and no engaged-view share applies.";
 
 /** The definition for a niche of the given format. The wording differs where the arithmetic does. */
 export function trackedNicheValueDefinition(format: NicheFormat): string {
@@ -1520,35 +1521,52 @@ export function rpmQuoteUnitLong(basis: RpmBasis): string {
 export const UNPRICED_NICHE_EXPLANATION =
   "Nobody has said what 1,000 views in this niche are worth, and Northstar has no monetized channel here whose own revenue could stand in. Until one of those exists there is no honest way to put a number on the niche — an empty figure here is a missing decision, not a niche worth nothing.";
 
-/** A priced niche that published nothing in the period. */
-export const UNPRICED_NICHE_SHORT_NO_SHORTS = "No Shorts in this period";
-
-/** The same state on a Long Form surface, where the uploads are not Shorts. */
-export const UNPRICED_NICHE_LONGFORM_NO_VIDEOS = "No videos in this period";
+/**
+ * A priced, measured niche whose channels gained nothing in the period.
+ *
+ * ONE LINE FOR BOTH FORMATS, where the upload basis needed two: "no Shorts in
+ * this period" was a sentence about what was PUBLISHED, so each format named
+ * its own noun. A gain is a movement of views, the same word on both sides,
+ * and inventing a per-format variant would only give the two products a way
+ * to drift apart on the same state.
+ */
+export const NICHE_NO_VIEWS_GAINED = "No views gained in this period";
 
 /**
- * The empty-period line for a niche of the given format. Selected on the ROW'S
- * format rather than the page's: an admin surface could one day list both
- * lists, and each row must describe its own uploads.
+ * What a priced niche with no gained views says instead of a figure.
+ *
+ * WORDS, NOT "$0", and this is the same rule as everywhere else in this module
+ * rather than a special case. Zero gained views really do price to zero money,
+ * so the arithmetic is not wrong — but "$0" sitting under "Tracked niche
+ * revenue" is read as "this niche generates nothing", which is a claim about
+ * the niche rather than about the period somebody selected. The `MiniStat`
+ * beside it uses words for exactly this reason.
  */
-export function unpricedNicheNothingPublished(format: NicheFormat): string {
-  return format === "shorts"
-    ? UNPRICED_NICHE_SHORT_NO_SHORTS
-    : UNPRICED_NICHE_LONGFORM_NO_VIDEOS;
+export const NO_GAINS_TO_PRICE_EXPLANATION =
+  "Nothing tracked here gained views over the measured days, so there is nothing to price. The rate below still applies — widen the period, or check back after the next refresh.";
+
+/**
+ * A priced niche whose view history covers too little of the period.
+ *
+ * A THIRD STATE, not a variant of "no views gained": here views may well have
+ * been gained and the app simply cannot count enough of them — pricing the
+ * covered fraction would present a floor as a figure. Words, with the
+ * coverage counts beside them, and the fix is only time.
+ */
+export const NICHE_HISTORY_TOO_THIN = "Not enough view history yet";
+
+/** The coverage behind the refusal, in counts a reader can weigh. */
+export function nicheHistoryTooThinExplanation(covered: number, total: number): string {
+  return `Only ${covered} of ${total} tracked videos here have view readings covering this period, so a money figure would be priced from an incomplete count. This fills in on its own as the app keeps recording.`;
 }
 
 /**
- * What a priced niche with no Shorts in the period says instead of a figure.
- *
- * WORDS, NOT "$0", and this is the same rule as everywhere else in this module
- * rather than a special case. Zero views really do price to zero money, so the
- * arithmetic is not wrong — but "$0" sitting under "Tracked niche revenue" is
- * read as "this niche generates nothing", which is a claim about the niche
- * rather than about the period somebody selected. The `MiniStat` beside it uses
- * words for exactly this reason.
+ * The gains read failed outright — a network or server error, not a data
+ * state. Nothing is priced from a stale cache and nothing is invented; the
+ * one action that helps is named.
  */
-export const NO_SHORTS_TO_PRICE_EXPLANATION =
-  "Nothing tracked here was published in the selected period, so there are no views to price. The rate below still applies — widen the period to see what this niche is worth.";
+export const VIEWS_GAINED_UNAVAILABLE =
+  "View gains could not be loaded just now, so no money is shown. Reload the page to try again.";
 
 /** A niche whose stored estimate exists but cannot be shown in the base currency. */
 export const UNCONVERTIBLE_NICHE_SHORT = "Estimate unusable";
@@ -1619,7 +1637,7 @@ export const RPM_REJECTION_EXPLANATION: Readonly<Record<RpmChannelRejection, str
   too_few_earning_days:
     "earned on too few days of the window for a steady rate. A handful of earning days describes an event rather than a price.",
   no_view_history:
-    "has no recorded view history spanning the window, so there is nothing to divide its revenue by. View history is collected by automatic refresh, which is currently switched off.",
+    "has no recorded view history spanning the window, so there is nothing to divide its revenue by. Automatic refresh records that history as it runs; once it has been recording long enough to cover the window, a rate can be measured.",
   thin_view_coverage:
     "has view history for too little of its library, so the views it gained cannot be measured without overstating the rate.",
   below_evidence_floor:

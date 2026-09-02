@@ -9,6 +9,7 @@ import type {
   ExcludedVideoDTO,
   GoogleOAuthStatusDTO,
   NicheDTO,
+  NicheViewsGainedDTO,
   NoteDTO,
   NoteTargetType,
   NoteVisibility,
@@ -348,6 +349,21 @@ export const api = {
   // --- Niches ---
 
   listNiches: (): Promise<{ niches: NicheDTO[] }> => request("/api/niches"),
+
+  /**
+   * Views gained per visible niche of one format, over the covered part of
+   * the period — the view side of the niche money figures. The format is sent
+   * explicitly like `getDataset`'s, and for the same reason: a longs-role
+   * reader on a Shorts surface should meet the 403, not silently different
+   * numbers.
+   */
+  getNicheViewsGained: (
+    format: NicheFormat,
+    range: { startMs: number; endMs: number },
+  ): Promise<NicheViewsGainedDTO> =>
+    request(
+      `/api/niches/views-gained?format=${format}&startMs=${range.startMs}&endMs=${range.endMs}`,
+    ),
 
   /**
    * `hitThreshold` is omitted entirely unless the caller is configuring one.

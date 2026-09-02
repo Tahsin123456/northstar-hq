@@ -274,8 +274,10 @@ export default function LongformOverviewPage() {
           {/* The economics, priced on the Long Form basis: every niche in this
               payload is a longform niche, so `NicheEarningsPanel` reads each
               row's own format and quotes a hand-entered rate per 1,000 plain
-              views with no engaged-view share — see `manualRpmBasis`. */}
-          <NicheEarningsPanel niches={niches} rows={rows} range={range} />
+              views with no engaged-view share — see `manualRpmBasis`. The
+              panel fetches its own long-form view GAINS for the period; the
+              table rows above stay on the upload basis by design. */}
+          <NicheEarningsPanel niches={niches} range={range} />
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION_LONGFORM}

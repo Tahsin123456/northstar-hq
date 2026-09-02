@@ -481,11 +481,11 @@ model Niche {
   /// nullable rather than defaulted.
   ///
   /// This range is the FALLBACK in the owner's ordering, behind a rate derived
-  /// from a monetized channel the studio operates in the niche. On this
-  /// deployment it is nonetheless the only path that yields a number today: with
-  /// `OrganizationSettings.autoRefreshEnabled` false there are no `VideoSnapshot`
-  /// rows, so views-gained-in-a-window — the denominator every derived rate needs
-  /// — is not computable for anybody. See the note below the currency column.
+  /// from a monetized channel the studio operates in the niche. It stays the
+  /// common path in practice: a derived rate needs the `VideoSnapshot` history
+  /// automatic refresh records to reach across its whole 28-day window, which a
+  /// channel grows into rather than starts with. See the note below the
+  /// currency column.
   rpmLowMinorPerMillion  Int?
   rpmHighMinorPerMillion Int?
 

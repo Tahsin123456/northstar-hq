@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_RPM_MAJOR_PER_THOUSAND,
+  NICHE_NO_VIEWS_GAINED,
   RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND,
   RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND_LONGFORM,
   TRACKED_NICHE_VALUE_DEFINITION,
@@ -9,7 +10,6 @@ import {
   rpmBounds,
   rpmImplausibleMajorPerThousand,
   trackedNicheValueDefinition,
-  unpricedNicheNothingPublished,
   type NicheRpmResolution,
 } from "@/lib/analytics/niche-rpm";
 
@@ -172,8 +172,10 @@ describe("the pricing-basis COPY tells each format's own truth", () => {
     expect(longform).toContain("long-form views");
   });
 
-  it("selects the empty-period line on the row's format", () => {
-    expect(unpricedNicheNothingPublished("shorts")).toBe("No Shorts in this period");
-    expect(unpricedNicheNothingPublished("longform")).toBe("No videos in this period");
+  it("uses one empty-period line for both formats — a gain is the same word on both sides", () => {
+    // The upload basis needed a per-format noun ("No Shorts in this period" /
+    // "No videos…"); a GAIN is a movement of views, so one line serves both
+    // and the two products cannot drift apart on the same state.
+    expect(NICHE_NO_VIEWS_GAINED).toBe("No views gained in this period");
   });
 });

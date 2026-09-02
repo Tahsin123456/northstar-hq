@@ -185,6 +185,58 @@ export interface NicheDTO extends NicheRefDTO {
 }
 
 /**
+ * One niche's views gained over the measured span, split ours/competitors.
+ *
+ * VIEW COUNTS ONLY — no rate and no money. The pricing happens in the browser
+ * against `NicheDTO.rpm`, which stays behind `finance.view`; these are the
+ * same class of figures the dataset already publishes to every
+ * `analytics.view` holder, read from the snapshot series instead of from the
+ * lifetime counters.
+ */
+export interface NicheViewsGainedEntryDTO {
+  readonly nicheId: string;
+  /** Snapshot-delta views gained by channels Northstar owns. Clamped nowhere:
+   * a purge-driven negative sum is real and the pricing layer clamps for
+   * display. */
+  readonly ourViewsGained: number;
+  /** The same delta for every other tracked channel in the niche. */
+  readonly competitorViewsGained: number;
+  /**
+   * Coverage, summed over EVERY member channel's library — including channels
+   * where nothing could be measured. The money layer holds these against the
+   * 0.9 floor before it prints a figure; a covered count quietly excluding
+   * the unmeasured channels would let a thin history price a whole niche.
+   */
+  readonly coveredVideos: number;
+  readonly totalVideos: number;
+  /** Own channels that actually measured something — the double-count check's
+   * input, mirroring `NicheEarningsInput.ownChannelIds`. */
+  readonly ownChannelIds: readonly string[];
+}
+
+/**
+ * Views gained per niche over a requested period, measured where the view
+ * history actually reaches.
+ *
+ * `measuredFromMs` is the honest start: the requested start, or the first
+ * instant the organization's snapshot history covers, whichever is later.
+ * `null` means NOTHING could be measured — no snapshots at all, or a period
+ * that ends before the history begins — and the client renders words for that
+ * state rather than a fabricated zero. `requestedStartMs` travels back so the
+ * label "measured over the last N of M days" can be derived without trusting
+ * the client's own copy of the range.
+ */
+export interface NicheViewsGainedDTO {
+  readonly requestedStartMs: number;
+  readonly endMs: number;
+  readonly measuredFromMs: number | null;
+  readonly earliestSnapshotMs: number | null;
+  /** One entry per visible niche of the requested format. A niche outside the
+   * reader's scope is OMITTED — same absence-not-empty rule as `NicheDTO.rpm`. */
+  readonly niches: readonly NicheViewsGainedEntryDTO[];
+}
+
+/**
  * A content type as referenced from a chip — just enough to render one.
  *
  * Deliberately the same three fields as `NicheRefDTO` rather than a shared

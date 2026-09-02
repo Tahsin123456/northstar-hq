@@ -4,31 +4,35 @@ import * as React from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { InfoTip } from "@/components/ui/tooltip";
+import { Skeleton } from "@/components/ui/skeleton";
 import { nicheColor } from "@/components/niches/niche-chip";
 import { useCanReadNicheEconomics } from "@/components/niches/niche-rpm-dialog";
-import { calculateMarketShare } from "@/lib/analytics/market-share";
 import {
   NICHE_EARNINGS_LABEL,
   NICHE_EARNINGS_NOTHING_PRICED,
   NICHE_EARNINGS_PARTIAL_TOTAL,
   NO_TOTAL_EXPLANATION,
   buildNicheEarnings,
+  measuredSpanNoteFrom,
   nicheEarningsDefinition,
   type NicheEarningsRow,
 } from "@/lib/analytics/niche-earnings";
 import {
   ESTIMATED_RPM_CHIP,
   MEASURED_RPM_CHIP,
+  NICHE_HISTORY_TOO_THIN,
+  NICHE_NO_VIEWS_GAINED,
   UNPRICED_NICHE_SHORT,
+  VIEWS_GAINED_UNAVAILABLE,
   formatEngagedViewShare,
   formatRpmBounds,
+  nicheHistoryTooThinExplanation,
   rpmBounds,
   rpmQuoteUnit,
-  unpricedNicheNothingPublished,
 } from "@/lib/analytics/niche-rpm";
 import type { DateRange } from "@/lib/analytics/types";
-import type { ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDatasetFormat } from "@/hooks/dataset-format-context";
+import { nicheGainedById, useNicheViewsGained } from "@/hooks/use-views-gained";
 import { toNicheFormat } from "@/lib/niches/niche-format";
 import type { NicheDTO } from "@/lib/dto";
 import { formatMoney, formatMoneyCompact } from "@/lib/finance/money";
@@ -44,6 +48,18 @@ import { formatCompactNumber } from "@/lib/format";
  * matters, which is where the numbers come from.
  *
  * ---------------------------------------------------------------------------
+ * THE VIEWS ARE GAINS, FETCHED — NOT A RE-SLICE OF THE DATASET
+ * ---------------------------------------------------------------------------
+ * What is priced is views GAINED during the period, which is a difference
+ * between snapshot readings the browser never holds — so unlike every other
+ * figure on this page it is fetched, through `useNicheViewsGained`, keyed on
+ * the period. The niche cards read the same hook with the same key, so the
+ * React Query cache — not discipline — is what keeps the two surfaces pricing
+ * the same period from the same measurement. While the read is in flight the
+ * panel shows skeletons, never a stale period's numbers; when it fails it says
+ * so in words, never a zero.
+ *
+ * ---------------------------------------------------------------------------
  * THE GATE IS THE DATA, NOT A CONDITIONAL
  * ---------------------------------------------------------------------------
  * There are two checks here and only one of them is the boundary.
@@ -56,8 +72,8 @@ import { formatCompactNumber } from "@/lib/format";
  * load-bearing, which is the property that survives somebody deleting a line.
  *
  * `useCanReadNicheEconomics()` is here as well, and it is an OPTIMISATION plus
- * an intent marker rather than a rule: it skips the per-niche market-share work
- * for a reader who could never see the result, and it says out loud on the page
+ * an intent marker rather than a rule: it keeps the gains query disabled for a
+ * reader who could never see the result, and it says out loud on the page
  * that this block is finance-gated. If the two ever disagree, the data wins,
  * because the data is what the server decided.
  *
@@ -69,15 +85,6 @@ import { formatCompactNumber } from "@/lib/format";
  * without checking what it actually holds.
  *
  * ---------------------------------------------------------------------------
- * WHY IT SITS UNDER THE KPI STRIP
- * ---------------------------------------------------------------------------
- * The page's own comment on the content-type table records the rule: the
- * channel table is what this screen is opened for, and anything above it pushes
- * that below the fold. This is a portfolio answer, so it belongs in the
- * portfolio-answer slot directly beneath `SummaryCards` — above the table, not
- * displacing it.
- *
- * ---------------------------------------------------------------------------
  * IT READS THE PAGE'S OWN PERIOD, AND ADDS NO STATE
  * ---------------------------------------------------------------------------
  * `range` comes from `useFilters()` through the caller, which is the same value
@@ -87,84 +94,81 @@ import { formatCompactNumber } from "@/lib/format";
  */
 export function NicheEarningsPanel({
   niches,
-  rows,
   range,
 }: {
   niches: readonly NicheDTO[];
-  rows: readonly ChannelRow[];
   range: DateRange;
 }) {
   const mayRead = useCanReadNicheEconomics();
   // Which product's page mounted this panel — it picks the definition's noun
-  // ("Shorts" vs "long-form videos"), nothing arithmetical. Each ROW still
-  // reads its own niche's format for pricing and wording.
+  // and which format's gains are fetched. Each ROW still reads its own
+  // niche's format for pricing and wording.
   const pageFormat = useDatasetFormat();
 
+  /*
+   * The same disclosure test the builder makes, taken early so the fetch can
+   * be skipped for a reader the panel will not render for. `some` rather than
+   * `every`-negated: a scoped reader with one visible niche's economics is
+   * disclosed to, and must not be blanked by the nulls beside it.
+   */
+  const disclosed =
+    mayRead && niches.length > 0 && niches.some((niche) => niche.rpm !== null);
+
+  const gains = useNicheViewsGained(pageFormat, range, disclosed);
+  const gainedById = React.useMemo(
+    () => (gains.data === undefined ? null : nicheGainedById(gains.data)),
+    [gains.data],
+  );
+
   const panel = React.useMemo(() => {
-    // Skips the per-niche share computation for a reader who would be shown
-    // nothing anyway. Not the boundary — see the header.
-    if (!mayRead) return null;
+    if (!disclosed || gainedById === null) return null;
 
     return buildNicheEarnings(
       niches.map((niche) => {
-        // Narrowed once per niche: it picks both the pricing basis in
-        // `buildNicheEarnings` and which format's views the share below
-        // counts, so the denominator and the rate cannot disagree.
-        const format = toNicheFormat(niche.format);
-        const members = rows.filter((row) =>
-          row.channel.niches.some((n) => n.id === niche.id),
-        );
-        const own = members.filter((row) => row.channel.ownershipType === "own");
-        const others = members.filter((row) => row.channel.ownershipType !== "own");
-
-        /*
-         * THE SAME VIEW MEASURE THE NICHE CARD USES, from the same function.
-         *
-         * `calculateMarketShare` already splits our views from everybody
-         * else's, already restricts to Shorts published in the range, and
-         * already carries the honesty rules — a share of nothing is null, and
-         * the denominator is the TRACKED set rather than the market. Reusing it
-         * is what stops this panel and the niche card reporting two different
-         * figures for the same niche in the same period.
-         */
-        const share = calculateMarketShare(
-          own.map((row) => ({ videos: row.videos })),
-          others.map((row) => ({ videos: row.videos })),
-          range,
-          format,
-        );
-
+        const entry = gainedById.get(niche.id);
         return {
           id: niche.id,
           name: niche.name,
           colorIndex: niche.colorIndex,
-          format,
+          // Narrowed once per niche: it picks the pricing basis and the
+          // wording of the row's own rate.
+          format: toNicheFormat(niche.format),
           rpm: niche.rpm,
-          ourViews: share.ourViews,
-          competitorViews: share.competitorViews,
+          ourViewsGained: entry?.ourViewsGained ?? 0,
+          competitorViewsGained: entry?.competitorViewsGained ?? 0,
+          // A niche the endpoint did not answer for was not measured — the
+          // builder renders words for it, never a zero dressed as a gain.
+          measured:
+            entry === undefined
+              ? null
+              : { coveredVideos: entry.coveredVideos, totalVideos: entry.totalVideos },
           // For the double-count check. See `buildNicheEarnings`.
-          ownChannelIds: own.map((row) => row.channel.id),
+          ownChannelIds: entry?.ownChannelIds ?? [],
         };
       }),
     );
-  }, [mayRead, niches, rows, range]);
+  }, [disclosed, niches, gainedById]);
 
   // ABSENT, not empty. An employee sees an Overview with no money on it rather
   // than a locked panel inviting them to ask what is behind it.
-  if (panel === null || !panel.disclosed) return null;
+  if (!disclosed) return null;
+
+  // The label the period selector implies versus the span the history could
+  // actually measure. Derived from the server's own echo of the request.
+  const spanNote = gains.data === undefined ? null : measuredSpanNoteFrom(gains.data);
 
   return (
     <Card className="flex flex-col gap-3 p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         <h3 className="flex items-center gap-1.5 text-[13px] font-medium text-foreground">
           {NICHE_EARNINGS_LABEL}
-          {/* The definition, next to the heading, because the period selector
-              at the top of this page makes the wrong reading the natural one.
-              See `NICHE_EARNINGS_DEFINITION`. */}
+          {/* The definition, next to the heading: what is priced is views
+              gained in the period, and where the history falls short the note
+              below the heading says what was measured instead. */}
           <InfoTip>{nicheEarningsDefinition(pageFormat)}</InfoTip>
         </h3>
 
-        {panel.total !== null ? (
+        {panel !== null && panel.total !== null ? (
           <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
             {/* The label comes from the builder, which counted what it actually
                 summed. It used to read "all niches" over a sum of the priced
@@ -179,21 +183,40 @@ export function NicheEarningsPanel({
         ) : null}
       </div>
 
-      {panel.noTotalReason === "nothing_priced" ? (
+      {/* Where the measurement actually starts, whenever that is not where the
+          period does. Under the heading, above every figure it qualifies. */}
+      {spanNote !== null ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">{spanNote}</p>
+      ) : null}
+
+      {gains.isError ? (
+        /* A failed read is words, never a zero and never yesterday's cache:
+           nothing below is rendered, because every figure would be a claim
+           about a period nothing measured. */
+        <p className="text-[12px] leading-relaxed text-muted-foreground">
+          {VIEWS_GAINED_UNAVAILABLE}
+        </p>
+      ) : panel === null ? (
+        /* In flight. Skeletons, never the previous period's numbers — a stale
+           figure under a fresh period label is a wrong number wearing the
+           right heading. */
+        <div className="flex flex-col gap-2" aria-hidden>
+          <Skeleton className="h-6 w-full" />
+          <Skeleton className="h-6 w-full" />
+          <Skeleton className="h-6 w-2/3" />
+        </div>
+      ) : panel.noTotalReason === "nothing_priced" ? (
         /*
-         * THE STATE THIS DEPLOYMENT IS IN TODAY, for every niche.
-         *
          * Words rather than a table of "$0.00" — the same rule the niche card
          * follows, and the one this whole feature is written around. A zero
          * here would tell an owner his catalogue generates nothing, which is a
          * claim about the catalogue rather than about what the app can see.
          *
          * GATED ON THE REASON, NOT ON `pricedCount === 0`. Those are not the
-         * same condition: a niche with a rate that published nothing in the
-         * period is also not "priced", so the count was zero in a state where
-         * this sentence is simply false. The rows already say the right thing
-         * there ("no Shorts in this period"), so that state now falls through
-         * to the list below and keeps them.
+         * same condition: a niche with a rate that gained nothing — or whose
+         * history is too thin — is also not "priced", and the rows already say
+         * the right thing there, so those states fall through to the list
+         * below and keep them.
          */
         <p className="text-[12px] leading-relaxed text-muted-foreground">
           {NICHE_EARNINGS_NOTHING_PRICED}
@@ -299,7 +322,7 @@ function NicheEarningsLine({ row }: { row: NicheEarningsRow }) {
                     row.value.pricedViews ?? 0,
                   )} engaged views of ${formatCompactNumber(
                     row.value.trackedNicheViews,
-                  )} tracked views.`}
+                  )} tracked views gained.`}
                 >
                   @ {formatEngagedViewShare(row.value.engagedViewShareBasisPoints)} engaged
                 </span>
@@ -309,18 +332,29 @@ function NicheEarningsLine({ row }: { row: NicheEarningsRow }) {
         </span>
       ) : (
         /*
-         * WORDS, NEVER "$0" AND NEVER AN EM DASH.
-         *
-         * "$0" asserts the niche generates nothing; the em dash is this app's
-         * symbol for "no Shorts in this period" and would say the niche was
-         * measured and came up empty. The two states are also genuinely
-         * different — one is waiting for a decision, the other for an upload —
-         * and collapsing them hides which.
+         * WORDS, NEVER "$0" AND NEVER AN EM DASH — and three DIFFERENT words,
+         * because the three states are different instructions: an unpriced
+         * niche waits for a decision, a no-gains one for a wider period or the
+         * next refresh, a thin-history one only for time. Collapsing them
+         * hides which. The thin-history line carries its coverage counts in
+         * the title so the refusal can be weighed, not just believed.
          */
-        <span className="text-[11px] text-subtle-foreground">
-          {row.state === "no_shorts"
-            ? unpricedNicheNothingPublished(row.format)
-            : UNPRICED_NICHE_SHORT}
+        <span
+          className="text-[11px] text-subtle-foreground"
+          title={
+            row.state === "insufficient_history" && row.measured !== null
+              ? nicheHistoryTooThinExplanation(
+                  row.measured.coveredVideos,
+                  row.measured.totalVideos,
+                )
+              : undefined
+          }
+        >
+          {row.state === "no_gains"
+            ? NICHE_NO_VIEWS_GAINED
+            : row.state === "insufficient_history"
+              ? NICHE_HISTORY_TOO_THIN
+              : UNPRICED_NICHE_SHORT}
         </span>
       )}
     </div>
