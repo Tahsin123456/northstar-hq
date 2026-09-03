@@ -57,8 +57,15 @@ vi.mock("../user-service", () => ({
 }));
 
 const { getNicheViewsGained } = await import("../niche-views-gained-service");
+/*
+ * The labelling vocabulary moved out of `niche-earnings.ts` when the money
+ * surfaces stopped pricing gains: that module is the earnings panel's copy,
+ * and a sentence about view history no figure depends on has no business in
+ * it. The functions themselves are unchanged and still exactly describe what
+ * this service measures — see the header of `views-gained-labels.ts`.
+ */
 const { hasUsableGainsHistory, measuredSpanNoteFrom, nicheMeasuredSpanNote } = await import(
-  "@/lib/analytics/niche-earnings"
+  "@/lib/analytics/views-gained-labels"
 );
 
 const HOUR_MS = 3_600_000;

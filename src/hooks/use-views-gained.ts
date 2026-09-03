@@ -7,7 +7,16 @@ import type { DateRange } from "@/lib/analytics/types";
 import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
- * Views gained per niche — the one read behind every niche money figure.
+ * Views gained per niche.
+ *
+ * RETAINED, AND CURRENTLY UNUSED BY ANY SCREEN. This hook used to be the read
+ * behind every niche money figure; those surfaces now price every view the
+ * tracked channels have, straight from the dataset payload, because a gains
+ * figure refuses to render wherever the recorded view history is shallower
+ * than the selected period — see `niche-earnings.ts`. It is kept, with its
+ * endpoint and services, for a future "earned in this period" figure. Wiring
+ * it back into a money surface would reintroduce the refusal, so do not,
+ * until the history is deep.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * WHY THE RANGE IS IN THIS QUERY KEY, AND WHY THAT DOES NOT BREAK THE RULE

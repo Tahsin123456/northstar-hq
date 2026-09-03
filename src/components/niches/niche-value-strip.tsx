@@ -8,9 +8,8 @@ import {
   MANUAL_RPM_EXPLANATION,
   MANUAL_RPM_UNCONVERTIBLE_EXPLANATION,
   MEASURED_RPM_CHIP,
-  NICHE_HISTORY_TOO_THIN,
-  NICHE_NO_VIEWS_GAINED,
-  NO_GAINS_TO_PRICE_EXPLANATION,
+  NICHE_NO_VIEWS,
+  NO_VIEWS_TO_PRICE_EXPLANATION,
   RPM_NOT_MEASURED_BECAUSE,
   RPM_REJECTION_EXPLANATION,
   RPM_WINDOW_DAYS,
@@ -18,9 +17,7 @@ import {
   UNCONVERTIBLE_NICHE_SHORT,
   UNPRICED_NICHE_EXPLANATION,
   UNPRICED_NICHE_SHORT,
-  VIEWS_GAINED_UNAVAILABLE,
   calculateNicheValue,
-  nicheHistoryTooThinExplanation,
   trackedNicheValueDefinition,
   engagedViewShareNote,
   formatEngagedViewShare,
@@ -32,30 +29,32 @@ import {
   type ProjectedMoney,
   type RpmChannelOutcome,
 } from "@/lib/analytics/niche-rpm";
-import {
-  NO_TOTAL_EXPLANATION,
-  hasUsableGainsHistory,
-} from "@/lib/analytics/niche-earnings";
 import { toNicheFormat, type NicheFormat } from "@/lib/niches/niche-format";
-import type { NicheDTO, NicheViewsGainedEntryDTO } from "@/lib/dto";
+import type { NicheDTO } from "@/lib/dto";
 import { formatMoney, formatMoneyCompact } from "@/lib/finance/money";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { InfoTip } from "@/components/ui/tooltip";
-import { Skeleton } from "@/components/ui/skeleton";
 import { RPM_MENU_ITEM_LABEL } from "./niche-rpm-dialog";
 
 /**
- * What the tracked niche gained over the period, priced — and how much of it
- * is Northstar's.
+ * What the tracked niche is worth, priced — and how much of it is Northstar's.
  *
- * THE VIEWS ARE GAINS NOW, NOT UPLOADS' LIFETIMES. The strip prices the views
- * the tracked channels GAINED during the selected period, from the snapshot
- * series, fetched once per page through `useNicheViewsGained` and handed down
- * — this component adds no data fetching of its own. The card's other stats
- * (Shorts count, hit rate) stay on the upload basis deliberately; they answer
- * "how did recent output do?", the money answers "what did the period pay?".
- * While the gains are in flight this renders a skeleton, never a stale
- * period's figure; when the read failed it says so in words.
+ * EVERY VIEW THOSE CHANNELS HAVE, WITH NO DATE FILTER OF OUR OWN. The strip is
+ * handed two totals — ours and everybody else's — summed over every video of
+ * this niche's format that the dataset holds for its channels, whenever each
+ * was posted. "Whenever", not "however long ago": the payload itself reaches
+ * back only as far as the org's history window (`buildDataset` filters on
+ * `publishedAt >= since`), so the figure is bounded there even though nothing
+ * on this path narrows it further. The tooltip names that bound rather than
+ * claiming a complete catalogue. The card's other stats (Shorts count, hit rate) stay on the
+ * upload-date basis deliberately: they answer "how did recent output do?",
+ * which is a question about a period. This one answers "what is this niche
+ * worth?", which is not.
+ *
+ * SO THE PERIOD SELECTOR DOES NOT MOVE THIS FIGURE, and the tooltip says so.
+ * Nothing here is fetched and nothing is asynchronous — every view count is
+ * already in the dataset payload — which is why there is no skeleton, no
+ * error state and no sentence about what could or could not be measured.
  *
  * A FOURTH STRIP ON THE NICHE CARD rather than a fourth column in the stat row.
  * The row is `grid-cols-3` on a card that is a third of an `xl:grid-cols-3`
@@ -77,8 +76,8 @@ import { RPM_MENU_ITEM_LABEL } from "./niche-rpm-dialog";
  * ---------------------------------------------------------------------------
  * ENGAGED VIEWS ARE NAMED, NOT APPLIED SILENTLY
  * ---------------------------------------------------------------------------
- * A hand-entered rate prices roughly half the gained views on the card,
- * because that is the half YouTube pays for. Halving a money figure without
+ * A hand-entered rate prices roughly half the views on the card, because that
+ * is the half YouTube pays for. Halving a money figure without
  * saying so makes a number a reader recognised yesterday look like a bug
  * today, so the assumption is written under the rate with its current value
  * in it. The VIEW counts above stay raw — engagement is a fact about how
@@ -111,7 +110,7 @@ function SourceChip({ measured }: { measured: boolean }) {
       className="rounded bg-surface-hover px-1 py-px text-[9px] font-medium uppercase tracking-wider text-subtle-foreground"
       title={
         measured
-          ? "Measured from what Northstar's own channels in this niche actually earned, divided by the views they gained over the same window."
+          ? "Measured from what Northstar's own channels in this niche actually earned, divided by the views they gained over the same 28-day window."
           : "An estimate from a hand-entered RPM range, not a measurement. Every figure beside it is that estimate multiplied out."
       }
     >
@@ -171,29 +170,18 @@ function RejectionReasons({
 
 export function NicheValueStrip({
   niche,
-  gained,
-  loading,
-  error,
-  measuredNote,
+  ourViews,
+  competitorViews,
 }: {
   niche: NicheDTO;
   /**
-   * This niche's entry from the page-level views-gained read, or `null` when
-   * the response held none — no history reaching the period, or a niche the
-   * endpoint omitted. `null` renders as "not enough history", never as zero.
+   * ALL views held for channels the studio owns in this niche, of this niche's
+   * format — every video in the dataset for them, with no date filter. Summed
+   * by the card with `videosOfFormat`.
    */
-  gained: NicheViewsGainedEntryDTO | null;
-  /** The page-level read is still in flight. Skeleton, never a stale figure. */
-  loading: boolean;
-  /** The page-level read failed. Words, never a zero. */
-  error: boolean;
-  /**
-   * "Measured over the last N of M days…" when the history falls short, plus
-   * THIS niche's own coverage gaps when it has any. Per niche, not per page:
-   * fed the page-wide maximum this sentence claimed a shortfall under a figure
-   * that may be exact, which is an invented caveat attached to a real number.
-   */
-  measuredNote: string | null;
+  ourViews: number;
+  /** The same total for every other tracked channel in this niche. */
+  competitorViews: number;
 }) {
   const rpm = niche.rpm;
 
@@ -223,89 +211,47 @@ export function NicheValueStrip({
         <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
           {TRACKED_NICHE_VALUE_LABEL}
           {/* The qualifier the label cannot carry: WHICH views were priced —
-              the views gained during the period, measured only as far back as
-              the recorded history reaches. Selected on the niche's own
-              format: the Shorts sentence about engaged views would state the
-              OPPOSITE of a Long Form niche's arithmetic. */}
+              every view the tracked channels have, not the ones inside the
+              period selector. Selected on the niche's own format: the Shorts
+              sentence about engaged views would state the OPPOSITE of a Long
+              Form niche's arithmetic. */}
           <InfoTip>{trackedNicheValueDefinition(format)}</InfoTip>
         </span>
         {bounds !== null ? <SourceChip measured={rpm.source === "derived"} /> : null}
       </div>
 
       {bounds === null ? (
-        // No rate at all: nothing gains-dependent renders, so the unpriced
-        // sentence never waits on — or fails with — the gains read.
         <UnpricedNiche niche={niche} rpm={rpm} />
-      ) : loading ? (
-        // In flight. A skeleton, never the previous period's figure: a stale
-        // number under a fresh period label is wrong wearing right.
-        <Skeleton className="h-10 w-full" aria-hidden />
-      ) : error ? (
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {VIEWS_GAINED_UNAVAILABLE}
-        </p>
       ) : (
-        <MeasuredValue
+        <PricedValue
           rpm={rpm}
           format={format}
-          gained={gained}
-          measuredNote={measuredNote}
+          ourViews={ourViews}
+          competitorViews={competitorViews}
         />
       )}
     </div>
   );
 }
 
-/** The gains-dependent body: money, "nothing gained", or "history too thin". */
-function MeasuredValue({
+/** The priced body: money, or "no views to price". */
+function PricedValue({
   rpm,
   format,
-  gained,
-  measuredNote,
+  ourViews,
+  competitorViews,
 }: {
   rpm: NicheRpmResolution;
   format: NicheFormat;
-  gained: NicheViewsGainedEntryDTO | null;
-  measuredNote: string | null;
+  ourViews: number;
+  competitorViews: number;
 }) {
   const bounds = rpmBounds(rpm, format);
   if (bounds === null) return null;
 
-  /*
-   * THE SAME FLOOR THE OVERVIEW PANEL HOLDS, through the same predicate.
-   *
-   * 0.9 — the dollar floor, not the history chart's 0.8 — because an
-   * uncovered video's views are silently missing from the sum, and pricing an
-   * incomplete count presents a floor as a figure. Words instead, WITH the
-   * counts, so the refusal can be weighed rather than believed. The rate
-   * still renders below: it is a fact about the niche, not about the period.
-   */
-  const measured =
-    gained === null
-      ? null
-      : { coveredVideos: gained.coveredVideos, totalVideos: gained.totalVideos };
-  if (!hasUsableGainsHistory(measured)) {
-    return (
-      <div className="flex flex-col gap-1">
-        <span
-          className="text-[12px] text-subtle-foreground"
-          aria-label={`${TRACKED_NICHE_VALUE_LABEL}: ${NICHE_HISTORY_TOO_THIN}.`}
-        >
-          {NICHE_HISTORY_TOO_THIN}
-        </span>
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {measured !== null
-            ? nicheHistoryTooThinExplanation(measured.coveredVideos, measured.totalVideos)
-            : NO_TOTAL_EXPLANATION.no_usable_history}
-        </p>
-        <RateLine rpm={rpm} format={format} />
-      </div>
-    );
-  }
-
   const value = calculateNicheValue({
-    ourViews: gained?.ourViewsGained ?? 0,
-    competitorViews: gained?.competitorViewsGained ?? 0,
+    ourViews,
+    competitorViews,
     bounds,
     // Off the resolution, never off a settings payload. The share is welded to
     // the rate it scales precisely so this line cannot read a stale one, or
@@ -314,32 +260,27 @@ function MeasuredValue({
   });
 
   /*
-   * NOTHING GAINED IS NOT A PRICE OF ZERO.
+   * NO VIEWS IS NOT A PRICE OF ZERO.
    *
-   * `capturePercent` is null exactly when the measured niche gained no views
-   * in the period, and the projection prices that at a perfectly correct
-   * `{ low: 0, high: 0 }`. Rendering it would put "$0" under "Tracked niche
-   * revenue", which reads as "this niche generates nothing" — a claim about
-   * the niche rather than about the period on screen, and the one figure this
-   * whole module exists to keep off a screen.
+   * `capturePercent` is null exactly when the tracked channels hold no views
+   * of this format at all, and the projection prices that at a perfectly
+   * correct `{ low: 0, high: 0 }`. Rendering it would put "$0" under "Tracked
+   * niche revenue", which reads as "this niche generates nothing" — a claim
+   * about the niche rather than about an empty tracker, and the one figure
+   * this whole module exists to keep off a screen.
    */
   if (value.capturePercent === null || value.trackedRevenue === null) {
     return (
       <div className="flex flex-col gap-1">
         <span
           className="text-[12px] text-subtle-foreground"
-          aria-label={`${TRACKED_NICHE_VALUE_LABEL}: ${NICHE_NO_VIEWS_GAINED}. ${NO_GAINS_TO_PRICE_EXPLANATION}`}
+          aria-label={`${TRACKED_NICHE_VALUE_LABEL}: ${NICHE_NO_VIEWS}. ${NO_VIEWS_TO_PRICE_EXPLANATION}`}
         >
-          {NICHE_NO_VIEWS_GAINED}
+          {NICHE_NO_VIEWS}
         </span>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {NO_GAINS_TO_PRICE_EXPLANATION}
+          {NO_VIEWS_TO_PRICE_EXPLANATION}
         </p>
-        {measuredNote !== null ? (
-          <p className="text-[11px] leading-relaxed text-subtle-foreground">
-            {measuredNote}
-          </p>
-        ) : null}
         <RateLine rpm={rpm} format={format} />
       </div>
     );
@@ -359,31 +300,21 @@ function MeasuredValue({
         </span>
       </div>
 
-      {/* Where the measurement actually starts, whenever that is not where
-          the period does. Directly under the figure it qualifies: a 30-day
-          label over a 9-day measurement is the partial-sum-as-total mistake
-          in time. */}
-      {measuredNote !== null ? (
-        <p className="text-[11px] leading-relaxed text-subtle-foreground">
-          {measuredNote}
-        </p>
-      ) : null}
-
       {/*
           THE ENGAGED-VIEW STEP BELONGS TO THE FIGURE DIRECTLY ABOVE IT.
 
           `pricedViews` is `ourPayable + competitorPayable` — the engaged
-          subset of the WHOLE tracked niche's gains — so it is the denominator
-          behind `trackedRevenue`, the headline. It previously hung off the
-          end of the "Northstar's X of Y tracked views gained, worth Z"
-          sentence, where the money named is Northstar's ALONE: a reader
-          dividing that money by these views got a rate several times off, and
-          the closer they read the more wrong they got. Same number, moved to
-          the sentence it is the denominator of.
+          subset of the WHOLE tracked niche — so it is the denominator behind
+          `trackedRevenue`, the headline. It previously hung off the end of the
+          "Northstar's X of Y tracked views, worth Z" sentence, where the money
+          named is Northstar's ALONE: a reader dividing that money by these
+          views got a rate several times off, and the closer they read the more
+          wrong they got. Same number, moved to the sentence it is the
+          denominator of.
       */}
       {value.basis === "engaged" && value.pricedViews !== null ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Of {formatCompactNumber(value.trackedNicheViews)} tracked views gained,{" "}
+          Of {formatCompactNumber(value.trackedNicheViews)} tracked views,{" "}
           {formatCompactNumber(value.pricedViews)} are priced as engaged (
           {formatEngagedViewShare(value.engagedViewShareBasisPoints)}).
         </p>
@@ -391,16 +322,16 @@ function MeasuredValue({
 
       {value.ourRevenue !== null ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {/* RAW gained counts, deliberately. These are what the channels did
-              — the reach half of the sentence — and the money that follows
-              is what YouTube pays for the engaged subset of them. Halving
-              the reach figure to make the arithmetic look self-evident
-              would understate the niche on the one line that is not about
-              money at all. The engaged step is named in the line ABOVE
-              instead, against the tracked total it is the denominator of —
-              never here, where the money is Northstar's alone. */}
+          {/* RAW counts, deliberately. These are what the channels have — the
+              reach half of the sentence — and the money that follows is what
+              YouTube pays for the engaged subset of them. Halving the reach
+              figure to make the arithmetic look self-evident would understate
+              the niche on the one line that is not about money at all. The
+              engaged step is named in the line ABOVE instead, against the
+              tracked total it is the denominator of — never here, where the
+              money is Northstar's alone. */}
           Northstar&rsquo;s {formatCompactNumber(value.ourViews)} of{" "}
-          {formatCompactNumber(value.trackedNicheViews)} tracked views gained, worth{" "}
+          {formatCompactNumber(value.trackedNicheViews)} tracked views, worth{" "}
           {formatProjected(value.ourRevenue, false)}.
         </p>
       ) : null}

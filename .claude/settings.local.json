@@ -34,7 +34,9 @@
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"C:\\\\Users\\\\tahsi\\\\OneDrive\\\\Desktop\\\\Shorts Web App\"; $p = \"src\\\\server\\\\services\\\\channel-service.ts\"; $c = Get-Content $p -Raw; $c = $c -replace 'include: \\\\{ channel: true \\\\},', 'include: { channel: true, ...TRACKED_WITH_NICHES },'; Set-Content -Path $p -Value $c -Encoding utf8 -NoNewline; Select-String -Path $p -Pattern \"include: \\\\{ channel: true\" | ForEach-Object { \"$\\($_.LineNumber\\): $\\($_.Line.Trim\\(\\)\\)\" })",
       "PowerShell(& \"C:\\\\Program Files\\\\nodejs\\\\node.exe\" \"C:\\\\Users\\\\tahsi\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-tahsi-OneDrive-Desktop-Shorts-Web-App\\\\cc6a1b85-b11d-4bd8-9ed5-647d1defb9d6\\\\scratchpad\\\\fix-mojibake.mjs\" \"C:\\\\Users\\\\tahsi\\\\OneDrive\\\\Desktop\\\\Shorts Web App\\\\src\\\\server\\\\services\\\\channel-service.ts\" 2>&1)",
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"C:\\\\Users\\\\tahsi\\\\OneDrive\\\\Desktop\\\\Shorts Web App\"; npx tsc --noEmit 2>&1 | Select-Object -First 30; \"TSC=$LASTEXITCODE\")",
-      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"C:\\\\Users\\\\tahsi\\\\OneDrive\\\\Desktop\\\\Shorts Web App\"; npm run db:report 2>&1 | Select-Object -Skip 3 -First 40)"
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"C:\\\\Users\\\\tahsi\\\\OneDrive\\\\Desktop\\\\Shorts Web App\"; npm run db:report 2>&1 | Select-Object -Skip 3 -First 40)",
+      "Bash(npx vitest *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

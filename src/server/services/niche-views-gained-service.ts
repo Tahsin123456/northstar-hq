@@ -14,14 +14,33 @@ import {
 
 /**
  * =========================================================================
- * WHAT EACH NICHE GAINED — THE VIEW SIDE OF THE MONEY FIGURES
+ * WHAT EACH NICHE GAINED — RETAINED, AND NOT WHAT THE MONEY SURFACES USE
  * =========================================================================
  *
- * The niche earnings panel and the niche cards price "views GAINED during the
- * selected period" — every view the tracked channels earned in the window,
- * old uploads included — not the lifetime views of what happened to be
- * published in it. This service supplies those gains, grouped per niche, from
- * the shared snapshot-delta measurement in `views-gained-service.ts`.
+ * READ THIS BEFORE CHANGING ANYTHING HERE TO "FIX" A FIGURE ON SCREEN.
+ *
+ * Nothing rendered reads this service today. The niche earnings panel and the
+ * niche cards price EVERY view the tracked channels have, straight out of the
+ * dataset payload the browser already holds — see `niche-earnings.ts`. That
+ * basis needs no snapshot history, which is the whole reason it replaced this
+ * one: a gains figure refuses to render wherever the recorded history is
+ * shallower than the selected period, and the history is days old, so an
+ * owner asking what his niches generate got sentences instead of money.
+ *
+ * IT IS KEPT DELIBERATELY, not by accident. "What did this period actually
+ * pay?" is a genuinely different and genuinely useful question from "what are
+ * these channels worth?", and this service answers it correctly, with its
+ * coverage floor and its span labels (`views-gained-labels.ts`) intact. When
+ * the history is deep enough to answer it honestly, this is what that figure
+ * will be built from. Deleting it now would only mean writing it again.
+ *
+ * ONE CALLER OF THE UNDERLYING MEASUREMENT IS STILL LIVE and is not this one:
+ * `niche-rpm-service.ts` derives a measured RPM from `viewsGainedByChannel` in
+ * `views-gained-service.ts`. That path has its own window, its own identity
+ * pin, and no dependency on anything in this file.
+ *
+ * This service supplies gains grouped per niche, from the shared
+ * snapshot-delta measurement in `views-gained-service.ts`.
  *
  * THE MEASURED SPAN IS THE COVERED SPAN, NEVER THE REQUESTED ONE. The app can
  * only measure from the day it started recording view history. When the

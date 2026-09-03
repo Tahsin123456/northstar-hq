@@ -1,11 +1,13 @@
+import { videosOfFormat } from "./filters";
+import { sum } from "./stats";
 import {
-  RPM_MIN_SNAPSHOT_COVERAGE,
   calculateNicheValue,
   rpmBounds,
   type NicheRpmResolution,
   type NicheValue,
   type ProjectedMoney,
 } from "./niche-rpm";
+import type { AnalyticsVideo } from "./types";
 import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-format";
 
 /**
@@ -14,16 +16,35 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  * =========================================================================
  *
  * The owner's seventh request: "I should be able to see how much the niche
- * generates in $ within a given timeframe under Overview, but again, this
- * should only be visible to Admins."
+ * generates in $ under Overview, but again, this should only be visible to
+ * Admins."
  *
- * WHAT IS PRICED: views GAINED during the selected period, from the
- * `VideoSnapshot` delta series — every view the tracked channels earned in
- * the window, old uploads included. Not the lifetime views of what happened
- * to be published in it: that is the upload basis, which the hit rate, Upload
- * views and the market-share percentages deliberately keep, because it
- * answers a different question ("how did recent output do?") than money does
- * ("what did the period pay?").
+ * ---------------------------------------------------------------------------
+ * WHAT IS PRICED: ALL THE VIEWS THE TRACKED CHANNELS HAVE
+ * ---------------------------------------------------------------------------
+ * Every view of every video the tracker holds for the channels in this niche,
+ * of this niche's format, multiplied by the niche's rate. Not the views of
+ * what happened to be uploaded inside the selected period, and not a snapshot
+ * delta over the period either.
+ *
+ * BOTH OF THOSE WERE TRIED AND BOTH PRINTED WORDS INSTEAD OF MONEY, for the
+ * same underlying reason: they asked what a WINDOW produced, and a window is
+ * exactly the thing the app cannot always see. The upload basis showed nothing
+ * for a niche whose channels published before the period — which is most
+ * niches, most of the time. The gains basis showed nothing wherever the
+ * recorded view history was shallower than the period — which was everywhere,
+ * because the history is days old.
+ *
+ * This basis needs neither. Every video's current view count is already in the
+ * dataset payload the browser is holding, so the figure is computable today,
+ * always, with no endpoint, no coverage floor and nothing to wait for.
+ *
+ * THE PERIOD SELECTOR THEREFORE DOES NOT MOVE THESE FIGURES, and the
+ * definition says so out loud — a money number sitting beside a 7d/30d control
+ * that ignores it is a number a reader will otherwise assume is broken. The
+ * hit rate, Upload views and the market-share percentages keep the upload-date
+ * basis: "how did recent output do?" is a real question about a period, and it
+ * is not this one.
  *
  * ---------------------------------------------------------------------------
  * A PURE FUNCTION, BECAUSE THE HARD PARTS ARE ALL RULES
@@ -36,7 +57,7 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  * test states rather than a component nobody can mount.
  *
  * ---------------------------------------------------------------------------
- * FOUR REFUSALS, AND WHY EACH ONE IS A REFUSAL RATHER THAN A ZERO
+ * THREE REFUSALS, AND WHY EACH ONE IS A REFUSAL RATHER THAN A ZERO
  * ---------------------------------------------------------------------------
  * 1. WITHHELD. `NicheDTO.rpm` is `null` for a reader without `finance.view` —
  *    the server does not send the economics at all. The panel is then ABSENT,
@@ -50,28 +71,20 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  *    the resolver already computed. It does NOT render a table of "$0.00",
  *    which would tell an owner his catalogue generates nothing.
  *
- * 3. NOT ENOUGH HISTORY. The app can only measure a gain where the snapshot
- *    series brackets the period, and it refuses a money figure where too
- *    little of a niche's library is bracketed. The floor is
- *    `RPM_MIN_SNAPSHOT_COVERAGE` — 0.9, the DOLLAR floor, not the 0.8 the
- *    history chart uses: missing videos shift a chart's shape, but here they
- *    subtract someone's views from a money figure. Below it: words, never a
- *    number priced from an incomplete count.
- *
- * 4. NO VIEWS GAINED. A priced, measured niche whose channels gained nothing
- *    over the measured days really does price to zero, and the arithmetic is
- *    correct — but "$0" under a niche's name reads as a claim about the niche
- *    rather than about the period on screen. Words, not a figure. Same rule
- *    the niche card already follows.
+ * 3. NO VIEWS. A priced niche whose tracked channels hold no views of this
+ *    format really does price to zero, and the arithmetic is correct — but "$0"
+ *    under a niche's name reads as a claim about the niche's worth rather than
+ *    about an empty tracker. Words, not a figure. Same rule the niche card
+ *    already follows.
  *
  * ---------------------------------------------------------------------------
  * THE TOTAL IS THE DANGEROUS PART
  * ---------------------------------------------------------------------------
- * A channel filed under two niches is measured once and counted in BOTH, which
- * is correct for a PER-NICHE figure and wrong for a portfolio total: adding the
- * niche figures together counts that channel's views twice. `niche-rpm-service`
- * states the rule and this is the first surface that could break it, because it
- * is the first one to sum across niches at all.
+ * A channel filed under two niches is counted in BOTH, which is correct for a
+ * PER-NICHE figure and wrong for a portfolio total: adding the niche figures
+ * together counts that channel's views twice. `niche-rpm-service` states the
+ * rule and this is the first surface that could break it, because it is the
+ * first one to sum across niches at all.
  *
  * So the total is computed over DISTINCT channels, and where a channel really
  * does appear in two priced niches there is no honest single figure — the same
@@ -80,28 +93,61 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  * silently doubled one costs him a decision.
  */
 
-/** The coverage behind one niche's measured gains, or `null` when nothing
- * could be measured at all (no history reaches the period). */
-export type MeasuredCoverage = {
-  readonly coveredVideos: number;
-  readonly totalVideos: number;
-} | null;
+/** One tracked channel, as the money basis needs it. */
+export interface NicheChannelViews {
+  /** True for a channel Northstar operates — `ownershipType === "own"`. */
+  readonly ownedByNorthstar: boolean;
+  /** Every video the dataset holds for it. Not pre-filtered by date; see below. */
+  readonly videos: readonly AnalyticsVideo[];
+}
+
+/** The two totals every niche money figure is built from. */
+export interface NicheViewTotals {
+  readonly ourViews: number;
+  readonly competitorViews: number;
+}
 
 /**
- * Is this niche's measurement trustworthy enough to price?
+ * THE MONEY BASIS, IN ONE FUNCTION, FOR BOTH SURFACES.
  *
- * ONE PREDICATE FOR BOTH SURFACES — the Overview panel and the niche card
- * decide "words or money" through this, so the two can never disagree about
- * the same niche in the same period. `null` coverage means the endpoint had
- * nothing to measure (or omitted the niche), which is the same refusal as
- * thin coverage said harder. A library of zero videos is NOT insufficient —
- * there is nothing the measurement failed to cover — it is simply a niche
- * with nothing to gain, which the no-gains state handles.
+ * Every view of this format that the tracker holds for these channels, split
+ * into Northstar's and everybody else's. `videosOfFormat`, deliberately — no
+ * date window anywhere in it:
+ *
+ *   • A channel's back catalogue keeps earning long after its upload date
+ *     leaves any period a selector can name, so filtering by upload date
+ *     answers "how did recent output do?" while the label above it says
+ *     "what is this niche generating".
+ *   • It is also what made these surfaces print sentences instead of money.
+ *     A niche whose channels all published before the selected period had a
+ *     total of zero, which the honesty rules correctly refuse to render as
+ *     "$0" — so the owner saw words where he had asked for a figure, in the
+ *     ordinary case rather than an edge one.
+ *
+ * ONE FUNCTION BECAUSE THERE ARE TWO SURFACES. The Overview panel and the
+ * niche card's value strip must never report different money for the same
+ * niche; sharing the selector is what makes that structural rather than a
+ * thing two files remember to keep in step — the same argument
+ * `calculateMarketShare` carries for the share percentages.
+ *
+ * The format filter is `isVideoOfFormat`, so a video the classifier could not
+ * resolve is in NEITHER format and its views are never priced into a format
+ * that never claimed it.
  */
-export function hasUsableGainsHistory(measured: MeasuredCoverage): boolean {
-  if (measured === null) return false;
-  if (measured.totalVideos === 0) return true;
-  return measured.coveredVideos / measured.totalVideos >= RPM_MIN_SNAPSHOT_COVERAGE;
+export function nicheViewTotals(
+  channels: readonly NicheChannelViews[],
+  format: NicheFormat,
+): NicheViewTotals {
+  const viewsOf = (owned: boolean): number =>
+    sum(
+      channels
+        .filter((channel) => channel.ownedByNorthstar === owned)
+        .flatMap((channel) =>
+          videosOfFormat(channel.videos, format).map((video) => video.views),
+        ),
+    );
+
+  return { ourViews: viewsOf(true), competitorViews: viewsOf(false) };
 }
 
 /** One niche, as the panel is handed it. */
@@ -124,18 +170,16 @@ export interface NicheEarningsInput {
    * That is what lets the disclosure test below be a single check.
    */
   readonly rpm: NicheRpmResolution | null;
-  /** Views gained over the measured span by channels Northstar owns. */
-  readonly ourViewsGained: number;
-  /** The same delta for every other tracked channel in this niche. */
-  readonly competitorViewsGained: number;
   /**
-   * How much of the niche's library the gains above actually measured.
-   * `null` when the endpoint could measure nothing — no history reaching the
-   * period at all — which is a harder version of the same refusal.
+   * ALL views held for channels Northstar owns in this niche, of this niche's
+   * format. Every video the tracker has for them, regardless of upload date —
+   * see the header. The caller sums it with `videosOfFormat`.
    */
-  readonly measured: MeasuredCoverage;
+  readonly ourViews: number;
+  /** The same total for every other tracked channel in this niche. */
+  readonly competitorViews: number;
   /**
-   * The own channels behind `ourViewsGained`.
+   * The own channels behind `ourViews`.
    *
    * Carried solely to detect the double-count above. Ids rather than a count,
    * because the question is whether the SAME channel appears twice across
@@ -146,13 +190,11 @@ export interface NicheEarningsInput {
 
 /** Why a niche has no figure on this panel. */
 export type NicheEarningsState =
-  /** A rate applies and views were gained and measured. There is money to show. */
+  /** A rate applies and the tracked channels have views. There is money to show. */
   | "priced"
-  /** A rate applies and nothing tracked here gained views. Words, not "$0". */
-  | "no_gains"
-  /** A rate applies and the view history covers too little of the library to
-   * price honestly. Words, and the coverage counts, never a number. */
-  | "insufficient_history"
+  /** A rate applies and nothing tracked here has any views of this format.
+   * Words, not "$0". */
+  | "no_views"
   /** No rate applies at all. The resolver's own reason travels on the row. */
   | "unpriced";
 
@@ -166,12 +208,8 @@ export interface NicheEarningsRow {
   readonly state: NicheEarningsState;
   /** The resolution, so the row can name its rate, its basis and its reasons. */
   readonly rpm: NicheRpmResolution;
-  /** Always computed — the view figures are real even where the money is not.
-   * On an `insufficient_history` row the money inside MUST NOT render: it was
-   * priced from an incomplete count, which is why the state exists. */
+  /** Always computed — the view figures are real even where the money is not. */
   readonly value: NicheValue;
-  /** The coverage behind the row, so a thin-history row can say how thin. */
-  readonly measured: MeasuredCoverage;
 }
 
 /** Why there is no single portfolio figure. `null` when there is one. */
@@ -179,22 +217,14 @@ export type NoTotalReason =
   /** Not one niche has a rate. */
   | "nothing_priced"
   /**
-   * Every niche that HAS a rate — and could be measured — gained nothing over
-   * the measured days.
+   * Every niche that HAS a rate holds no views at all.
    *
    * Split out from `nothing_priced` because the two states are opposite
    * instructions to the owner — one is waiting for a decision, the other for
-   * a wider period or the next refresh — and collapsing them made the panel
-   * tell an owner who had just entered his first RPM that he had entered none.
+   * channels or a refresh — and collapsing them made the panel tell an owner
+   * who had just entered his first RPM that he had entered none.
    */
-  | "nothing_gained"
-  /**
-   * Every rate-bearing niche is below the coverage floor, so no money figure
-   * exists to add. The instruction here is a third one again: wait — the
-   * history fills in on its own as the app keeps recording — or pick a more
-   * recent period the history already covers.
-   */
-  | "no_usable_history"
+  | "no_views"
   /**
    * A channel is filed under two priced niches, so its views would be counted
    * twice — and at two different rates, which is not a figure that exists.
@@ -218,8 +248,8 @@ export interface NicheEarningsPanel {
   /** How many rows actually carry money. */
   readonly pricedCount: number;
   /**
-   * Northstar's own gained views, priced, summed over DISTINCT channels — or
-   * `null`, with `noTotalReason` saying why.
+   * Northstar's own views, priced, summed over DISTINCT channels — or `null`,
+   * with `noTotalReason` saying why.
    *
    * NEVER A PARTIAL SUM PRESENTED AS A TOTAL, and the second half of that
    * sentence is the half that was missing. The sum genuinely covers only the
@@ -284,12 +314,8 @@ export function buildNicheEarnings(
     const format = niche.format ?? DEFAULT_NICHE_FORMAT;
     const bounds = rpmBounds(niche.rpm, format);
     const value = calculateNicheValue({
-      // `calculateNicheValue` clamps a negative input to 0, which is exactly
-      // right here: a purge-driven negative sum is a real view movement and
-      // an impossible amount of money, so the view figure survives raw in the
-      // DTO while the pricing floor stops at nothing.
-      ourViews: niche.ourViewsGained,
-      competitorViews: niche.competitorViewsGained,
+      ourViews: niche.ourViews,
+      competitorViews: niche.competitorViews,
       bounds,
       // Off the resolution, where it travels welded to the rate it scales.
       engagedViewShareBasisPoints: niche.rpm.engagedViewShareBasisPoints,
@@ -303,20 +329,14 @@ export function buildNicheEarnings(
       state:
         bounds === null
           ? "unpriced"
-          : // History first, gains second: a niche the history cannot cover
-            // has an UNKNOWN gain, and "no views gained" would be a claim the
-            // measurement never made.
-            !hasUsableGainsHistory(niche.measured)
-            ? "insufficient_history"
-            : // `capturePercent` is null exactly when the measured niche
-              // gained nothing, which is the one case where a correct "$0"
-              // would be read as a claim about the niche.
-              value.capturePercent === null
-              ? "no_gains"
-              : "priced",
+          : // `capturePercent` is null exactly when the tracked channels hold
+            // no views at all, which is the one case where a correct "$0"
+            // would be read as a claim about the niche.
+            value.capturePercent === null
+            ? "no_views"
+            : "priced",
       rpm: niche.rpm,
       value,
-      measured: niche.measured,
     });
   }
 
@@ -324,14 +344,12 @@ export function buildNicheEarnings(
 
   if (priced.length === 0) {
     /*
-     * THREE DIFFERENT NOTHINGS, and telling them apart is the whole point.
+     * TWO DIFFERENT NOTHINGS, and telling them apart is the whole point.
      *
-     * "No niche has a rate", "the rated niches gained nothing", and "the
-     * history cannot cover this period yet" are three different instructions
-     * to the owner — enter a rate; widen the period or wait for the next
-     * refresh; wait for the history to fill in or pick a recent period. The
-     * rows are right either way; what changes is which sentence sits above
-     * them and whether they render at all.
+     * "No niche has a rate" and "the rated niches have no views" are two
+     * different instructions to the owner — enter a rate; add the channels, or
+     * wait for the next refresh to bring their videos in. The rows are right
+     * either way; what changes is which sentence sits above them.
      */
     const rated = rows.filter((row) => row.state !== "unpriced");
     return {
@@ -339,12 +357,7 @@ export function buildNicheEarnings(
       rows,
       pricedCount: 0,
       total: null,
-      noTotalReason:
-        rated.length === 0
-          ? "nothing_priced"
-          : rated.every((row) => row.state === "insufficient_history")
-            ? "no_usable_history"
-            : "nothing_gained",
+      noTotalReason: rated.length === 0 ? "nothing_priced" : "no_views",
       totalLabel: "",
       totalIsPartial: false,
     };
@@ -446,235 +459,51 @@ export function nicheEarningsTotalLabel(
 }
 
 // ---------------------------------------------------------------------------
-// THE MEASURED SPAN
-// ---------------------------------------------------------------------------
-
-const DAY_MS = 86_400_000;
-
-/**
- * The label for a period the view history only partly covers.
- *
- * The figure is real; what it covers is not the whole period on the selector,
- * and a money number wearing a 30-day label while measuring 9 days is the
- * partial-sum-as-total mistake in time instead of across niches. Never used
- * to fabricate anything — where nothing at all is measurable, the states
- * above refuse instead of shortening the label to zero.
- */
-export function measuredSpanNote(measuredDays: number, periodDays: number): string {
-  return `Measured over the last ${measuredDays} of ${periodDays} ${
-    periodDays === 1 ? "day" : "days"
-  } — view history begins there.`;
-}
-
-/** The lead sentence when the history did cover the whole period. */
-export function fullSpanNote(periodDays: number): string {
-  return `Measured over the full ${periodDays} ${periodDays === 1 ? "day" : "days"}.`;
-}
-
-/**
- * The smallest lag worth a sentence: one minute, the smallest unit the note
- * can express. Below it "up to 0 minutes" is not a caveat, it is noise under
- * every figure forever.
- */
-export const BASELINE_LAG_FLOOR_MS = 60_000;
-
-/**
- * The second floor, and the one that does the work: a gap is only worth a
- * sentence when it is at least this much of the span it is a gap in.
- *
- * WHY A PROPORTION AND NOT JUST A MINUTE. Both gaps are now reported, and the
- * tail gap is almost never exactly zero — the last reading of the last channel
- * the sweep reached is minutes-to-hours old at any instant. A minute-floored
- * caveat would therefore print under EVERY figure on the page forever, which
- * teaches an owner to skip the sentence, which costs them the one reading of it
- * that mattered: the 36-hour span whose tail gap is a third of the figure.
- *
- * A hundredth of the span is the line. Below it the gap cannot move a figure
- * far enough to change a decision — 7 hours on a 30-day period, 22 minutes on a
- * 36-hour one — and above it the sentence appears, including in every case
- * these caveats were written for.
- */
-export const LAG_NOTE_SPAN_FRACTION = 0.01;
-
-/** Is this gap big enough, against this span, to be worth telling the owner? */
-export function lagWorthStating(lagMs: number | null, spanMs: number): boolean {
-  if (lagMs === null) return false;
-  return lagMs >= Math.max(BASELINE_LAG_FLOOR_MS, spanMs * LAG_NOTE_SPAN_FRACTION);
-}
-
-const HOUR_MS = 3_600_000;
-
-/**
- * A duration for a non-technical reader, ROUNDED UP.
- *
- * Up, always, because the number lands in a sentence that says "up to": round
- * 100 minutes down to an hour and the label states a bound the arithmetic does
- * not support, which is the one way this caveat could become a lie.
- */
-export function approxDurationCeil(ms: number): string {
-  if (ms < HOUR_MS) {
-    const minutes = Math.max(1, Math.ceil(ms / 60_000));
-    return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
-  }
-  if (ms < 48 * HOUR_MS) {
-    const hours = Math.ceil(ms / HOUR_MS);
-    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
-  }
-  const days = Math.ceil(ms / DAY_MS);
-  return `${days} ${days === 1 ? "day" : "days"}`;
-}
-
-/**
- * The caveat for a span some videos only join part way through, or leave early.
- *
- * WHY THIS SENTENCE HAS TO EXIST. The measurement baselines a video whose own
- * history starts a little inside the window on its own first reading, instead
- * of dropping it — see `BASELINE_GRACE_FRACTION`. That fixes a figure that was
- * refusing to appear at all, and it gives up the claim that every video was
- * measured over the identical span. The label may not keep making that claim
- * silently: it names the gap, and it names the DIRECTION of the error, which is
- * the half an owner planning against the number needs.
- *
- * BOTH ENDS, because the tail is usually the bigger one. A video past its hit
- * window is snapshotted at most daily, and not at all while its count has not
- * moved, so its last reading can sit a day behind the period's close. On a
- * 36-hour measured span that is a third of the figure — with a perfectly clean
- * head, which is exactly when a head-only caveat said nothing at all.
- *
- * The gaps are stated in TIME, not as a percentage of the money. A video's
- * views do not arrive evenly — a Short can take most of its lifetime views in
- * its first hours — so "understated by at most 0.6%" would be a bound nobody
- * can support. "Their first two hours are missing, so this is a little low" is
- * exactly what is known.
- *
- * "A LITTLE LOW" IS THE OVERWHELMING CASE AND NOT THE ONLY ONE. A missing head
- * conceals a purge as easily as it conceals a gain, and a purge inside it makes
- * the figure high rather than low; `ChannelViewsGained.maxBaselineLagMs`
- * documents that and a test pins it. The direction is kept in the sentence
- * anyway, because it is right in every case an owner will meet and it is the
- * half of the caveat they can act on.
- */
-export function coverageGapNote(headLagMs: number, tailLagMs: number): string {
-  const head = headLagMs > 0 ? approxDurationCeil(headLagMs) : null;
-  const tail = tailLagMs > 0 ? approxDurationCeil(tailLagMs) : null;
-
-  if (head !== null && tail !== null) {
-    return (
-      `The app started recording some of these videos up to ${head} into that span, ` +
-      `and its latest reading for some of them is up to ${tail} before the period ends, ` +
-      `so those views are missing and this figure is a little low.`
-    );
-  }
-  if (head !== null) {
-    return (
-      `The app started recording some of these videos up to ${head} into that span, ` +
-      `so their first views are missing and this figure is a little low.`
-    );
-  }
-  return (
-    `The latest reading for some of these videos is up to ${tail} before the period ends, ` +
-    `so their last views are missing and this figure is a little low.`
-  );
-}
-
-/**
- * The note for one response, or `null` when the whole period was measured from
- * end to end for every video.
- *
- * Derived from the server's own `requestedStartMs`/`measuredFromMs` echo
- * rather than from the client's copy of the range, so the label describes the
- * span that was actually measured even if the two ever disagree. Day counts
- * are rounded and floored at 1: a partial day of history is still history,
- * and "0 of 30 days" under a real figure would be self-contradictory.
- *
- * THIS NOW SPEAKS WHERE IT USED TO GO SILENT. A response whose clamp never
- * fired — `measuredFromMs === requestedStartMs` — can still carry videos whose
- * own history starts later, or whose last reading stops short of the close, and
- * those are exactly the cases the coverage-gap caveat exists for. Returning
- * `null` on the strength of the span alone would hide them precisely when they
- * are the only thing left to say.
- */
-export function measuredSpanNoteFrom(response: {
-  readonly requestedStartMs: number;
-  readonly measuredFromMs: number | null;
-  readonly endMs: number;
-  readonly maxBaselineLagMs: number | null;
-  readonly maxEndLagMs: number | null;
-}): string | null {
-  const { requestedStartMs, measuredFromMs, endMs, maxBaselineLagMs, maxEndLagMs } =
-    response;
-  if (measuredFromMs === null) return null;
-
-  const periodDays = Math.max(1, Math.round((endMs - requestedStartMs) / DAY_MS));
-  const clamped = measuredFromMs > requestedStartMs;
-
-  // Both gaps are judged against the span they are gaps IN, not the period the
-  // selector names: a two-hour head is noise in thirty days and a twentieth of
-  // the figure in a day and a half.
-  const spanMs = Math.max(0, endMs - measuredFromMs);
-  const headMs =
-    maxBaselineLagMs !== null && lagWorthStating(maxBaselineLagMs, spanMs)
-      ? maxBaselineLagMs
-      : 0;
-  const tailMs =
-    maxEndLagMs !== null && lagWorthStating(maxEndLagMs, spanMs) ? maxEndLagMs : 0;
-
-  if (!clamped && headMs === 0 && tailMs === 0) return null;
-
-  const measuredDays = Math.max(1, Math.round((endMs - measuredFromMs) / DAY_MS));
-  const span = clamped ? measuredSpanNote(measuredDays, periodDays) : fullSpanNote(periodDays);
-  if (headMs === 0 && tailMs === 0) return span;
-  return `${span} ${coverageGapNote(headMs, tailMs)}`;
-}
-
-/**
- * The same note for ONE niche's card, off that niche's own gaps.
- *
- * The span half is a fact about the page — the history begins where it begins —
- * so it comes from the response. The raggedness half is a fact about the videos
- * in THIS niche, so it comes from the entry: a page-wide maximum rendered under
- * a single figure asserts a shortfall that niche may not have, which is an
- * invented caveat attached to a specific number.
- */
-export function nicheMeasuredSpanNote(
-  response: {
-    readonly requestedStartMs: number;
-    readonly measuredFromMs: number | null;
-    readonly endMs: number;
-  },
-  entry: {
-    readonly maxBaselineLagMs: number;
-    readonly maxEndLagMs: number;
-  } | null,
-): string | null {
-  return measuredSpanNoteFrom({
-    requestedStartMs: response.requestedStartMs,
-    measuredFromMs: response.measuredFromMs,
-    endMs: response.endMs,
-    maxBaselineLagMs: entry === null ? null : entry.maxBaselineLagMs,
-    maxEndLagMs: entry === null ? null : entry.maxEndLagMs,
-  });
-}
-
-// ---------------------------------------------------------------------------
 // WHAT THE PANEL SAYS
 // ---------------------------------------------------------------------------
 
-/** The panel's heading. "Tracked" is not optional; see `market-share.ts`. */
-export const NICHE_EARNINGS_LABEL = "What each niche is generating";
+/**
+ * The panel's heading.
+ *
+ * "TRACKED" IS NOT OPTIONAL; see `market-share.ts`. The app knows the handful
+ * of channels somebody added, not the niche, so a heading that names the niche
+ * alone claims a number the app cannot compute.
+ *
+ * PAST TENSE, NOT PRESENT PROGRESSIVE. "is generating" is a rate, and a rate
+ * with no time unit beside it is read as one — per month, most often. The
+ * figure beneath is a cumulative total of every view on record, so a reader
+ * doing that gets a number wrong by however many months the window holds.
+ */
+export const NICHE_EARNINGS_LABEL = "What each tracked niche has generated";
 
 /**
- * The definition. The period now means what the selector implies — views
- * gained during it — and the caveat that remains is the honest one: the
- * measurement reaches only as far back as the recorded history does, and the
- * label says so whenever that is short of the period.
+ * The definition.
+ *
+ * FOUR FACTS, IN THE ORDER A READER NEEDS THEM: what is multiplied by what;
+ * how far back "every view" actually reaches; that the period selector does
+ * not change it; and that the view total only contains channels somebody
+ * added, so it moves when the tracker does.
+ *
+ * THE WINDOW IS NAMED RATHER THAN DENIED. An earlier draft of this sentence
+ * said "however long ago it was posted", which is false: `buildDataset` fetches
+ * `videos: { where: { publishedAt: { gte: since } } }` with `since` derived
+ * from the org's `lookbackDays`, and `channel-sync` never ingests older uploads
+ * in the first place. At the 400-day default the difference is invisible, but a
+ * team that narrows the window would see the money shrink under a sentence
+ * promising nothing was missing. A stated bound can be argued with; a silent
+ * one reads as a bug.
+ *
+ * There is deliberately nothing here about view history, recorded days or
+ * measured spans — none of that is involved in this figure any more, and a
+ * caveat about machinery a number does not use is just a reason to distrust
+ * the number.
  */
 export const NICHE_EARNINGS_DEFINITION =
-  "For each niche, the Shorts views its tracked channels gained during the selected period are priced at that niche's RPM. This counts every view earned in the period — including views picked up by older uploads — not just the views of what was published recently. The app can only measure from the day it started recording view history: when the period reaches further back than the history does, the figure covers the recorded days and the label says so. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
+  "For each niche, every Shorts view the channels tracked in it have — all of them, across every Short the tracker has on record, back as far as the history window set under Settings — priced at that niche's RPM. Changing the period at the top of the page does not change these figures; the period decides which uploads the other stats count, not how many views a channel has. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
 
 /** The Long Form panel's copy of the definition — the views are not Shorts there. */
 export const NICHE_EARNINGS_DEFINITION_LONGFORM =
-  "For each niche, the long-form views its tracked channels gained during the selected period are priced at that niche's RPM. This counts every view earned in the period — including views picked up by older uploads — not just the views of what was published recently. The app can only measure from the day it started recording view history: when the period reaches further back than the history does, the figure covers the recorded days and the label says so. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
+  "For each niche, every long-form view the channels tracked in it have — all of them, across every video the tracker has on record, back as far as the history window set under Settings — priced at that niche's RPM. Changing the period at the top of the page does not change these figures; the period decides which uploads the other stats count, not how many views a channel has. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
 
 /** The definition for the panel a page of the given format mounts. */
 export function nicheEarningsDefinition(format: NicheFormat): string {
@@ -702,10 +531,17 @@ export const NICHE_EARNINGS_PARTIAL_TOTAL =
 export const NO_TOTAL_EXPLANATION: Readonly<Record<NoTotalReason, string>> = {
   nothing_priced:
     "No niche has a rate, so there is no total to add up.",
-  nothing_gained:
-    "Every niche with a rate gained no views over the measured days, so there is nothing to price. Widen the period, or check back after the next refresh.",
-  no_usable_history:
-    "View history does not yet cover enough of this period to price any niche. It fills in on its own as the app keeps recording — check back, or pick a more recent period.",
+  /*
+   * NO CAUSE ASSERTED, because the state cannot tell them apart. It fires on
+   * zero VIEWS, and the ways to reach that include an empty niche, a niche
+   * whose channels only post the other format, and — under a narrow history
+   * window — channels with a full back catalogue, all of it older than the
+   * window. An earlier draft said "no channel tracked in it has a single video
+   * of this format yet", which tells an owner looking at three channels on the
+   * card to go and add the channels that are already there.
+   */
+  no_views:
+    "Every niche with a rate has no views to price — nothing tracked in them has any views of this format on record. Either no channel is filed under those niches, or nothing those channels posted falls inside the history window set under Settings.",
   channel_in_two_priced_niches:
     "One of Northstar's channels is filed under two priced niches, so adding the niches together would count its views twice — at two different rates. The per-niche figures below are each correct on their own; no single total is.",
   mixed_currency:

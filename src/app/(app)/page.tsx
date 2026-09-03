@@ -445,7 +445,7 @@ export default function OverviewPage() {
             honest empty state, and on a deployment where no niche has a rate
             that empty state is the whole of what it has to say.
           */}
-          <NicheEarningsPanel niches={niches} range={range} />
+          <NicheEarningsPanel niches={niches} rows={rows} />
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION}

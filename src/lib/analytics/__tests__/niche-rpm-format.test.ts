@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_RPM_MAJOR_PER_THOUSAND,
-  NICHE_NO_VIEWS_GAINED,
+  NICHE_NO_VIEWS,
   RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND,
   RPM_IMPLAUSIBLE_MAJOR_PER_THOUSAND_LONGFORM,
   TRACKED_NICHE_VALUE_DEFINITION,
@@ -169,13 +169,18 @@ describe("the pricing-basis COPY tells each format's own truth", () => {
     expect(longform).toContain("no engaged-view share applies");
     expect(longform).not.toContain("ENGAGED views only");
     // And the noun is the format's own.
-    expect(longform).toContain("long-form views");
+    expect(longform).toContain("long-form view");
+    expect(longform).not.toContain("Shorts view");
   });
 
-  it("uses one empty-period line for both formats — a gain is the same word on both sides", () => {
+  it("uses one no-views line for both formats, and names no period in it", () => {
     // The upload basis needed a per-format noun ("No Shorts in this period" /
-    // "No videos…"); a GAIN is a movement of views, so one line serves both
-    // and the two products cannot drift apart on the same state.
-    expect(NICHE_NO_VIEWS_GAINED).toBe("No views gained in this period");
+    // "No videos…"); this is a statement about a view TOTAL, so one line
+    // serves both and the two products cannot drift apart on the same state.
+    expect(NICHE_NO_VIEWS).toBe("No views to price");
+    // The figure it stands in for counts every view the tracked channels
+    // have, so naming a period here would blame a window that is not
+    // involved.
+    expect(NICHE_NO_VIEWS).not.toContain("period");
   });
 });

@@ -17,9 +17,20 @@ import { isVideoOfFormat, type NicheFormat } from "@/lib/niches/niche-format";
  * history reaches — and refused, video by video, wherever it does not.
  *
  * This module grew out of `niche-rpm-service.ts`, where the delta fed one
- * caller: the denominator of a derived RPM. The niche money figures now price
- * views gained too, so the measurement lives here and both callers consume
- * it. The RULES ARE SHARED AND MUST NOT FORK — a video with no reading at the
+ * caller: the denominator of a derived RPM. THAT CALLER IS STILL LIVE AND IS
+ * THE ONE THAT MATTERS — `resolveNicheRpm`'s derived rate is money somebody
+ * actually earned divided by this exact delta, and `niche-rpm-views-gained-pin`
+ * holds it to the view.
+ *
+ * The second caller, `niche-views-gained-service.ts`, is RETAINED BUT NO
+ * LONGER RENDERED: the niche money surfaces price every view the tracked
+ * channels have rather than the views gained in a period, because a gains
+ * figure cannot render at all where the recorded history is shallower than the
+ * period. Nothing below changes on that account — the rules here serve the
+ * derived rate first — but do not assume a change here moves a dollar figure
+ * on the niche pages. It does not.
+ *
+ * The RULES ARE SHARED AND MUST NOT FORK — a video with no reading at the
  * window's start is dropped from both sides, a video born inside the window
  * starts from a true zero, a negative delta is real — because two versions of
  * "views gained" that disagree by one rule would put two different numbers on

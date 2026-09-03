@@ -2,51 +2,69 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  BASELINE_LAG_FLOOR_MS,
-  LAG_NOTE_SPAN_FRACTION,
   NICHE_EARNINGS_DEFINITION,
   NICHE_EARNINGS_DEFINITION_LONGFORM,
-  approxDurationCeil,
+  NICHE_EARNINGS_LABEL,
+  NO_TOTAL_EXPLANATION,
   buildNicheEarnings,
-  hasUsableGainsHistory,
-  measuredSpanNote,
-  measuredSpanNoteFrom,
-  nicheMeasuredSpanNote,
+  nicheViewTotals,
+  type NicheChannelViews,
   type NicheEarningsInput,
 } from "../niche-earnings";
 import {
+  NICHE_NO_VIEWS,
+  NO_VIEWS_TO_PRICE_EXPLANATION,
   TRACKED_NICHE_VALUE_DEFINITION,
   TRACKED_NICHE_VALUE_DEFINITION_LONGFORM,
   resolveNicheRpm,
   rpmWindowEndingAt,
   type NicheRpmResolution,
 } from "../niche-rpm";
+import { videosInDateRange } from "../filters";
+import { sum } from "../stats";
+import { makeLongform, makeShort, makeUncertain } from "./factories";
+import type { DateRange } from "../types";
 
 /**
  * =========================================================================
- * THE OVERVIEW EARNINGS PANEL — WHO SEES IT, AND WHAT IT SAYS WHEN IT CANNOT
+ * WHAT EACH NICHE IS GENERATING — THE BASIS, AND WHO IS ALLOWED TO SEE IT
  * =========================================================================
  *
- * The owner's seventh request has two halves and the second one is the one that
- * needs pinning: "this should only be visible to Admins."
+ * THE REGRESSION THIS SUITE EXISTS FOR, in the owner's words: "It still says
+ * 'Not enough view history yet'." Two bases in a row answered a question about
+ * a WINDOW — the lifetime views of the period's uploads, then the views gained
+ * inside the period — and a window is exactly what the app cannot always see.
+ * Both printed sentences where a money figure was asked for, in the ordinary
+ * case rather than an edge one.
  *
- * WHAT IS PRICED CHANGED — views GAINED during the period, from the snapshot
- * series, instead of the lifetime views of the period's uploads — and with it
- * came a fourth refusal: a period the view history cannot cover well enough is
- * answered in words, never with a figure priced from an incomplete count.
+ * The basis pinned here is the one that cannot fail that way: EVERY view the
+ * tracked channels have, of the niche's format, priced at the niche's rate. It
+ * is computed from view counts the dataset payload already carries, so there
+ * is no history to be short of and nothing to wait for. The first test below
+ * is the regression itself, and it is written so that reinstating a date
+ * filter fails it.
  *
- * WHY THIS IS TESTED AS A PURE FUNCTION AND NOT AS A COMPONENT. The runner here
+ * WHY THIS IS TESTED AS PURE FUNCTIONS AND NOT AS COMPONENTS. The runner here
  * is Node with no DOM — `vitest.config.ts` sets `environment: "node"` and only
  * collects `*.test.ts` — so a rendered assertion is not available. That is not
- * a compromise for this particular rule, because the rule is not a rendering
- * decision. The gate is the DATA: `NicheDTO.rpm` arrives null for a reader
+ * a compromise for these rules, because they are not rendering decisions. The
+ * disclosure gate is the DATA: `NicheDTO.rpm` arrives null for a reader
  * without `finance.view`, the panel is built from those nulls, and
- * `disclosed: false` is what the component keys off. Testing the builder tests
- * the boundary; testing the component would only test that somebody remembered
- * to write an `if`.
+ * `disclosed: false` is what the component keys off. And the basis is a
+ * SELECTOR both money surfaces call — `nicheViewTotals` — rather than a loop
+ * each of them writes, precisely so one test covers both screens.
  */
 
 const WINDOW = rpmWindowEndingAt(Date.UTC(2026, 7, 31, 14, 30));
+
+/** The period a reader has selected. August 2026. */
+const PERIOD: DateRange = {
+  startMs: Date.UTC(2026, 7, 1),
+  endMs: Date.UTC(2026, 8, 1),
+};
+
+/** Long before that period, and still earning views today. */
+const LONG_AGO = Date.UTC(2024, 2, 3);
 
 /** A niche priced by hand at $0.03–$0.06 per 1,000 engaged views. */
 function pricedRpm(): NicheRpmResolution {
@@ -84,22 +102,159 @@ function niche(overrides: Partial<NicheEarningsInput> = {}): NicheEarningsInput 
     name: "GTA",
     colorIndex: 0,
     rpm: pricedRpm(),
-    ourViewsGained: 2_000_000,
-    competitorViewsGained: 8_000_000,
-    measured: { coveredVideos: 10, totalVideos: 10 },
+    ourViews: 2_000_000,
+    competitorViews: 8_000_000,
     ownChannelIds: ["chan_1"],
     ...overrides,
   };
 }
+
+// ---------------------------------------------------------------------------
+// THE BASIS
+// ---------------------------------------------------------------------------
+
+describe("the regression: a niche whose channels published before the period", () => {
+  /**
+   * =======================================================================
+   * THE BUG, STATED AS A TEST
+   * =======================================================================
+   *
+   * One own channel and one competitor, both with a single Short posted in
+   * March 2024, both still holding millions of views. The reader is looking at
+   * August 2026. Under a date-filtered basis this niche contains nothing at
+   * all, so the panel refused to price it and said so in words — which is what
+   * the owner kept seeing.
+   *
+   * Under the total-views basis it prices, and the arithmetic is written out
+   * rather than derived so a broken implementation cannot agree with a broken
+   * expectation: 2,000,000 of our views at 50% engaged is 1,000,000 priced
+   * views, which at $0.03–$0.06 per 1,000 engaged views is $30.00–$60.00.
+   */
+  const channels: NicheChannelViews[] = [
+    {
+      ownedByNorthstar: true,
+      videos: [makeShort({ publishedAt: LONG_AGO, views: 2_000_000 })],
+    },
+    {
+      ownedByNorthstar: false,
+      videos: [makeShort({ publishedAt: LONG_AGO, views: 8_000_000 })],
+    },
+  ];
+
+  it("produces money, where the upload-date basis produced nothing", () => {
+    const totals = nicheViewTotals(channels, "shorts");
+    expect(totals).toEqual({ ourViews: 2_000_000, competitorViews: 8_000_000 });
+
+    const panel = buildNicheEarnings([niche({ ...totals })]);
+    expect(panel.rows[0]!.state).toBe("priced");
+    expect(panel.total).toEqual({ lowMinor: 3_000, highMinor: 6_000, currency: "USD" });
+  });
+
+  /**
+   * THE COUNTERFACTUAL, SPELLED OUT — this is what the old selector answered
+   * for the identical channels, and it is why the panel had nothing to say.
+   * Kept in the suite so that swapping `videosOfFormat` back for
+   * `videosInDateRange` inside `nicheViewTotals` cannot pass: the test above
+   * would then produce these zeroes.
+   */
+  it("is the exact case a date-filtered selector answers with zero", () => {
+    const inRange = sum(
+      channels.flatMap((channel) =>
+        videosInDateRange(channel.videos, PERIOD, "shorts").map((video) => video.views),
+      ),
+    );
+    expect(inRange).toBe(0);
+
+    const panel = buildNicheEarnings([
+      niche({ ourViews: 0, competitorViews: 0 }),
+    ]);
+    expect(panel.rows[0]!.state).toBe("no_views");
+    expect(panel.total).toBeNull();
+  });
+});
+
+describe("the total-views basis", () => {
+  /**
+   * EVERY VIDEO, WHATEVER ITS DATE. Three Shorts spread over two and a half
+   * years, one of them inside the selected period: all three count, and the
+   * total is their sum rather than the one recent one.
+   */
+  it("counts every video regardless of when it was published", () => {
+    const totals = nicheViewTotals(
+      [
+        {
+          ownedByNorthstar: true,
+          videos: [
+            makeShort({ publishedAt: LONG_AGO, views: 1_000_000 }),
+            makeShort({ publishedAt: Date.UTC(2025, 5, 9), views: 300_000 }),
+            makeShort({ publishedAt: Date.UTC(2026, 7, 14), views: 40_000 }),
+          ],
+        },
+      ],
+      "shorts",
+    );
+
+    expect(totals.ourViews).toBe(1_340_000);
+  });
+
+  /**
+   * THE FORMAT FILTER IS NOT OPTIONAL, and an uncertain video is in NEITHER
+   * format — `isVideoOfFormat`'s rule, held here because this is a money
+   * denominator: a video nobody could classify must not have its views priced
+   * into a format that never claimed it.
+   */
+  it("respects the format, and leaves an uncertain video out of both", () => {
+    const channel: NicheChannelViews = {
+      ownedByNorthstar: true,
+      videos: [
+        makeShort({ views: 1_000_000 }),
+        makeLongform({ views: 5_000_000 }),
+        makeUncertain({ views: 7_000_000 }),
+      ],
+    };
+
+    expect(nicheViewTotals([channel], "shorts").ourViews).toBe(1_000_000);
+    expect(nicheViewTotals([channel], "longform").ourViews).toBe(5_000_000);
+    // The uncertain 7M is in neither, so the two formats do not sum to the
+    // library. The gap IS the uncertainty, visible rather than laundered.
+    expect(
+      nicheViewTotals([channel], "shorts").ourViews +
+        nicheViewTotals([channel], "longform").ourViews,
+    ).toBe(6_000_000);
+  });
+
+  /** Ours and theirs, split on ownership and never pooled. */
+  it("splits our channels from everybody else's", () => {
+    const totals = nicheViewTotals(
+      [
+        { ownedByNorthstar: true, videos: [makeShort({ views: 1_500_000 })] },
+        { ownedByNorthstar: true, videos: [makeShort({ views: 500_000 })] },
+        { ownedByNorthstar: false, videos: [makeShort({ views: 8_000_000 })] },
+      ],
+      "shorts",
+    );
+
+    expect(totals).toEqual({ ourViews: 2_000_000, competitorViews: 8_000_000 });
+    // Swapping the two sides is a silent, plausible-looking mutation, so the
+    // asymmetry is pinned rather than left to the equality above.
+    expect(totals.ourViews).not.toBe(totals.competitorViews);
+  });
+
+  it("is zero for a niche with no channels at all", () => {
+    expect(nicheViewTotals([], "shorts")).toEqual({ ourViews: 0, competitorViews: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WHO SEES IT
+// ---------------------------------------------------------------------------
 
 describe("who the earnings panel is built for", () => {
   /**
    * THE GATE. An employee's dataset carries `rpm: null` on every niche, because
    * `resolveNicheRpmByNiche` returns null rather than an empty map and
    * `toNicheDTO` forwards only what it was handed. There is nothing here to
-   * reconstruct a figure from, so the panel is ABSENT rather than empty — an
-   * Overview with no money on it, rather than a locked box inviting somebody to
-   * ask what is behind it.
+   * reconstruct a figure from, so the panel is ABSENT rather than empty.
    */
   it("is not disclosed at all to a reader who was sent no economics", () => {
     const panel = buildNicheEarnings([
@@ -108,27 +263,21 @@ describe("who the earnings panel is built for", () => {
     ]);
 
     expect(panel.disclosed).toBe(false);
-    // Not one niche is named. A list of niches with "not estimated" beside each
-    // would still be telling an employee which niches exist and that none of
-    // them is priced, which is a disclosure of its own.
-    expect(panel.rows).toHaveLength(0);
+    expect(panel.rows).toEqual([]);
     expect(panel.total).toBeNull();
-    expect(panel.pricedCount).toBe(0);
   });
 
   it("is not disclosed on an organization with no niches at all", () => {
-    expect(buildNicheEarnings([]).disclosed).toBe(false);
+    const panel = buildNicheEarnings([]);
+
+    expect(panel.disclosed).toBe(false);
+    expect(panel.rows).toEqual([]);
   });
 
   /**
-   * A NICHE-SCOPED READER GRANTED `finance.view` IS A REAL COMBINATION.
-   *
-   * `finance.view` is individually grantable — the RPM service's own docstring
-   * argues it should be, so a Head of Shorts can be shown niche economics — and
-   * `getVisibleNicheIds` then narrows WHICH niches those economics cover. Such
-   * a reader receives objects for their own niches and nothing for the rest, so
-   * the panel must render what they were sent rather than blanking because one
-   * entry is null.
+   * A niche-scoped member granted `finance.view` receives economics for their
+   * own niches and NO ENTRY for the rest. One null must not blank the panel,
+   * and the niches they were not sent must not be named.
    */
   it("shows the niches a scoped reader was sent, and never names the others", () => {
     const panel = buildNicheEarnings([
@@ -142,56 +291,9 @@ describe("who the earnings panel is built for", () => {
   });
 });
 
-describe("the coverage floor under every dollar figure", () => {
-  /**
-   * 0.9 — `RPM_MIN_SNAPSHOT_COVERAGE`, the DOLLAR floor — and the boundary is
-   * pinned from both sides. An uncovered video's views are silently missing
-   * from the gains sum, so below the floor the figure would be priced from an
-   * incomplete count: words. AT the floor the bounded understatement is
-   * accepted, exactly as the derived-RPM judge accepts it: money.
-   */
-  it("refuses money at coverage 0.899 and grants it at exactly 0.9", () => {
-    const below = buildNicheEarnings([
-      niche({ measured: { coveredVideos: 899, totalVideos: 1000 } }),
-    ]);
-    const at = buildNicheEarnings([
-      niche({ measured: { coveredVideos: 900, totalVideos: 1000 } }),
-    ]);
-
-    expect(below.rows[0]!.state).toBe("insufficient_history");
-    expect(below.pricedCount).toBe(0);
-    expect(below.total).toBeNull();
-
-    expect(at.rows[0]!.state).toBe("priced");
-    expect(at.total).toEqual({ lowMinor: 3_000, highMinor: 6_000, currency: "USD" });
-  });
-
-  /** No measurement at all is the same refusal said harder. */
-  it("treats a niche the endpoint could not measure as insufficient history", () => {
-    const panel = buildNicheEarnings([niche({ measured: null })]);
-
-    expect(panel.rows[0]!.state).toBe("insufficient_history");
-    expect(panel.total).toBeNull();
-    expect(panel.noTotalReason).toBe("no_usable_history");
-  });
-
-  /**
-   * A library of zero videos is NOT thin history — there is nothing the
-   * measurement failed to cover. It is a niche with nothing to gain, which is
-   * the no-gains state's job to say.
-   */
-  it("does not call an empty library insufficient", () => {
-    expect(hasUsableGainsHistory({ coveredVideos: 0, totalVideos: 0 })).toBe(true);
-    const panel = buildNicheEarnings([
-      niche({
-        ourViewsGained: 0,
-        competitorViewsGained: 0,
-        measured: { coveredVideos: 0, totalVideos: 0 },
-      }),
-    ]);
-    expect(panel.rows[0]!.state).toBe("no_gains");
-  });
-});
+// ---------------------------------------------------------------------------
+// WHAT IT SAYS WHEN IT CANNOT SAY A NUMBER
+// ---------------------------------------------------------------------------
 
 describe("what the panel says when it cannot say a number", () => {
   it("reports nothing priced rather than a portfolio worth zero", () => {
@@ -210,16 +312,16 @@ describe("what the panel says when it cannot say a number", () => {
   });
 
   /**
-   * A priced, fully measured niche that gained nothing prices to zero
+   * A priced niche whose tracked channels hold no views prices to zero
    * correctly, and must still not print "$0": that reads as a claim about the
-   * niche rather than about the period on screen. Same rule as the niche card.
+   * niche rather than about an empty tracker. Same rule as the niche card.
    */
-  it("separates 'nothing gained in this period' from 'nobody has priced it'", () => {
+  it("separates 'no views to price' from 'nobody has priced it'", () => {
     const panel = buildNicheEarnings([
-      niche({ ourViewsGained: 0, competitorViewsGained: 0 }),
+      niche({ ourViews: 0, competitorViews: 0 }),
     ]);
 
-    expect(panel.rows[0]!.state).toBe("no_gains");
+    expect(panel.rows[0]!.state).toBe("no_views");
     expect(panel.pricedCount).toBe(0);
     // The view figures are real and are zero; it is the MONEY that must not be
     // rendered as a figure.
@@ -231,21 +333,20 @@ describe("what the panel says when it cannot say a number", () => {
    * =========================================================================
    * THE PANEL MUST NOT TELL AN OWNER WHO HAS PRICED A NICHE THAT HE HAS NOT
    * =========================================================================
-   * `pricedCount` is zero in THREE different situations — nobody entered a
-   * rate, every rated niche gained nothing, and the history cannot cover the
-   * period — and they are three different instructions to the owner. The
-   * headline keys off which of them actually holds.
+   * `pricedCount` is zero in TWO different situations — nobody entered a rate,
+   * and every rated niche holds no views — and they are two different
+   * instructions to the owner. The headline keys off which of them holds.
    */
-  it("does not claim a niche is unpriced when it is priced but gained nothing", () => {
+  it("does not claim a niche is unpriced when it is priced but has no views", () => {
     const panel = buildNicheEarnings([
-      niche({ id: "a", ourViewsGained: 0, competitorViewsGained: 0 }),
-      niche({ id: "b", name: "Finance", ourViewsGained: 0, competitorViewsGained: 0 }),
+      niche({ id: "a", ourViews: 0, competitorViews: 0 }),
+      niche({ id: "b", name: "Finance", ourViews: 0, competitorViews: 0 }),
     ]);
 
     expect(panel.pricedCount).toBe(0);
-    expect(panel.noTotalReason).toBe("nothing_gained");
+    expect(panel.noTotalReason).toBe("no_views");
     // Every row has a rate. "Nothing priced" would be a false statement.
-    expect(panel.rows.map((row) => row.state)).toEqual(["no_gains", "no_gains"]);
+    expect(panel.rows.map((row) => row.state)).toEqual(["no_views", "no_views"]);
   });
 
   /** The genuinely unpriced case still reports itself as such. */
@@ -256,58 +357,42 @@ describe("what the panel says when it cannot say a number", () => {
   });
 
   /**
-   * A mix: one niche has a rate but gained nothing, another has no rate.
-   * Neither is priced, and the honest reading is the one that does not accuse
-   * the owner of having priced nothing — a rate does exist.
+   * A mix: one niche has a rate but no views, another has no rate. Neither is
+   * priced, and the honest reading is the one that does not accuse the owner
+   * of having priced nothing — a rate does exist.
    */
-  it("prefers 'nothing gained' when at least one niche does have a rate", () => {
+  it("prefers 'no views' when at least one niche does have a rate", () => {
     const panel = buildNicheEarnings([
-      niche({ id: "a", ourViewsGained: 0, competitorViewsGained: 0 }),
+      niche({ id: "a", ourViews: 0, competitorViews: 0 }),
       niche({ id: "b", name: "Finance", rpm: unpricedRpm() }),
     ]);
 
     expect(panel.pricedCount).toBe(0);
-    expect(panel.noTotalReason).toBe("nothing_gained");
+    expect(panel.noTotalReason).toBe("no_views");
   });
 
-  /**
-   * When every rate-bearing niche is below the coverage floor, the honest
-   * headline is about the HISTORY: "gained nothing" would assert a
-   * measurement that never happened, and "nothing priced" would deny a rate
-   * the owner entered.
-   */
-  it("reports no_usable_history when every rated niche is below the floor", () => {
-    const panel = buildNicheEarnings([
-      niche({ id: "a", measured: { coveredVideos: 1, totalVideos: 10 } }),
-      niche({ id: "b", name: "Finance", measured: null }),
-      niche({ id: "c", name: "Sport", rpm: unpricedRpm() }),
-    ]);
-
-    expect(panel.pricedCount).toBe(0);
-    expect(panel.noTotalReason).toBe("no_usable_history");
-  });
-
-  /** One measured no-gains niche outranks the thin-history headline: a real
-   * measurement exists, so the period genuinely paid nothing measurable. */
-  it("prefers 'nothing gained' over 'no usable history' when one niche measured", () => {
-    const panel = buildNicheEarnings([
-      niche({ id: "a", ourViewsGained: 0, competitorViewsGained: 0 }),
-      niche({ id: "b", name: "Finance", measured: null }),
-    ]);
-
-    expect(panel.noTotalReason).toBe("nothing_gained");
+  /** Every withheld total names a reason, and every reason has a sentence. */
+  it("has one explanation per reason, and none of them mentions history", () => {
+    for (const sentence of Object.values(NO_TOTAL_EXPLANATION)) {
+      expect(sentence.length).toBeGreaterThan(0);
+      expect(sentence).not.toContain("view history");
+      expect(sentence).not.toContain("measured");
+    }
   });
 });
 
-describe("the arithmetic on gains", () => {
+// ---------------------------------------------------------------------------
+// THE ARITHMETIC
+// ---------------------------------------------------------------------------
+
+describe("the arithmetic on total views", () => {
   /**
    * The ordinary case. Two niches, no shared channel, both priced in the base
    * currency: the totals add.
    *
-   * 2,000,000 gained views of ours at 50% engaged is 1,000,000 priced views,
-   * which at $0.03–$0.06 per 1,000 engaged views is $30.00–$60.00. Two such
-   * niches total $60.00–$120.00. Written out rather than derived, so a broken
-   * implementation cannot agree with a broken expectation.
+   * 2,000,000 of our views at 50% engaged is 1,000,000 priced views, which at
+   * $0.03–$0.06 per 1,000 engaged views is $30.00–$60.00. Two such niches
+   * total $60.00–$120.00.
    */
   it("adds Northstar's own share across niches that share no channel", () => {
     const panel = buildNicheEarnings([
@@ -319,24 +404,32 @@ describe("the arithmetic on gains", () => {
     expect(panel.total).toEqual({ lowMinor: 6_000, highMinor: 12_000, currency: "USD" });
   });
 
-  /** Capture is gained-over-gained: 2M of 10M tracked gains is 20%. */
-  it("computes the capture percentage from the gained views", () => {
+  /** Capture is ours over the tracked total: 2M of 10M is 20%. */
+  it("computes the capture percentage from the two view totals", () => {
     const panel = buildNicheEarnings([niche()]);
 
     expect(panel.rows[0]!.value.capturePercent).toBe(20);
     expect(panel.rows[0]!.value.trackedNicheViews).toBe(10_000_000);
   });
 
-  /**
-   * A NEGATIVE SUM CLAMPS TO ZERO VIEWS, NEVER TO NEGATIVE MONEY. Purges can
-   * pull a channel's period delta below zero, and the raw figure is a real
-   * fact about views — but "-$12" is not an amount of revenue that exists.
-   * The clamp lives in `calculateNicheValue` and is pinned HERE because this
-   * is the first caller that can actually feed it a negative.
-   */
-  it("clamps a negative gains sum to zero rather than pricing negative money", () => {
+  /** And it is genuinely ours ÷ (ours + theirs), not a constant that happens
+   * to fit one fixture. */
+  it("moves with the split", () => {
     const panel = buildNicheEarnings([
-      niche({ ourViewsGained: -500_000, competitorViewsGained: 1_000_000 }),
+      niche({ ourViews: 7_500_000, competitorViews: 2_500_000 }),
+    ]);
+
+    expect(panel.rows[0]!.value.capturePercent).toBe(75);
+  });
+
+  /**
+   * A NEGATIVE TOTAL CLAMPS TO ZERO VIEWS, NEVER TO NEGATIVE MONEY. Nothing on
+   * this basis produces one — a view count cannot be negative — but the clamp
+   * in `calculateNicheValue` is load-bearing for every caller, so it is held.
+   */
+  it("clamps a negative sum to zero rather than pricing negative money", () => {
+    const panel = buildNicheEarnings([
+      niche({ ourViews: -500_000, competitorViews: 1_000_000 }),
     ]);
 
     const value = panel.rows[0]!.value;
@@ -350,9 +443,8 @@ describe("the arithmetic on gains", () => {
    * =========================================================================
    * THE DOUBLE-COUNT, WHICH IS THE WHOLE REASON THE TOTAL IS ALLOWED TO BE NULL
    * =========================================================================
-   * `niche-rpm-service` states the rule it is protecting: a channel in two
-   * niches is measured once and counted in BOTH — correct per niche, and
-   * never addable across them, because the same views would be priced at two
+   * A channel in two niches is counted in BOTH — correct per niche, and never
+   * addable across them, because the same views would be priced at two
    * different rates.
    */
   it("refuses a total when one channel is filed under two priced niches", () => {
@@ -372,8 +464,7 @@ describe("the arithmetic on gains", () => {
 
   /**
    * A channel in a priced niche AND an unpriced one contributes to exactly one
-   * figure, so there is nothing to double. Checking against every niche rather
-   * than every priced one would withhold a total that is perfectly correct.
+   * figure, so there is nothing to double.
    */
   it("allows a total when the shared niche has no rate to contribute", () => {
     const panel = buildNicheEarnings([
@@ -388,9 +479,8 @@ describe("the arithmetic on gains", () => {
   /**
    * The engaged-view share reaches the panel through the resolution, not
    * through a settings payload, and it is what halves the figure. Pinned here
-   * as well as in the maths suite because this is the surface an admin reads a
-   * portfolio number off: if the share stopped arriving, every figure on this
-   * panel would silently double.
+   * because this is the surface an admin reads a portfolio number off: if the
+   * share stopped arriving, every figure would silently double.
    */
   it("prices the portfolio through the engaged-view share on the resolution", () => {
     const full = resolveNicheRpm({
@@ -412,6 +502,35 @@ describe("the arithmetic on gains", () => {
     expect(halved.total).toEqual({ lowMinor: 3_000, highMinor: 6_000, currency: "USD" });
     expect(whole.total).toEqual({ lowMinor: 6_000, highMinor: 12_000, currency: "USD" });
   });
+
+  /**
+   * =========================================================================
+   * THE EXACT 2x A WRONG BASIS WOULD INTRODUCE
+   * =========================================================================
+   * Long-form RPM is quoted per 1,000 RAW views and Shorts RPM per 1,000
+   * ENGAGED views, so the identical numeric rate over the identical view count
+   * buys exactly twice the money on a Long Form niche at a 50% share. That
+   * factor is the whole reason `RpmBasis` exists, and it is pinned as an exact
+   * equality in both directions rather than as an inequality.
+   */
+  it("prices long-form on raw views and shorts on the engaged subset", () => {
+    const shorts = buildNicheEarnings([niche({ format: "shorts" })]);
+    const longform = buildNicheEarnings([niche({ format: "longform" })]);
+
+    expect(shorts.rows[0]!.value.basis).toBe("engaged");
+    expect(longform.rows[0]!.value.basis).toBe("raw");
+
+    // 2,000,000 ours: 1,000,000 engaged on shorts, 2,000,000 raw on long form.
+    expect(shorts.rows[0]!.value.pricedViews).toBe(5_000_000);
+    expect(longform.rows[0]!.value.pricedViews).toBe(10_000_000);
+
+    expect(shorts.total).toEqual({ lowMinor: 3_000, highMinor: 6_000, currency: "USD" });
+    expect(longform.total).toEqual({
+      lowMinor: 6_000,
+      highMinor: 12_000,
+      currency: "USD",
+    });
+  });
 });
 
 /**
@@ -420,8 +539,7 @@ describe("the arithmetic on gains", () => {
  * =========================================================================
  * The sum can only include niches that HAVE a rate — an unpriced niche is
  * unknown, not zero, so there is nothing to add. The label is derived from the
- * same counts the sum was built from, and the panel renders whatever it is
- * handed rather than a sentence written at design time.
+ * same counts the sum was built from.
  */
 describe("what the total says it covers", () => {
   it("does not present a partial sum as the whole portfolio", () => {
@@ -433,7 +551,7 @@ describe("what the total says it covers", () => {
         rpm: unpricedRpm(),
         // Larger than the priced niche, which is the point: what is left out
         // is unbounded, so the subtotal can be arbitrarily far from the truth.
-        ourViewsGained: 50_000_000,
+        ourViews: 50_000_000,
         ownChannelIds: ["chan_2"],
       }),
     ]);
@@ -478,257 +596,218 @@ describe("what the total says it covers", () => {
   });
 });
 
-describe("the measured-span label", () => {
-  it("says exactly how much of the period the history covers", () => {
-    expect(measuredSpanNote(9, 30)).toBe(
-      "Measured over the last 9 of 30 days — view history begins there.",
-    );
-  });
-
-  it("is singular-safe", () => {
-    expect(measuredSpanNote(1, 1)).toBe(
-      "Measured over the last 1 of 1 day — view history begins there.",
-    );
-  });
-
-  const DAY_MS = 86_400_000;
-  const HOUR_MS = 3_600_000;
-  const END = Date.UTC(2026, 7, 31);
-
-  it("derives the note from the server's own echo of the request", () => {
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 9 * DAY_MS,
-        endMs: END,
-        maxBaselineLagMs: 0,
-        maxEndLagMs: 0,
-      }),
-    ).toBe("Measured over the last 9 of 30 days — view history begins there.");
-  });
-
-  it("says nothing when the whole period was measured, for every video", () => {
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 30 * DAY_MS,
-        endMs: END,
-        maxBaselineLagMs: 0,
-        maxEndLagMs: 0,
-      }),
-    ).toBeNull();
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: null,
-        endMs: END,
-        maxBaselineLagMs: null,
-        maxEndLagMs: null,
-      }),
-    ).toBeNull();
-  });
-
-  /**
-   * The half the label used to assert away. Videos are baselined on their own
-   * first reading when the sweep reached them late, so the span is no longer
-   * uniform across every video — and a note that went silent whenever the
-   * clamp had not fired would hide the caveat exactly where it is the only
-   * thing left to say.
-   */
-  it("speaks about ragged baselines even when the clamp never fired", () => {
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 30 * DAY_MS,
-        endMs: END,
-        maxBaselineLagMs: 12 * HOUR_MS,
-        maxEndLagMs: 0,
-      }),
-    ).toBe(
-      "Measured over the full 30 days. The app started recording some of these " +
-        "videos up to 12 hours into that span, so their first views are missing " +
-        "and this figure is a little low.",
-    );
-  });
-
-  /**
-   * =======================================================================
-   * THE TAIL, WHICH THE LABEL USED TO BE SILENT ABOUT ENTIRELY
-   * =======================================================================
-   *
-   * A video past its hit window is snapshotted at most daily and not at all
-   * while its count has not moved, so the last reading inside the period can
-   * sit a long way before its close. On a short measured span that is the
-   * BIGGER of the two gaps, and it appears in the cleanest possible case — one
-   * channel, zero sweep stagger, head lag exactly 0 — which is precisely where
-   * a head-only caveat printed nothing at all over a figure a third low.
-   */
-  it("states the tail gap on its own, with no ragged head to report", () => {
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 36 * HOUR_MS,
-        endMs: END,
-        maxBaselineLagMs: 0,
-        maxEndLagMs: 12 * HOUR_MS,
-      }),
-    ).toBe(
-      "Measured over the last 2 of 30 days — view history begins there. " +
-        "The latest reading for some of these videos is up to 12 hours before " +
-        "the period ends, so their last views are missing and this figure is a " +
-        "little low.",
-    );
-  });
-
-  it("states both gaps in one sentence when both ends are ragged", () => {
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 9 * DAY_MS,
-        endMs: END,
-        maxBaselineLagMs: 3 * HOUR_MS,
-        maxEndLagMs: 25 * HOUR_MS,
-      }),
-    ).toBe(
-      "Measured over the last 9 of 30 days — view history begins there. " +
-        "The app started recording some of these videos up to 3 hours into that " +
-        "span, and its latest reading for some of them is up to 25 hours before " +
-        "the period ends, so those views are missing and this figure is a little low.",
-    );
-  });
-
-  /** A bound is only a bound if it rounds the safe way. */
-  it("rounds the stated gap UP, so 'up to' is never a claim the data cannot support", () => {
-    expect(approxDurationCeil(61 * 60_000)).toBe("2 hours");
-    expect(approxDurationCeil(90 * 1_000)).toBe("2 minutes");
-    expect(approxDurationCeil(3_600_000)).toBe("1 hour");
-    expect(approxDurationCeil(49 * HOUR_MS)).toBe("3 days");
-  });
-
-  it("stays quiet below the smallest unit it can express", () => {
-    // Half a minute of raggedness would render as "up to 0 minutes" or force a
-    // false round-up; a caveat under every figure forever is noise, not honesty.
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 30 * DAY_MS,
-        endMs: END,
-        maxBaselineLagMs: 30_000,
-        maxEndLagMs: 30_000,
-      }),
-    ).toBeNull();
-    expect(BASELINE_LAG_FLOOR_MS).toBe(60_000);
-  });
-
-  /**
-   * =======================================================================
-   * WHY A GAP IS ALSO JUDGED AGAINST THE SPAN, NOT ONLY AGAINST A MINUTE
-   * =======================================================================
-   *
-   * Reporting the tail made the minute floor untenable on its own. The tail gap
-   * is essentially never zero — the last channel the sweep reached was read
-   * minutes-to-hours ago at any instant — so a minute-floored caveat would
-   * print under every figure on the page forever. That is how an owner learns
-   * to skip the sentence, and skipping it costs them the one reading that
-   * mattered. A hundredth of the span is the line: 7 hours out of 30 days is
-   * noise, 22 minutes out of 36 hours is not, and the same rule says so.
-   */
-  it("judges a gap against the span it is a gap in, not against the clock alone", () => {
-    expect(LAG_NOTE_SPAN_FRACTION).toBe(0.01);
-
-    // Two hours is a fifth of a percent of a month. Silent.
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 30 * DAY_MS,
-        measuredFromMs: END - 30 * DAY_MS,
-        endMs: END,
-        maxBaselineLagMs: 2 * HOUR_MS,
-        maxEndLagMs: 2 * HOUR_MS,
-      }),
-    ).toBeNull();
-
-    // The same two hours inside a day and a half is a twentieth of the figure.
-    expect(
-      measuredSpanNoteFrom({
-        requestedStartMs: END - 36 * HOUR_MS,
-        measuredFromMs: END - 36 * HOUR_MS,
-        endMs: END,
-        maxBaselineLagMs: 2 * HOUR_MS,
-        maxEndLagMs: 0,
-      }),
-    ).toBe(
-      "Measured over the full 2 days. The app started recording some of these " +
-        "videos up to 2 hours into that span, so their first views are missing " +
-        "and this figure is a little low.",
-    );
-  });
-});
+// ---------------------------------------------------------------------------
+// THE WORDS
+// ---------------------------------------------------------------------------
 
 /**
  * =========================================================================
- * THE CARD'S NOTE IS THE CARD'S, NOT THE PAGE'S
+ * THE COPY DESCRIBES THE BASIS THAT IS ACTUALLY IN FORCE
  * =========================================================================
  *
- * The sentence renders directly beneath ONE niche's money figure. Fed the
- * page-wide maxima it asserted a shortfall that niche may not have — "some of
- * these videos" and "this figure is a little low" are both false of a niche
- * whose every video was measured end to end. Conservative, and still invented,
- * which is the same class of defect as an invented number.
+ * Every definition on these two surfaces promised a period at some point, and
+ * for two rounds the figure under it refused to appear because of one. Both
+ * halves of that are pinned: the new wording says what is multiplied by what
+ * and that the selector does not move it, and the sentences the owner was
+ * reading instead of a number are gone from every string these surfaces
+ * render.
  */
-describe("the per-niche measured-span note", () => {
-  const DAY_MS = 86_400_000;
-  const HOUR_MS = 3_600_000;
-  const END = Date.UTC(2026, 7, 31);
-  const response = {
-    requestedStartMs: END - 30 * DAY_MS,
-    measuredFromMs: END - 9 * DAY_MS,
-    endMs: END,
-  };
+const FORBIDDEN = [
+  "Not enough view history",
+  "measured over",
+  "Measured over",
+  "view history",
+  "gained during the selected period",
+];
 
-  it("says only what is true of THIS niche's videos", () => {
-    // A clean niche keeps the span sentence — which is a fact about the page's
-    // history — and carries no raggedness caveat under its figure.
-    expect(
-      nicheMeasuredSpanNote(response, { maxBaselineLagMs: 0, maxEndLagMs: 0 }),
-    ).toBe("Measured over the last 9 of 30 days — view history begins there.");
+describe("the copy tells the total-views truth", () => {
+  const definitions = [
+    NICHE_EARNINGS_DEFINITION,
+    NICHE_EARNINGS_DEFINITION_LONGFORM,
+    TRACKED_NICHE_VALUE_DEFINITION,
+    TRACKED_NICHE_VALUE_DEFINITION_LONGFORM,
+  ];
 
-    // Its ragged neighbour on the same page does.
-    expect(
-      nicheMeasuredSpanNote(response, {
-        maxBaselineLagMs: 3 * HOUR_MS,
-        maxEndLagMs: 0,
-      }),
-    ).toBe(
-      "Measured over the last 9 of 30 days — view history begins there. " +
-        "The app started recording some of these videos up to 3 hours into that " +
-        "span, so their first views are missing and this figure is a little low.",
+  it("says the figure is every view the tracked channels have", () => {
+    expect(NICHE_EARNINGS_DEFINITION).toContain("every Shorts view the channels");
+    expect(NICHE_EARNINGS_DEFINITION_LONGFORM).toContain(
+      "every long-form view the channels",
+    );
+    expect(TRACKED_NICHE_VALUE_DEFINITION).toContain("every Shorts view the channels");
+    expect(TRACKED_NICHE_VALUE_DEFINITION_LONGFORM).toContain(
+      "every long-form view the channels",
     );
   });
 
-  it("falls back to the span alone for a niche the response did not answer for", () => {
-    expect(nicheMeasuredSpanNote(response, null)).toBe(
-      "Measured over the last 9 of 30 days — view history begins there.",
-    );
+  /**
+   * THE BOUND THE COPY MUST NOT DENY.
+   *
+   * `buildDataset` fetches `videos: { where: { publishedAt: { gte: since } } }`
+   * with `since` derived from the org's `lookbackDays`, and `channel-sync`
+   * applies the same cutoff at ingest — so the browser never holds the full
+   * back catalogue and cannot price it. An earlier draft of these definitions
+   * promised "however long ago it was posted", which at a narrowed window is a
+   * sentence asserting the opposite of the arithmetic beneath it. Each one now
+   * names the window instead, in the words Settings already uses for it.
+   */
+  it("names the history window instead of promising the whole catalogue", () => {
+    for (const definition of definitions) {
+      expect(definition).toContain("history window set under Settings");
+      expect(definition).not.toContain("however long ago");
+      expect(definition).not.toContain("every Short in the tracker");
+      expect(definition).not.toContain("every video in the tracker");
+    }
+  });
+
+  /** The panel heading carries the same qualifier the tooltip does, and no
+   * phantom rate: the figure below it is a cumulative total, not a monthly. */
+  it("keeps the heading tracked-qualified and in the past tense", () => {
+    expect(NICHE_EARNINGS_LABEL).toContain("tracked");
+    expect(NICHE_EARNINGS_LABEL).not.toContain("is generating");
+  });
+
+  /**
+   * The zero state fires on zero VIEWS. Naming one cause as if it were the only
+   * one sent an owner off to add channels already sitting on the card in front
+   * of him, so neither sentence asserts a cause any more.
+   */
+  it("does not blame the no-views state on there being no videos", () => {
+    for (const text of [NO_VIEWS_TO_PRICE_EXPLANATION, NO_TOTAL_EXPLANATION.no_views]) {
+      expect(text).not.toContain("single video of this format");
+      expect(text).not.toContain("Add the channels");
+      expect(text).not.toContain("add the channels");
+      expect(text).toContain("history window set under Settings");
+    }
+  });
+
+  /** The owner will switch 7d/30d and watch the money stay still. The tooltip
+   * has to have told him that first. */
+  it("says the period selector does not change the figure", () => {
+    for (const definition of definitions) {
+      expect(definition.toLowerCase()).toContain("does not change");
+      expect(definition.toLowerCase()).toContain("period");
+    }
+  });
+
+  /** "Tracked" is not optional: the denominator is a set somebody curates. */
+  it("keeps saying the total only contains channels in the tracker", () => {
+    for (const definition of definitions) {
+      expect(definition).toContain("add or remove a competitor");
+    }
+  });
+
+  it("promises no period and names no history", () => {
+    const strings = [
+      ...definitions,
+      NICHE_NO_VIEWS,
+      NO_VIEWS_TO_PRICE_EXPLANATION,
+      ...Object.values(NO_TOTAL_EXPLANATION),
+    ];
+    for (const text of strings) {
+      for (const phrase of FORBIDDEN) {
+        expect(text).not.toContain(phrase);
+      }
+    }
   });
 });
 
 /**
- * =========================================================================
- * THE WORDS — the period means what the selector implies, and nothing claims
- * automatic refresh is off any more (it has been on since September).
- * =========================================================================
+ * The surfaces are JSX and this runner has no DOM, so the one thing that
+ * cannot be asserted through the pure functions is that the components render
+ * what they are handed. A source assertion is the available check, and it is
+ * the same technique `niche-card-controls.test.ts` uses.
  */
-describe("the copy tells the gained-views truth", () => {
-  const readSource = (relative: string): string =>
+describe("the money surfaces render this basis and no other", () => {
+  const read = (relative: string): string =>
     readFileSync(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)), "utf8");
 
-  it("defines the panel figure as views gained during the period", () => {
-    expect(NICHE_EARNINGS_DEFINITION).toContain("gained during the selected period");
-    expect(NICHE_EARNINGS_DEFINITION_LONGFORM).toContain("gained during the selected period");
-    expect(TRACKED_NICHE_VALUE_DEFINITION).toContain("gained during the selected period");
-    expect(TRACKED_NICHE_VALUE_DEFINITION_LONGFORM).toContain(
-      "gained during the selected period",
-    );
+  /** Comments are prose about the past; only what ships is asserted on. */
+  const code = (source: string): string =>
+    source
+      .replace(/\{\/\*[\s\S]*?\*\/\}/g, " ")
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n");
+
+  const PANEL = "components/dashboard/niche-earnings-panel.tsx";
+  const STRIP = "components/niches/niche-value-strip.tsx";
+  const CARDS = "app/(app)/niches/page.tsx";
+
+  it("computes both money figures through the one shared selector", () => {
+    expect(code(read(PANEL))).toContain("nicheViewTotals");
+    expect(code(read(CARDS))).toContain("nicheViewTotals");
+  });
+
+  it("never date-filters the views it prices", () => {
+    for (const relative of [PANEL, STRIP, CARDS]) {
+      expect(code(read(relative))).not.toContain("videosInDateRange");
+      expect(code(read(relative))).not.toContain("getShortsInDateRange");
+    }
+  });
+
+  /** The whole snapshot dependency is gone from what renders: no fetch, no
+   * skeleton, no failure sentence, no coverage predicate. */
+  it("no longer reads the views-gained pipeline", () => {
+    for (const relative of [PANEL, STRIP, CARDS]) {
+      const source = code(read(relative));
+      expect(source).not.toContain("useNicheViewsGained");
+      expect(source).not.toContain("VIEWS_GAINED_UNAVAILABLE");
+      expect(source).not.toContain("hasUsableGainsHistory");
+      expect(source).not.toContain("measuredSpanNote");
+    }
+  });
+
+  /**
+   * THE PANEL AND THE STRIP ARE ENTIRELY ABOUT MONEY, so every one of these
+   * phrases is forbidden outright in what they ship.
+   */
+  it("renders none of the sentences the owner was reading instead of a number", () => {
+    for (const relative of [PANEL, STRIP]) {
+      const source = code(read(relative));
+      for (const phrase of FORBIDDEN) {
+        expect(source).not.toContain(phrase);
+      }
+    }
+  });
+
+  /**
+   * THE NICHE CARDS PAGE IS NOT, and the distinction is the point rather than
+   * an exemption. It renders the hit rate too, and the page header legitimately
+   * says the portfolio hit rate is "measured over" the production niches —
+   * that sentence is about a rule, not about money, and blanket-banning the
+   * phrase would delete a true statement to satisfy a test. What the page must
+   * not carry is the money copy: a promise about the selected period, or the
+   * refusal the owner kept reading.
+   */
+  it("carries none of the money-period copy on the niche cards page", () => {
+    const source = code(read(CARDS));
+    expect(source).not.toContain("Not enough view history");
+    expect(source).not.toContain("gained during the selected period");
+    expect(source).not.toContain("view history");
+  });
+
+  it("takes the total's caption from the builder", () => {
+    expect(code(read(PANEL))).toContain("panel.totalLabel");
+  });
+
+  it("no longer claims the sum covers every niche", () => {
+    expect(code(read(PANEL))).not.toContain("all niches");
+  });
+
+  /**
+   * The empty state must key off the REASON, not off `pricedCount === 0` —
+   * those differ exactly when a priced niche has no views, which is the state
+   * that produced a false sentence.
+   */
+  it("keys its empty state off the reason rather than the count", () => {
+    expect(read(PANEL)).toContain('panel.noTotalReason === "nothing_priced"');
+    expect(read(PANEL)).not.toContain("panel.pricedCount === 0");
+  });
+
+  it("renders the caveat when the total omits niches", () => {
+    expect(read(PANEL)).toContain("panel.totalIsPartial");
+    expect(read(PANEL)).toContain("NICHE_EARNINGS_PARTIAL_TOTAL");
   });
 
   it("no longer claims automatic refresh is switched off, anywhere it did", () => {
@@ -737,57 +816,7 @@ describe("the copy tells the gained-views truth", () => {
       "lib/analytics/niche-rpm.ts",
       "server/services/niche-rpm-service.ts",
     ]) {
-      expect(readSource(relative)).not.toContain("currently switched off");
+      expect(read(relative)).not.toContain("currently switched off");
     }
-  });
-});
-
-/**
- * The panel is JSX and this runner has no DOM, so the one thing that cannot be
- * asserted through `buildNicheEarnings` is that the component actually RENDERS
- * what it is handed. A source assertion is the available check, and it is the
- * same technique `niche-card-controls.test.ts` uses.
- */
-describe("the panel renders the label rather than asserting its own", () => {
-  const panelSource = readFileSync(
-    fileURLToPath(
-      new URL("../../../components/dashboard/niche-earnings-panel.tsx", import.meta.url),
-    ),
-    "utf8",
-  );
-
-  it("takes the total's caption from the builder", () => {
-    expect(panelSource).toContain("panel.totalLabel");
-  });
-
-  it("no longer claims the sum covers every niche", () => {
-    const code = panelSource
-      .replace(/\/\*[\s\S]*?\*\//g, " ")
-      .replace(/\{\/\*[\s\S]*?\*\/\}/g, " ");
-
-    expect(code).not.toContain("all niches");
-  });
-
-  /**
-   * The empty state must key off the REASON, not off `pricedCount === 0` —
-   * those differ exactly when a priced niche gained nothing or the history is
-   * thin, which are the states that produced a false sentence.
-   */
-  it("keys its empty state off the reason rather than the count", () => {
-    expect(panelSource).toContain('panel.noTotalReason === "nothing_priced"');
-    expect(panelSource).not.toContain("panel.pricedCount === 0");
-  });
-
-  it("renders the caveat when the total omits niches", () => {
-    expect(panelSource).toContain("panel.totalIsPartial");
-    expect(panelSource).toContain("NICHE_EARNINGS_PARTIAL_TOTAL");
-  });
-
-  /** A failed gains read is words, and a pending one is skeletons — never a
-   * stale figure under a fresh period label. */
-  it("handles the fetch states in words and skeletons", () => {
-    expect(panelSource).toContain("VIEWS_GAINED_UNAVAILABLE");
-    expect(panelSource).toContain("Skeleton");
-    expect(panelSource).toContain("measuredSpanNoteFrom");
   });
 });
