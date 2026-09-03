@@ -87,13 +87,13 @@ export default function AdminNichesPage() {
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
-        title="Niches"
+        title="Hit Rules"
         description="Every niche in the organization, what kind it is, and what counts as a hit in it: a view threshold, the window a Short has to reach it in, and what one hit pays. A niche missing either half of the rule reports no hit rate anywhere in the app; one missing only the payment scores normally and pays nothing. Watchlist niches are followed rather than published into — they are left out of the portfolio hit rate and pay no bonus."
         actions={
           <Button variant="secondary" size="sm" asChild>
             <Link href="/niches">
               <Layers />
-              Niche performance
+              Niches
             </Link>
           </Button>
         }

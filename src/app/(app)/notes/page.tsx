@@ -285,7 +285,7 @@ export default function NotesPage() {
           <EmptyState
             icon={<StickyNote />}
             title="No notes yet"
-            description="Write one here — about a channel, a niche, a Short, or nothing in particular. Notes added from a channel page or from Winners, Outliers and Saved collect here too."
+            description="Write one here — about a channel, a niche, a Short, or nothing in particular. Notes added from a channel page or from Winners, Breakouts and Saved collect here too."
             action={
               // "Write one" comes first now that this page can. Sending someone
               // to Winners was the only offer while the log had no create of

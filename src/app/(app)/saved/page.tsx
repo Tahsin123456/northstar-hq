@@ -346,7 +346,7 @@ export default function SavedPage() {
           <EmptyState
             icon={<Bookmark />}
             title="Nothing saved yet"
-            description="Save a Short from Winners or Outliers and it lands here, with the view count it had when you found it."
+            description="Save a Short from Winners or Breakouts and it lands here, with the view count it had when you found it."
             action={
               <Button variant="primary" asChild>
                 <Link href="/winners">

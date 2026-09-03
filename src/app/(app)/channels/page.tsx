@@ -36,11 +36,11 @@ import {
 import { useFilters } from "@/components/providers/filters-provider";
 import { NicheChips } from "@/components/niches/niche-chip";
 import { useDataset, useRestoreChannel } from "@/hooks/use-dataset";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { api } from "@/lib/api-client";
-import {
-  UPLOAD_VIEWS_LABEL,
-  UPLOAD_VIEWS_TIP,
-} from "@/lib/analytics/constants";
+import { UPLOAD_VIEWS_LABEL } from "@/lib/analytics/constants";
+import { channelHref } from "@/lib/channel-href";
+import { channelsPageCopy } from "@/lib/channels-page-copy";
 import {
   EM_DASH,
   formatCompactNumber,
@@ -54,8 +54,16 @@ import {
  * against each other; this page answers a different question — "what am I
  * tracking, and is it healthy?" — so it emphasises identity, freshness and
  * management actions instead of comparison.
+ *
+ * MOUNTED AT TWO URLS. /longform/channels re-exports this module under the
+ * Long Form provider, so `useDataset()` reads that format's roster and the
+ * three strings that name the unit come from `channelsPageCopy(format)`.
+ * Under the app shell's Shorts provider the format is "shorts" and the page
+ * is, word for word, what it always was — a test pins that.
  */
 export default function ChannelsPage() {
+  const format = useDatasetFormat();
+  const copy = channelsPageCopy(format);
   const { data, isLoading, error, refetch } = useDataset();
   const { niche, contentType, ownership } = useFilters();
   const [query, setQuery] = React.useState("");
@@ -165,7 +173,7 @@ export default function ChannelsPage() {
               <EmptyState
                 icon={<Tv2 />}
                 title="No channels tracked yet"
-                description="Add a YouTube channel to start measuring how consistently it produces high-performing Shorts."
+                description={copy.emptyDescription}
                 action={
                   <AddChannelDialog
                     trigger={
@@ -207,6 +215,9 @@ export default function ChannelsPage() {
 
 function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }) {
   const { channel, metrics } = row;
+  // The link stays inside the format the reader is in — see `channelHref`.
+  const format = useDatasetFormat();
+  const copy = channelsPageCopy(format);
   return (
     <Card className="group relative flex flex-col p-4 transition-colors duration-150 hover:border-border-strong">
       <div className="flex items-start gap-3">
@@ -215,7 +226,7 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <Link
-              href={`/channels/${channel.id}`}
+              href={channelHref(format, channel.id)}
               className="truncate text-[13px] font-medium text-foreground transition-colors hover:text-accent"
               title={channel.displayName}
             >
@@ -279,7 +290,7 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
         <MiniStat
           label={UPLOAD_VIEWS_LABEL}
           value={formatCompactNumber(metrics.totalViews)}
-          title={UPLOAD_VIEWS_TIP}
+          title={copy.uploadViewsTip}
         />
         <MiniStat
           label="Median"
@@ -357,6 +368,7 @@ function MiniStat({
  */
 function RemovedChannels() {
   const restore = useRestoreChannel();
+  const copy = channelsPageCopy(useDatasetFormat());
 
   const { data } = useQuery({
     queryKey: ["channels", "with-removed"],
@@ -375,10 +387,7 @@ function RemovedChannels() {
     <div className="flex flex-col gap-3">
       <div>
         <h2 className="text-[13px] font-medium text-foreground">Removed channels</h2>
-        <p className="mt-0.5 text-[12px] text-muted-foreground">
-          Hidden from your dashboard. Their Shorts history is still stored and
-          comes back intact.
-        </p>
+        <p className="mt-0.5 text-[12px] text-muted-foreground">{copy.removedHistory}</p>
       </div>
 
       <Card className="divide-y divide-border">

@@ -6,113 +6,99 @@ import { usePathname } from "next/navigation";
 import {
   BarChart3,
   Bookmark,
+  ChevronDown,
   Clapperboard,
   Coins,
   Film,
-  ShieldCheck,
-  Wallet,
   Flame,
   Layers,
   LayoutDashboard,
   Moon,
+  Plus,
   Settings,
   Shapes,
+  ShieldCheck,
   StickyNote,
   Sun,
   Swords,
   TrendingUp,
   Tv2,
+  Wallet,
 } from "lucide-react";
 import { BRAND } from "@/lib/brand";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/components/providers/theme-provider";
 import { useOptionalSession } from "@/components/providers/session-provider";
-import type { Permission } from "@/lib/auth/permissions";
-
-interface NavItem {
-  href: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  /** Matches nested routes, e.g. /channels/abc under /channels. */
-  matchPrefix?: boolean;
-  /**
-   * Hide this item unless the signed-in user holds one of these.
-   *
-   * An affordance, not a control. The route and its API are enforced
-   * server-side regardless of what the sidebar renders — this exists so people
-   * are not shown doors that will not open for them, which is a usability
-   * concern rather than a security one.
-   */
-  requires?: readonly Permission[];
-  /**
-   * A Shorts surface — hidden from an actor whose `contentScope` is "longs".
-   *
-   * PER ITEM, not per section, and the granularity is load-bearing: Notes and
-   * Saved live in the same "Intelligence" section as Winners and Outliers, are
-   * format-neutral, and stay for everybody — hiding whole sections would take
-   * them from exactly the people the spec keeps them for. Sections whose every
-   * item is hidden are already dropped by the existing empty-section rule.
-   *
-   * Same affordance-not-boundary caveat as `requires`: the API refuses a
-   * longs-role's `?format=shorts` regardless of what this renders.
-   */
-  shortsOnly?: boolean;
-}
-
-interface NavSection {
-  label: string | null;
-  items: NavItem[];
-}
+import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
+import {
+  activeSectionId,
+  isItemActive,
+  isSectionCollapsed,
+  isSectionCollapsible,
+  sidebarItemKey,
+  visibleSections,
+  type SidebarItemSpec,
+  type SidebarSectionSpec,
+} from "@/lib/sidebar-nav";
+import {
+  expandSection,
+  getSidebarServerSnapshot,
+  getSidebarSnapshot,
+  subscribeToSidebar,
+  toggleSection,
+} from "@/lib/sidebar-store";
 
 /**
- * Grouped so the sidebar stays readable as the app grows.
+ * A row, as the sidebar draws it: the pure spec (`src/lib/sidebar-nav.ts`
+ * owns `href`, `requires`, `shortsOnly` and their reasoning) plus an icon.
+ * The spec is what the tests read; the icon is the one thing about a row
+ * that only matters once it is on screen.
+ */
+type NavItem = SidebarItemSpec & {
+  icon: React.ComponentType<{ className?: string }>;
+};
+
+type NavSection = SidebarSectionSpec<NavItem>;
+
+/**
+ * THE TABLE.
  *
- * "Intelligence" is the discovery loop — find something, judge it, keep it.
- * "Tracker" is the underlying data being managed. Without the grouping this
- * would be nine flat items, which is the point at which a sidebar stops being
- * scannable.
+ * The sidebar grew one feature at a time and ended up with six sections, one
+ * of them unlabelled, three of them named for how the product was pitched
+ * rather than for what a person is doing: "Intelligence" over the discovery
+ * feeds, "Tracker" over the data they run on, "Business" over a page about
+ * the reader's own pay. Shorts was the unlabelled default while Long Form
+ * had a heading, so the two halves of the operation did not read as
+ * siblings.
+ *
+ * NOW THE SECTION LABEL IS THE FORMAT. Shorts and Long Form are the two
+ * operations, each with the same four kinds of screen inside — an overview,
+ * the feed of what is working, the channels, the niches — so a person who
+ * knows one side can read the other. The rows have the same name on both
+ * sides where they are the same kind of screen, and "Overview" or "Niches"
+ * appearing twice is the point rather than a duplication: the heading above
+ * says which one. Research holds what is format-neutral and personal to the
+ * reader's work; Money holds what is about them and about the company; Admin
+ * is the one row for people who run the tool.
  *
  * EVERY SECTION HERE IS A PLACE TO DO THE WORK. Settings is not, so it is not
  * in this table at all — see `SidebarFooterNav` at the bottom of this file.
+ *
+ * URLS DO NOT CHANGE HERE. Breakouts is still /outliers and Us vs Market is
+ * still /our-vs-market; renaming a page is not a reason to break every saved
+ * link to it.
  */
-const NAV_SECTIONS: NavSection[] = [
+export const NAV_SECTIONS: readonly NavSection[] = [
   {
-    label: null,
+    id: "shorts",
+    label: "Shorts",
     items: [
-      // Compare is gone, and nothing replaced it. The Overview table already
-      // ranks every channel on the same metrics and sorts by any of them, so
-      // the one thing Compare added over it was a six-channel ceiling.
       { href: "/", label: "Overview", icon: LayoutDashboard, shortsOnly: true },
-      { href: "/our-vs-market", label: "Our vs Market", icon: Swords, shortsOnly: true },
-    ],
-  },
-  {
-    label: "Intelligence",
-    items: [
       { href: "/winners", label: "Winners", icon: Flame, shortsOnly: true },
-      { href: "/outliers", label: "Outliers", icon: TrendingUp, shortsOnly: true },
-      // Notes and Saved are format-neutral and stay for every role — the
-      // reason `shortsOnly` is an item flag rather than a section one.
-      { href: "/notes", label: "Notes", icon: StickyNote },
-      { href: "/saved", label: "Saved", icon: Bookmark },
-    ],
-  },
-  {
-    // The other side of the operation, as its own place to do the work.
-    // `longs.view` is held by admin and the two longs roles only, so a
-    // shorts-role user never sees this section at all — and an admin gains it
-    // beside everything they already had, which is the one visible sidebar
-    // change for them.
-    label: "Long Form",
-    items: [
-      { href: "/longform", label: "Overview", icon: Clapperboard, requires: ["longs.view"] },
-      { href: "/longform/videos", label: "Videos", icon: Film, requires: ["longs.view"] },
-      { href: "/longform/niches", label: "Niches", icon: Layers, requires: ["longs.view"] },
-    ],
-  },
-  {
-    label: "Tracker",
-    items: [
+      // "Breakouts" says what the page is for — the Shorts that broke away
+      // from their channel's own baseline. "Outliers" named the statistic.
+      { href: "/outliers", label: "Breakouts", icon: TrendingUp, shortsOnly: true },
+      { href: "/our-vs-market", label: "Us vs Market", icon: Swords, shortsOnly: true },
       { href: "/channels", label: "Channels", icon: Tv2, matchPrefix: true, shortsOnly: true },
       { href: "/niches", label: "Niches", icon: Layers, shortsOnly: true },
       // Beside Niches because they are the two taxonomies — which slice of the
@@ -129,10 +115,55 @@ const NAV_SECTIONS: NavSection[] = [
       // PAGE is built over the Shorts dataset, and a longs-role user reaching
       // it would meet the 403 with nothing they could do there.
       { href: "/content-types", label: "Content Types", icon: Shapes, shortsOnly: true },
+      // Add Channel is a row here rather than a button under the whole nav,
+      // where it was shown to Long Form roles whose channel list is not even
+      // in their sidebar. It sits at the foot of the section whose Channels
+      // row it feeds, and it is gated on the permission the API checks —
+      // an editor who cannot add a channel is not shown the button that
+      // would tell them so.
+      {
+        action: "add-channel",
+        label: "Add Channel",
+        icon: Plus,
+        shortsOnly: true,
+        requires: ["channels.manage"],
+      },
     ],
   },
   {
-    label: "Business",
+    // `longs.view` is held by admin and the two longs roles only, so a
+    // shorts-role user never sees this section at all — and an admin gains it
+    // beside everything they already had.
+    id: "longform",
+    label: "Long Form",
+    items: [
+      { href: "/longform", label: "Overview", icon: Clapperboard, requires: ["longs.view"] },
+      // The same screen as Shorts Winners, for this format; it was "Videos",
+      // which named the unit rather than the question the page answers.
+      { href: "/longform/videos", label: "Winners", icon: Film, requires: ["longs.view"] },
+      {
+        href: "/longform/channels",
+        label: "Channels",
+        icon: Tv2,
+        matchPrefix: true,
+        requires: ["longs.view"],
+      },
+      { href: "/longform/niches", label: "Niches", icon: Layers, requires: ["longs.view"] },
+    ],
+  },
+  {
+    id: "research",
+    label: "Research",
+    items: [
+      // Format-neutral and for every role — the reason `shortsOnly` is an
+      // item flag rather than a section one.
+      { href: "/notes", label: "Notes", icon: StickyNote },
+      { href: "/saved", label: "Saved", icon: Bookmark },
+    ],
+  },
+  {
+    id: "money",
+    label: "Money",
     items: [
       {
         // An employee's own pay, and only ever their own row.
@@ -164,16 +195,20 @@ const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
-    label: "Administration",
+    id: "admin",
+    label: "Admin",
     items: [
       {
         href: "/admin",
         label: "Admin",
         icon: ShieldCheck,
         matchPrefix: true,
-        // Either capability is enough to have somewhere useful to land: the
-        // admin area shows only the panels the person can actually use.
-        requires: ["users.manage", "audit.view", "youtube.manage"],
+        // Any one capability is enough to have somewhere useful to land: the
+        // admin area shows only the panels the person can actually use. The
+        // list is the same one `admin/layout.tsx` admits on — `settings.manage`
+        // was missing here while the layout accepted it, so somebody granted
+        // only the hit-rule screen could reach it by URL and never by nav.
+        requires: ["users.manage", "audit.view", "youtube.manage", "settings.manage"],
       },
     ],
   },
@@ -188,50 +223,176 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   // sidebar cannot disagree with the role table.
   const contentScope = session?.user.contentScope;
 
-  // Sections whose every item is hidden are dropped entirely, so a Channel
-  // Director does not see an empty "Administration" heading advertising that
-  // there is something there they cannot reach — and a longs-role user does
-  // not see a "Tracker" heading over nothing once its items are all Shorts.
-  const visibleSections = React.useMemo(
+  const sections = React.useMemo(
     () =>
-      NAV_SECTIONS.map((section) => ({
-        ...section,
-        items: section.items.filter((item) => {
-          // Shorts surfaces disappear for a longs-scoped role. "all" (admin)
-          // and "shorts" both keep them, so for every current user this
-          // filter removes nothing.
-          if (item.shortsOnly && contentScope === "longs") return false;
-          return !item.requires || (session?.canAny(item.requires) ?? false);
-        }),
-      })).filter((section) => section.items.length > 0),
+      visibleSections(NAV_SECTIONS, {
+        contentScope,
+        canAny: (permissions) => session?.canAny(permissions) ?? false,
+      }),
     [session, contentScope],
   );
 
+  const collapsedIds = React.useSyncExternalStore(
+    subscribeToSidebar,
+    getSidebarSnapshot,
+    getSidebarServerSnapshot,
+  );
+
+  const activeId = React.useMemo(() => activeSectionId(sections, pathname), [sections, pathname]);
+
+  // Navigating into a folded section unfolds it, in the store and not only
+  // on screen: `isSectionCollapsed` already refuses to draw the active
+  // section folded, but leaving the store saying "collapsed" would make the
+  // chevron's next click a no-op and fold the section again the moment the
+  // reader left it. The two agree, so the sidebar the reader comes back to
+  // is the one they last saw.
+  React.useEffect(() => {
+    if (activeId !== null) expandSection(activeId);
+  }, [activeId]);
+
   return (
     <nav className="flex flex-col gap-4" aria-label="Main">
-      {visibleSections.map((section, index) => (
-        <div key={section.label ?? `section-${index}`} className="flex flex-col gap-0.5">
-          {section.label ? (
-            <div className="px-2.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
-              {section.label}
+      {sections.map((section) => {
+        const collapsible = isSectionCollapsible(section);
+        const collapsed = isSectionCollapsed(section, collapsedIds, activeId);
+        const listId = `sidebar-section-${section.id}`;
+
+        return (
+          <div key={section.id} className="flex flex-col gap-0.5">
+            {collapsible ? (
+              <SectionHeading
+                label={section.label}
+                expanded={!collapsed}
+                controls={listId}
+                // The section the reader is in cannot be folded — see
+                // `isSectionCollapsed` — so the control says so rather than
+                // silently doing nothing.
+                locked={section.id === activeId}
+                onToggle={() => toggleSection(section.id)}
+              />
+            ) : (
+              <div className="px-2.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-subtle-foreground">
+                {section.label}
+              </div>
+            )}
+            <div id={listId} className="flex flex-col gap-0.5" hidden={collapsed}>
+              {section.items.map((item) => (
+                <NavRow
+                  key={sidebarItemKey(item)}
+                  item={item}
+                  pathname={pathname}
+                  onNavigate={onNavigate}
+                />
+              ))}
             </div>
-          ) : null}
-          {section.items.map((item) => (
-            <NavLink
-              key={item.href}
-              item={item}
-              pathname={pathname}
-              onNavigate={onNavigate}
-            />
-          ))}
-        </div>
-      ))}
+          </div>
+        );
+      })}
     </nav>
   );
 }
 
 /**
- * One row of the sidebar.
+ * A section heading that folds its rows.
+ *
+ * A real button with `aria-expanded` and `aria-controls`, so a screen reader
+ * hears "Shorts, collapsed, button" and knows both that the rows exist and
+ * how to reach them — a plain label with a click handler would announce
+ * neither. The chevron rotates rather than swapping icons so the two states
+ * are visibly the same control.
+ */
+function SectionHeading({
+  label,
+  expanded,
+  controls,
+  locked,
+  onToggle,
+}: {
+  label: string;
+  expanded: boolean;
+  controls: string;
+  locked: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={locked}
+      aria-expanded={expanded}
+      aria-controls={controls}
+      title={locked ? "The section with the current page stays open" : undefined}
+      className={cn(
+        "group flex w-full items-center justify-between rounded-md px-2.5 pb-1 text-left text-[10px] font-medium uppercase tracking-wider text-subtle-foreground",
+        "transition-colors duration-150",
+        locked ? "cursor-default" : "hover:text-muted-foreground",
+      )}
+    >
+      {label}
+      <ChevronDown
+        aria-hidden
+        className={cn(
+          "size-3 shrink-0 transition-transform duration-150",
+          expanded ? "rotate-0" : "-rotate-90",
+          locked ? "opacity-40" : "opacity-70 group-hover:opacity-100",
+        )}
+      />
+    </button>
+  );
+}
+
+/**
+ * The classes every row shares, links and actions alike, so the Add Channel
+ * row is indistinguishable from the Channels row above it until it is
+ * pressed — which is the whole reason it moved from a button into the list.
+ */
+function rowClassName(isActive: boolean): string {
+  return cn(
+    "group relative flex w-full items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium",
+    "transition-colors duration-150",
+    isActive
+      ? "bg-surface-hover text-foreground"
+      : "text-muted-foreground hover:bg-surface-hover/60 hover:text-foreground",
+  );
+}
+
+function rowIconClassName(isActive: boolean): string {
+  return cn(
+    "size-4 shrink-0 transition-colors",
+    isActive ? "text-accent" : "text-subtle-foreground group-hover:text-muted-foreground",
+  );
+}
+
+/** One row of a section: a link, or the one action that lives among them. */
+function NavRow({
+  item,
+  pathname,
+  onNavigate,
+}: {
+  item: NavItem;
+  pathname: string;
+  onNavigate?: () => void;
+}) {
+  if (item.action === "add-channel") {
+    return (
+      <AddChannelDialog
+        // In the mobile drawer, opening the dialog closes the drawer behind
+        // it — the same courtesy a link gives by navigating away.
+        onOpenChange={(open) => open && onNavigate?.()}
+        trigger={
+          <button type="button" className={rowClassName(false)}>
+            <item.icon className={rowIconClassName(false)} />
+            {item.label}
+          </button>
+        }
+      />
+    );
+  }
+  return <NavLink item={item} pathname={pathname} onNavigate={onNavigate} />;
+}
+
+/**
+ * One navigating row of the sidebar.
  *
  * Extracted so the footer's Settings link is the same component rather than the
  * same classes copied — the two sit two elements apart in the finished sidebar,
@@ -242,33 +403,20 @@ function NavLink({
   pathname,
   onNavigate,
 }: {
-  item: NavItem;
+  item: NavItem & { href: string };
   pathname: string;
   onNavigate?: () => void;
 }) {
-  const isActive = item.matchPrefix
-    ? pathname === item.href || pathname.startsWith(`${item.href}/`)
-    : pathname === item.href;
+  const isActive = isItemActive(item, pathname);
 
   return (
     <Link
       href={item.href}
       onClick={onNavigate}
       aria-current={isActive ? "page" : undefined}
-      className={cn(
-        "group relative flex items-center gap-2.5 rounded-md px-2.5 py-[7px] text-[13px] font-medium",
-        "transition-colors duration-150",
-        isActive
-          ? "bg-surface-hover text-foreground"
-          : "text-muted-foreground hover:bg-surface-hover/60 hover:text-foreground",
-      )}
+      className={rowClassName(isActive)}
     >
-      <item.icon
-        className={cn(
-          "size-4 shrink-0 transition-colors",
-          isActive ? "text-accent" : "text-subtle-foreground group-hover:text-muted-foreground",
-        )}
-      />
+      <item.icon className={rowIconClassName(isActive)} />
       {item.label}
     </Link>
   );
@@ -277,10 +425,11 @@ function NavLink({
 /**
  * Settings, and where it went.
  *
- * IT WAS IN "TRACKER", WHICH WAS WRONG. Nothing on that screen tracks anything:
- * for an employee it is their own name, email and password, and for an admin it
- * is the organization's analysis defaults, collection cadence and currency.
- * Filed beside Channels and Niches it read as a fourth kind of tracked data.
+ * IT WAS FILED BESIDE CHANNELS AND NICHES, WHICH WAS WRONG. Nothing on that
+ * screen tracks anything: for an employee it is their own name, email and
+ * password, and for an admin it is the organization's analysis defaults,
+ * collection cadence and currency. Next to the tracked data it read as a
+ * fourth kind of tracked data.
  *
  * IT IS NOT IN A SECTION AT ALL, AND THAT IS THE POINT. Every group above is a
  * place to do the work — find something, manage it, get paid for it. Settings
@@ -300,7 +449,11 @@ function NavLink({
  * `settings.manage` — which is a decision the page makes about its own content,
  * not a reason to hide the door.
  */
-const SETTINGS_ITEM: NavItem = { href: "/settings", label: "Settings", icon: Settings };
+const SETTINGS_ITEM: NavItem & { href: string } = {
+  href: "/settings",
+  label: "Settings",
+  icon: Settings,
+};
 
 export function SidebarFooterNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();

@@ -18,9 +18,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ChannelRowMenu } from "@/components/channels/channel-row-menu";
 import { ChannelSourceLine, channelSourceCopy } from "@/components/youtube/channel-source";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 
 export function ChannelHeader({ channel }: { channel: ChannelDTO }) {
   const refresh = useRefreshChannel();
+
+  // The back link returns to the overview of the format the reader came
+  // from — the same branch `ChannelDetailBody`'s not-found state takes. It
+  // used to be "/" for both, which sent a reader of a Long Form channel page
+  // to the Shorts dashboard with no word that they had changed product.
+  const format = useDatasetFormat();
+  const back =
+    format === "shorts"
+      ? { href: "/", label: "Back to overview" }
+      : { href: "/longform", label: "Back to Long Form" };
 
   // Asked once here so the separator dot and the line itself agree about
   // whether there is anything to show — a lone "·" is the classic way this
@@ -87,11 +98,11 @@ export function ChannelHeader({ channel }: { channel: ChannelDTO }) {
   return (
     <div className="flex flex-col gap-4">
       <Link
-        href="/"
+        href={back.href}
         className="inline-flex w-fit items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="size-3.5" />
-        Back to overview
+        {back.label}
       </Link>
 
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">

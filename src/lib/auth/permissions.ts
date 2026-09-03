@@ -26,14 +26,14 @@
  * A member's effective permissions are their role's set plus any individual
  * grants. Grants are additive only — there is no "deny" — so access can always
  * be reasoned about as a union, and revoking means removing a grant or changing
- * the role. This is what lets a Channel Director be given Finance access
+ * the role. This is what lets a Short Form Editor be given Finance access
  * without inventing a bespoke role for them.
  */
 
 /** Every capability the product recognises. */
 export const PERMISSIONS = [
   // --- Analytics & research -------------------------------------------------
-  /** See the dashboard, channels, charts, Winners, Outliers, Our vs Market. */
+  /** See the dashboard, channels, charts, Winners, Breakouts, Us vs Market. */
   "analytics.view",
   /** Write notes, save Shorts, manage collections. */
   "research.write",
@@ -95,16 +95,16 @@ export const PERMISSIONS = [
   /** Set pay, finalize a period, mark it paid, record an adjustment. */
   "payroll.manage",
 
-  // --- Long Form (reserved) --------------------------------------------------
+  // --- Long Form -------------------------------------------------------------
   /**
-   * The Long Form system does not exist yet.
+   * See the Long Form side of the operation: /longform and everything under
+   * it — the overview, Winners, the channel roster and the niche list.
    *
-   * The key is declared now so the Longs roles below are real rather than
-   * aspirational: they can be assigned, they appear in the admin UI, and when
-   * the Longs features land they gate themselves without anybody having to
-   * revisit the employee or payroll systems. Nothing checks it today, which is
-   * correct — an unenforced permission that grants nothing is safe; a role that
-   * cannot be created until a feature ships is not.
+   * The sidebar's Long Form section is gated on it (an affordance), and the
+   * server refuses `?format=longform` to a role without it (the boundary —
+   * `requireFormat` in `src/server/auth/format-scope.ts`). It was declared
+   * before the features existed so the Longs roles could be assigned ahead of
+   * them; the features exist now, and this is the key they check.
    */
   "longs.view",
 
@@ -245,7 +245,7 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     id: "head_of_longs",
     label: "Head of Longs",
     description:
-      "Runs the Long Form operation. The Long Form features are not built yet, so today this role sees the same analytics and research as a Head of Shorts.",
+      "Runs the Long Form operation. Sees the Long Form overview, Winners, channels and niches, plus notes and saved research, and can add channels and manage niches.",
     permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE, ...HEAD_OPERATIONS, "longs.view"],
     nicheScoped: false,
     contentScope: "longs",
@@ -263,7 +263,7 @@ export const ROLE_DEFINITIONS: Readonly<Record<Role, RoleDefinition>> = {
     id: "long_form_editor",
     label: "Long Form Editor",
     description:
-      "Edits long-form video for their assigned niches. The Long Form features are not built yet; today this role sees the same niche-scoped analytics as a Short Form Editor.",
+      "Edits long-form video for their assigned niches. Sees the Long Form analytics and research for those niches only, and can write notes and save videos.",
     permissions: [...SELF_SERVICE, ...RESEARCH_BASELINE, "longs.view"],
     nicheScoped: true,
     contentScope: "longs",

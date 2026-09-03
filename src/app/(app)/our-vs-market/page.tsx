@@ -70,7 +70,8 @@ import { cn } from "@/lib/utils";
 const EMPTY_NICHES: readonly NicheDTO[] = [];
 
 /**
- * Our vs Market — are we beating the field in this niche?
+ * Us vs Market — are we beating the field in this niche? (Still at
+ * /our-vs-market; the page was renamed, its URL was not.)
  *
  * Splits the active niche into our channels and the competitor pool and
  * compares them on the metrics that describe output quality. Deliberately
@@ -227,7 +228,7 @@ export default function OurVsMarketPage() {
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
-        title="Our vs Market"
+        title="Us vs Market"
         description={description}
         actions={<GenerateReportDialog />}
       />

@@ -77,6 +77,7 @@ import {
   type NicheKind,
 } from "@/lib/niches/niche-kind";
 import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib/format";
+import { channelHref } from "@/lib/channel-href";
 import {
   EMPLOYEE_HIT_RULE_NOTICE,
   MAX_THRESHOLD,
@@ -705,11 +706,7 @@ function UncategorisedCard({ rows }: { rows: readonly ChannelRow[] }) {
           <div key={row.channel.id} className="flex items-center gap-3 px-4 py-2.5">
             <Avatar src={row.channel.avatarUrl} name={row.channel.displayName} size={26} />
             <Link
-              href={
-                format === "shorts"
-                  ? `/channels/${row.channel.id}`
-                  : `/longform/channels/${row.channel.id}`
-              }
+              href={channelHref(format, row.channel.id)}
               className="min-w-0 flex-1 truncate text-[13px] text-foreground transition-colors hover:text-accent"
             >
               {row.channel.displayName}

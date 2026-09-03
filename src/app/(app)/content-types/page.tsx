@@ -54,7 +54,7 @@ export default function ContentTypesPage() {
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
-        title="Content types"
+        title="Content Types"
         description="What a Short is, as opposed to which slice of the operation made it. One list for the whole team — tag a channel with what it makes, and a Short with what it turned out to be."
       />
 

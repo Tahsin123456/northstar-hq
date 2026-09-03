@@ -16,7 +16,10 @@ import { useFilters } from "@/components/providers/filters-provider";
 import { formatCompactNumber } from "@/lib/format";
 
 /**
- * Long Form videos — the Winners feed for the other side of the operation.
+ * Long Form Winners — the Winners feed for the other side of the operation,
+ * still at /longform/videos. It was titled "Videos", which named the unit
+ * where the Shorts side names the question; the two sections now use the
+ * same row names for the same kinds of screen.
  *
  * The same engine as /winners with `format: "longform"` threaded through:
  * `calculateOutliers` then selects long-form candidates AND builds each
@@ -76,7 +79,7 @@ export default function LongformVideosPage() {
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
-        title="Videos"
+        title="Winners"
         description="Recently uploaded long-form videos that are performing well right now, ranked against each channel's own baseline."
         actions={
           !isLoading && videos.length > 0 ? (

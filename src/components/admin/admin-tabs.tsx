@@ -77,15 +77,19 @@ const ADMIN_TABS: readonly AdminTab[] = [
    */
   { href: "/admin/people", label: "People", requires: "users.manage" },
   /*
-   * Niches is `settings.manage`, not `niches.manage`.
+   * Hit Rules is `settings.manage`, not `niches.manage`.
    *
    * The tab is not for organising the taxonomy — that is the main Niches page,
    * and a Head of Shorts does it there with `niches.manage`. This one exists to
    * set hit rate thresholds, which is organization-wide analysis configuration
    * and carries the permission that guards it. Gating it on `niches.manage`
    * would show it to somebody every control on it would refuse.
+   *
+   * Named for what is configured on it rather than "Niches", which was the
+   * third screen in the app with that name and the only one of them not
+   * about the niches themselves. The URL stays /admin/niches.
    */
-  { href: "/admin/niches", label: "Niches", requires: "settings.manage" },
+  { href: "/admin/niches", label: "Hit Rules", requires: "settings.manage" },
   { href: "/admin/audit", label: "Audit log", requires: "audit.view" },
   { href: "/admin/youtube", label: "YouTube", requires: "youtube.manage" },
 ];

@@ -4,7 +4,6 @@ import * as React from "react";
 import { Menu, X } from "lucide-react";
 import { BrandMark, SidebarFooterNav, SidebarNav, ThemeToggle } from "./sidebar";
 import { Button } from "@/components/ui/button";
-import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
 import { cn } from "@/lib/utils";
 
 /**
@@ -55,18 +54,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               keeps the overflow local: without `min-h-0` a flex child refuses to
               shrink below its content, and the footer would be pushed out of
               the sidebar rather than the list gaining a scrollbar. */}
+          {/* Add Channel is no longer a button under the whole list. It was
+              rendered here for every role, including the Long Form roles whose
+              Channels row is not in their sidebar at all; it is now a row
+              inside the Shorts section, gated on the permission the API checks
+              — see the table in ./sidebar.tsx. */}
           <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
             <SidebarNav />
-            <div className="px-1">
-              <AddChannelDialog
-                trigger={
-                  <Button variant="secondary" size="sm" className="w-full justify-start">
-                    <span className="text-base leading-none">+</span>
-                    Add Channel
-                  </Button>
-                }
-              />
-            </div>
           </div>
           {/* The footer: the two controls that change the tool rather than the
               data. Settings sits above the theme toggle because it is the one
@@ -123,18 +117,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               under pressure is how one of them quietly regresses. */}
           <div className="flex min-h-0 flex-1 flex-col justify-between px-3 pb-4">
             <div className="flex min-h-0 flex-col gap-4 overflow-y-auto">
+              {/* `onNavigate` closes the drawer on a link AND when the Add
+                  Channel row opens its dialog — the same SidebarNav as the
+                  desktop column, so the two cannot drift. */}
               <SidebarNav onNavigate={() => setMobileOpen(false)} />
-              <div className="px-1">
-                <AddChannelDialog
-                  onOpenChange={(open) => open && setMobileOpen(false)}
-                  trigger={
-                    <Button variant="secondary" size="sm" className="w-full justify-start">
-                      <span className="text-base leading-none">+</span>
-                      Add Channel
-                    </Button>
-                  }
-                />
-              </div>
             </div>
             <div className="flex shrink-0 flex-col gap-0.5 pt-2">
               <SidebarFooterNav onNavigate={() => setMobileOpen(false)} />

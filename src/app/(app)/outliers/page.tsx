@@ -13,8 +13,11 @@ import { useFilters } from "@/components/providers/filters-provider";
 import { MIN_SHORTS_FOR_BASELINE } from "@/lib/analytics/outliers";
 
 /**
- * Biggest Outliers — the same scoring as Winners, but ranked purely and always
- * by multiple, over the longer analysis windows.
+ * Breakouts — the same scoring as Winners, but ranked purely and always by
+ * multiple, over the longer analysis windows. The URL is still /outliers:
+ * the page was renamed because "Outliers" named the statistic and
+ * "Breakouts" names what a reader is looking for, and a rename is not a
+ * reason to break every saved link.
  *
  * Where Winners answers "what is hot this week?", this answers "what are the
  * most remarkable Shorts in this period, full stop?" — the list a director
@@ -73,7 +76,7 @@ export default function OutliersPage() {
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
-        title="Biggest outliers"
+        title="Breakouts"
         description="Shorts ranked by how far they beat their own channel's median. The single best signal for what is worth studying."
       />
 

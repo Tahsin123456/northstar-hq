@@ -20,6 +20,7 @@ import { ContentTypeControl } from "@/components/content-types/content-type-cont
 import { SaveShortButton } from "./save-short-button";
 import type { UnbenchmarkableReason } from "@/lib/analytics/outliers";
 import type { NicheFormat } from "@/lib/niches/niche-format";
+import { channelHref } from "@/lib/channel-href";
 import {
   SHORT_CARD_ACTION_PLATE,
   SHORT_CARD_BODY,
@@ -307,11 +308,7 @@ export function ShortCard({
 
         <div className={SHORT_CARD_META_ROW}>
           <Link
-            href={
-              format === "shorts"
-                ? `/channels/${channel.id}`
-                : `/longform/channels/${channel.id}`
-            }
+            href={channelHref(format, channel.id)}
             className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground transition-colors hover:text-accent"
           >
             <Avatar src={channel.avatarUrl} name={channel.displayName} size={14} />

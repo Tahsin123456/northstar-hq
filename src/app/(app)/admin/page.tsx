@@ -147,7 +147,7 @@ export default function AdminOverviewPage() {
   return (
     <PageContainer className="flex flex-col gap-6">
       <PageHeader
-        title="Command centre"
+        title="Admin"
         description={`Everything ${BRAND.company} runs on, in one screen. The Business, Shorts and Channels figures describe the selected period.`}
         actions={<PeriodSelector />}
       />

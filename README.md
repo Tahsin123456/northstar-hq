@@ -464,7 +464,7 @@ shades and sorts, and each Short's verdict was decided against its own niche's r
 
 ---
 
-## Intelligence layer
+## The discovery pages
 
 Three pages share one scoring engine (`src/lib/analytics/outliers.ts`), so a Short carries
 the same multiple wherever it appears.
@@ -472,7 +472,8 @@ the same multiple wherever it appears.
 **Winners** — what is breaking out right now. Defaults to the last 7 days and to competitor
 channels, because its job is market discovery.
 
-**Outliers** — the same scoring over longer windows, ranked purely by multiple.
+**Breakouts** (at `/outliers`) — the same scoring over longer windows, ranked purely by
+multiple.
 
 **Saved** — the research library: collections, notes, and the views journey.
 
@@ -504,9 +505,10 @@ ones.
 
 ---
 
-## Our vs Market
+## Us vs Market
 
-Splits a niche into your channels and the competitor pool and compares pooled output.
+At `/our-vs-market`. Splits a niche into your channels and the competitor pool and compares
+pooled output.
 
 Metrics are computed over each side's **combined Shorts**, not by averaging per-channel
 figures — otherwise a channel that posted twice would count as heavily as one that posted

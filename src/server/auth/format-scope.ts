@@ -17,13 +17,13 @@ import type { NicheFormat } from "@/lib/niches/niche-format";
  * role table in `src/lib/auth/permissions.ts`, and read here — nothing in
  * this file compares a role string of its own.
  *
- * NOTHING CALLS THIS YET, DELIBERATELY. This deploy ships the Long Form
- * plumbing dark: the resolver exists, is tested, and is wired to the same
- * role table the admin UI already shows, so the LATER deploy that adds Long
- * Form surfaces enforces scope by calling it rather than by inventing it
- * under deadline. Shipping an enforcement point before any caller is how the
- * niche-scope module landed too, and it is the order that cannot regress the
- * running product.
+ * THIS IS THE BOUNDARY THE LONG FORM SURFACES REST ON. `requireFormat` is
+ * what the dataset route calls before answering `?format=`, so a Long Form
+ * Editor asking for the Shorts dataset — or a Short Form Editor typing
+ * /longform — gets a 403 from the API, whatever the sidebar chose to draw.
+ * It shipped dark, before any caller, the same way the niche-scope module
+ * did: an enforcement point that exists before the feature cannot be
+ * forgotten by the feature.
  *
  * FAIL CLOSED, INHERITED RATHER THAN RESTATED. An unknown role string never
  * reaches this module's own logic: `roleDefinition` already resolves it to

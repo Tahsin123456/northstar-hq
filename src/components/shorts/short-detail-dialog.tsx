@@ -20,6 +20,7 @@ import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
 import { EMPTY_RESOLUTION } from "@/lib/content-types/resolve";
 import { youtubeShortsUrl, youtubeThumbnailUrl, youtubeWatchUrl } from "@/lib/format";
 import type { NicheFormat } from "@/lib/niches/niche-format";
+import { channelHref } from "@/lib/channel-href";
 
 /**
  * One Short, on its own.
@@ -171,11 +172,7 @@ function ShortDetailBody({
           </a>
 
           <Link
-            href={
-              format === "shorts"
-                ? `/channels/${short.channelId}`
-                : `/longform/channels/${short.channelId}`
-            }
+            href={channelHref(format, short.channelId)}
             className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground transition-colors hover:text-accent"
           >
             <Avatar src={short.channelAvatarUrl} name={short.channelName} size={14} />
