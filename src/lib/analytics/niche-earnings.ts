@@ -478,6 +478,30 @@ export function fullSpanNote(periodDays: number): string {
  */
 export const BASELINE_LAG_FLOOR_MS = 60_000;
 
+/**
+ * The second floor, and the one that does the work: a gap is only worth a
+ * sentence when it is at least this much of the span it is a gap in.
+ *
+ * WHY A PROPORTION AND NOT JUST A MINUTE. Both gaps are now reported, and the
+ * tail gap is almost never exactly zero — the last reading of the last channel
+ * the sweep reached is minutes-to-hours old at any instant. A minute-floored
+ * caveat would therefore print under EVERY figure on the page forever, which
+ * teaches an owner to skip the sentence, which costs them the one reading of it
+ * that mattered: the 36-hour span whose tail gap is a third of the figure.
+ *
+ * A hundredth of the span is the line. Below it the gap cannot move a figure
+ * far enough to change a decision — 7 hours on a 30-day period, 22 minutes on a
+ * 36-hour one — and above it the sentence appears, including in every case
+ * these caveats were written for.
+ */
+export const LAG_NOTE_SPAN_FRACTION = 0.01;
+
+/** Is this gap big enough, against this span, to be worth telling the owner? */
+export function lagWorthStating(lagMs: number | null, spanMs: number): boolean {
+  if (lagMs === null) return false;
+  return lagMs >= Math.max(BASELINE_LAG_FLOOR_MS, spanMs * LAG_NOTE_SPAN_FRACTION);
+}
+
 const HOUR_MS = 3_600_000;
 
 /**
@@ -501,26 +525,56 @@ export function approxDurationCeil(ms: number): string {
 }
 
 /**
- * The caveat for a span some videos only join part way through.
+ * The caveat for a span some videos only join part way through, or leave early.
  *
- * WHY THIS SENTENCE HAS TO EXIST. The measurement now baselines a video whose
- * own history starts a little inside the window on its own first reading,
- * instead of dropping it — see `BASELINE_GRACE_FRACTION`. That fixes a figure
- * that was refusing to appear at all, and it gives up the claim that every
- * video was measured over the identical span. The label may not keep making
- * that claim silently: it names the gap, and it names the DIRECTION of the
- * error, which is the half an owner planning against the number needs.
+ * WHY THIS SENTENCE HAS TO EXIST. The measurement baselines a video whose own
+ * history starts a little inside the window on its own first reading, instead
+ * of dropping it — see `BASELINE_GRACE_FRACTION`. That fixes a figure that was
+ * refusing to appear at all, and it gives up the claim that every video was
+ * measured over the identical span. The label may not keep making that claim
+ * silently: it names the gap, and it names the DIRECTION of the error, which is
+ * the half an owner planning against the number needs.
  *
- * The gap is stated in TIME, not as a percentage of the money. A video's views
- * do not arrive evenly — a Short can take most of its lifetime views in its
- * first hours — so "understated by at most 0.6%" would be a bound nobody can
- * support. "Their first two hours are missing, so this is a little low" is
+ * BOTH ENDS, because the tail is usually the bigger one. A video past its hit
+ * window is snapshotted at most daily, and not at all while its count has not
+ * moved, so its last reading can sit a day behind the period's close. On a
+ * 36-hour measured span that is a third of the figure — with a perfectly clean
+ * head, which is exactly when a head-only caveat said nothing at all.
+ *
+ * The gaps are stated in TIME, not as a percentage of the money. A video's
+ * views do not arrive evenly — a Short can take most of its lifetime views in
+ * its first hours — so "understated by at most 0.6%" would be a bound nobody
+ * can support. "Their first two hours are missing, so this is a little low" is
  * exactly what is known.
+ *
+ * "A LITTLE LOW" IS THE OVERWHELMING CASE AND NOT THE ONLY ONE. A missing head
+ * conceals a purge as easily as it conceals a gain, and a purge inside it makes
+ * the figure high rather than low; `ChannelViewsGained.maxBaselineLagMs`
+ * documents that and a test pins it. The direction is kept in the sentence
+ * anyway, because it is right in every case an owner will meet and it is the
+ * half of the caveat they can act on.
  */
-export function baselineLagNote(lagMs: number): string {
-  return `The app started recording some of these videos up to ${approxDurationCeil(
-    lagMs,
-  )} into that span, so their first views are missing and this figure is a little low.`;
+export function coverageGapNote(headLagMs: number, tailLagMs: number): string {
+  const head = headLagMs > 0 ? approxDurationCeil(headLagMs) : null;
+  const tail = tailLagMs > 0 ? approxDurationCeil(tailLagMs) : null;
+
+  if (head !== null && tail !== null) {
+    return (
+      `The app started recording some of these videos up to ${head} into that span, ` +
+      `and its latest reading for some of them is up to ${tail} before the period ends, ` +
+      `so those views are missing and this figure is a little low.`
+    );
+  }
+  if (head !== null) {
+    return (
+      `The app started recording some of these videos up to ${head} into that span, ` +
+      `so their first views are missing and this figure is a little low.`
+    );
+  }
+  return (
+    `The latest reading for some of these videos is up to ${tail} before the period ends, ` +
+    `so their last views are missing and this figure is a little low.`
+  );
 }
 
 /**
@@ -535,28 +589,71 @@ export function baselineLagNote(lagMs: number): string {
  *
  * THIS NOW SPEAKS WHERE IT USED TO GO SILENT. A response whose clamp never
  * fired — `measuredFromMs === requestedStartMs` — can still carry videos whose
- * own history starts later, and that is exactly the case the ragged-baseline
- * caveat exists for. Returning `null` on the strength of the span alone would
- * hide it precisely when it is the only thing left to say.
+ * own history starts later, or whose last reading stops short of the close, and
+ * those are exactly the cases the coverage-gap caveat exists for. Returning
+ * `null` on the strength of the span alone would hide them precisely when they
+ * are the only thing left to say.
  */
 export function measuredSpanNoteFrom(response: {
   readonly requestedStartMs: number;
   readonly measuredFromMs: number | null;
   readonly endMs: number;
   readonly maxBaselineLagMs: number | null;
+  readonly maxEndLagMs: number | null;
 }): string | null {
-  const { requestedStartMs, measuredFromMs, endMs, maxBaselineLagMs } = response;
+  const { requestedStartMs, measuredFromMs, endMs, maxBaselineLagMs, maxEndLagMs } =
+    response;
   if (measuredFromMs === null) return null;
 
   const periodDays = Math.max(1, Math.round((endMs - requestedStartMs) / DAY_MS));
   const clamped = measuredFromMs > requestedStartMs;
-  const ragged = maxBaselineLagMs !== null && maxBaselineLagMs >= BASELINE_LAG_FLOOR_MS;
 
-  if (!clamped && !ragged) return null;
+  // Both gaps are judged against the span they are gaps IN, not the period the
+  // selector names: a two-hour head is noise in thirty days and a twentieth of
+  // the figure in a day and a half.
+  const spanMs = Math.max(0, endMs - measuredFromMs);
+  const headMs =
+    maxBaselineLagMs !== null && lagWorthStating(maxBaselineLagMs, spanMs)
+      ? maxBaselineLagMs
+      : 0;
+  const tailMs =
+    maxEndLagMs !== null && lagWorthStating(maxEndLagMs, spanMs) ? maxEndLagMs : 0;
+
+  if (!clamped && headMs === 0 && tailMs === 0) return null;
 
   const measuredDays = Math.max(1, Math.round((endMs - measuredFromMs) / DAY_MS));
   const span = clamped ? measuredSpanNote(measuredDays, periodDays) : fullSpanNote(periodDays);
-  return ragged ? `${span} ${baselineLagNote(maxBaselineLagMs)}` : span;
+  if (headMs === 0 && tailMs === 0) return span;
+  return `${span} ${coverageGapNote(headMs, tailMs)}`;
+}
+
+/**
+ * The same note for ONE niche's card, off that niche's own gaps.
+ *
+ * The span half is a fact about the page — the history begins where it begins —
+ * so it comes from the response. The raggedness half is a fact about the videos
+ * in THIS niche, so it comes from the entry: a page-wide maximum rendered under
+ * a single figure asserts a shortfall that niche may not have, which is an
+ * invented caveat attached to a specific number.
+ */
+export function nicheMeasuredSpanNote(
+  response: {
+    readonly requestedStartMs: number;
+    readonly measuredFromMs: number | null;
+    readonly endMs: number;
+  },
+  entry: {
+    readonly maxBaselineLagMs: number;
+    readonly maxEndLagMs: number;
+  } | null,
+): string | null {
+  return measuredSpanNoteFrom({
+    requestedStartMs: response.requestedStartMs,
+    measuredFromMs: response.measuredFromMs,
+    endMs: response.endMs,
+    maxBaselineLagMs: entry === null ? null : entry.maxBaselineLagMs,
+    maxEndLagMs: entry === null ? null : entry.maxEndLagMs,
+  });
 }
 
 // ---------------------------------------------------------------------------

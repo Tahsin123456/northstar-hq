@@ -48,9 +48,16 @@ import { isVideoOfFormat, type NicheFormat } from "@/lib/niches/niche-format";
  *     denominator. The RPM adapter re-applies its own omit rule — absence
  *     becomes `viewsGained: null` becomes `no_view_history` — at its own
  *     boundary, where that meaning belongs.
+ *
+ * WHAT IS SHARED AND NOT OPTIONAL is `Video.statsFetchedAt` as a reading —
+ * see `observedReading`. It is not a per-caller choice because it is not a
+ * policy: it is a view count YouTube actually returned at a known instant, and
+ * a measurement that ignores a reading it holds is not being conservative, it
+ * is discarding evidence.
  */
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 
 /**
  * How far before the window's start a view reading may be and still bracket it.
@@ -80,16 +87,17 @@ export const SNAPSHOT_LOOKBACK_DAYS = 60;
  * takes at most `SYNC_MAX_CHANNELS_PER_RUN` channels an hour and walks them
  * sequentially, so the first capture of channel 1 and the first capture of
  * channel 10 are minutes-to-hours apart — 49 minutes apart across ten channels
- * in the local database, and further apart the more channels an org tracks.
+ * in the local database, and a full hour further apart for every additional 25
+ * channels an org tracks, because that is one more hourly batch.
  *
- * The niche caller measures from `max(requestedStart, earliest snapshot in the
- * org)`. Whenever the requested period reaches back past the history — every
- * 30- and 90-day period between now and December — that resolves to THE ONE
- * INSTANT AT WHICH COVERAGE IS MINIMISED: the only videos holding a reading
- * at-or-before it are the ones in whichever channel happened to be swept first.
- * Every other video was dropped from both the sum and the covered count, so
- * coverage came out at 6% against a 0.9 floor and every niche rendered "Not
- * enough view history yet" while an owner had RPM ranges entered.
+ * The niche caller measures from `max(requestedStart, earliest snapshot among
+ * the videos being priced)`. Whenever the requested period reaches back past
+ * the history — every 30- and 90-day period between now and December — that
+ * resolves to THE ONE INSTANT AT WHICH COVERAGE IS MINIMISED: the only videos
+ * holding a reading at-or-before it are the ones in whichever channel happened
+ * to be swept first. Every other video was dropped from both the sum and the
+ * covered count, so coverage came out at 6% against a 0.9 floor and every niche
+ * rendered "Not enough view history yet" while an owner had RPM ranges entered.
  *
  * It is not a launch artifact, either. The identical trap re-fires for a full
  * period EVERY TIME A CHANNEL IS ADDED to the tracker: its videos hold no
@@ -98,12 +106,36 @@ export const SNAPSHOT_LOOKBACK_DAYS = 60;
  * niche's library blacks that niche's money figure out for a month.
  *
  * So a video whose own history starts a little INSIDE the window is measured
- * from its own first reading instead of being thrown away. "A little" is this
- * fraction of the span — 36 hours out of 30 days, 8.4 hours out of 7 — which is
- * far wider than any sweep spread and far narrower than a newly-added channel's
- * missing weeks. That is what keeps the coverage floor meaningful: a video whose
- * history starts three weeks into a thirty-day window is still dropped, because
- * calling its last nine days a thirty-day gain is a distortion, not a rounding.
+ * from its own first reading instead of being thrown away.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY "A LITTLE" IS A FRACTION *AND* A FLOOR, AND WHAT THE FRACTION ALONE COST
+ * ---------------------------------------------------------------------------
+ * The fraction alone was wrong on the exact day this fix exists to rescue. The
+ * sweep's spread is an ABSOLUTE quantity — an hour per 25 channels, whatever
+ * the period on the selector — while a fraction of the span is smallest
+ * precisely when the history is youngest and the spread is proportionally
+ * largest. At 5% of the span, the rescue only fired when the sweep spread was
+ * under a twentieth of the elapsed history: on 2 September, with history from
+ * the 1st, that is 108 minutes of allowance against a spread that is already
+ * an hour at 25 channels and three hours at 60. Simulated at 60 channels the
+ * page still read "Not enough view history yet" on both the 7- and 30-day
+ * periods — the fix had not fixed the day it was written for.
+ *
+ * So the allowance is `clamp(span × FRACTION, FLOOR, span × MAX_FRACTION)`:
+ *
+ *   • the FLOOR is sized to the collector, not to the period. Six hours covers
+ *     a sweep of 150 channels, which is the spread that matters on day two.
+ *   • the FRACTION governs once the span is long enough for it to dominate —
+ *     36 hours out of 30 days, 8.4 out of 7 — which is what keeps a newly
+ *     added channel's missing WEEKS outside the grace on a long period.
+ *   • the MAX_FRACTION stops the floor from swallowing a very short span: a
+ *     six-hour allowance on an eight-hour window would mean baselining videos
+ *     three-quarters of the way through it and calling that the period.
+ *
+ * That is what keeps the coverage floor meaningful: a video whose history
+ * starts three weeks into a thirty-day window is still dropped, because calling
+ * its last nine days a thirty-day gain is a distortion, not a rounding.
  *
  * DO NOT REPLACE THIS WITH A LATER ORG-WIDE MINIMUM. Moving the one shared
  * start forward to a percentile of first-snapshot times looks equivalent and is
@@ -113,9 +145,33 @@ export const SNAPSHOT_LOOKBACK_DAYS = 60;
  */
 export const BASELINE_GRACE_FRACTION = 0.05;
 
-/** The grace an `[startMs, endMs)` span earns under `BASELINE_GRACE_FRACTION`. */
+/**
+ * The smallest grace any span earns, sized to the SWEEP rather than the period.
+ *
+ * Six hours is nine hourly batches of 25 channels — 150 channels' worth of
+ * first-ever captures — so the day-two rescue no longer depends on the org
+ * being small. See `BASELINE_GRACE_FRACTION` for the failure this floor kills.
+ */
+export const BASELINE_GRACE_FLOOR_MS = 6 * HOUR_MS;
+
+/**
+ * The hard cap on the grace, as a fraction of the span.
+ *
+ * The floor may never take more than a quarter of the window: past that, "a
+ * video whose history starts a little inside the window" stops being true and
+ * the label's bound stops being a caveat and starts being the figure.
+ */
+export const BASELINE_GRACE_MAX_FRACTION = 0.25;
+
+/** The grace an `[startMs, endMs)` span earns. See the constants above. */
 export function baselineGraceMsFor(startMs: number, endMs: number): number {
-  return Math.max(0, Math.round((endMs - startMs) * BASELINE_GRACE_FRACTION));
+  const spanMs = Math.max(0, endMs - startMs);
+  return Math.round(
+    Math.min(
+      spanMs * BASELINE_GRACE_MAX_FRACTION,
+      Math.max(spanMs * BASELINE_GRACE_FRACTION, BASELINE_GRACE_FLOOR_MS),
+    ),
+  );
 }
 
 /** The half-open instant window a delta is measured over. */
@@ -136,16 +192,50 @@ export interface ChannelViewsGained {
   /**
    * The worst baseline actually used, as milliseconds after `window.startMs`.
    *
-   * 0 — and always 0 without `baselineGraceMs` — means every covered video was
-   * measured from a reading at or before the window's start, so the sum covers
-   * the whole span for every video in it. Above 0 it is the exact size of the
-   * head of the span that the raggedest video is missing, which is what lets
-   * the label state a TRUE bound rather than the cap's worst case. The figure
-   * is understated by at most this much of one video's history and never
-   * overstated: a later baseline can only subtract views that were already
-   * there.
+   * 0 — and always 0 without `baselineGraceMs` — means no covered video was
+   * baselined after the window opened. It says nothing about the OTHER end of
+   * the span; `maxEndLagMs` is that half, and the two are reported separately
+   * because they have different causes and different sizes.
+   *
+   * Above 0 it is the exact size of the head of the span the raggedest video is
+   * missing, which is what lets the label state a TRUE bound rather than the
+   * cap's worst case. The missing head USUALLY understates the figure — a later
+   * baseline subtracts views that were already there — but not always: if
+   * YouTube purged that video's count between the window's start and its
+   * effective baseline, the purge is invisible to the delta and the figure is
+   * overstated by it. Bounded in TIME by the grace, not in magnitude. Kept
+   * anyway, because the alternative (dropping the video) distorts the total and
+   * the own/competitor split by sweep order, which is worse and unbounded.
    */
   readonly maxBaselineLagMs: number;
+  /**
+   * The worst END reading actually used, as milliseconds BEFORE the window's
+   * close (or before now, when the window has not closed yet — no reading can
+   * exist in the future, so counting the unelapsed remainder of today as a
+   * measurement gap would be nonsense).
+   *
+   * THE TAIL IS NOT SYMMETRIC WITH THE HEAD AND IS OFTEN THE LARGER GAP. A
+   * video past its hit window is snapshotted at most daily
+   * (`AFTER_WINDOW_INTERVAL_MINUTES`), and `channel-sync` writes no row at all
+   * when the count has not moved, so the last SNAPSHOT can sit a day or more
+   * behind the window's close. On a 36-hour measured span that is a third of
+   * the span missing at the end, with a perfectly clean head — which is exactly
+   * the case a head-only caveat went silent for while the figure was a third
+   * low. `observedReading` closes most of this gap by treating the live
+   * `Video.viewCount` as the reading it is; what remains is reported here.
+   */
+  readonly maxEndLagMs: number;
+}
+
+/** The video columns the measurement reads. */
+interface VideoRow {
+  readonly snapshots: readonly { capturedAt: Date; viewCount: bigint }[];
+  /** The live lifetime counter, as of `statsFetchedAt`. */
+  readonly viewCount?: bigint | number | null;
+  /** When YouTube last returned statistics for this video. */
+  readonly statsFetchedAt?: Date | null;
+  /** False once YouTube stops returning it — see `observedReading`. */
+  readonly isAvailable?: boolean | null;
 }
 
 /**
@@ -186,20 +276,37 @@ export async function viewsGainedByChannel(params: {
    * OPT-IN, AND THE RPM DENOMINATOR MUST NEVER OPT IN. See
    * `BASELINE_GRACE_FRACTION` for why the niche money figures need this. The
    * asymmetry that keeps it off the other caller: in the niche figures a short
-   * baseline UNDERSTATES money, which is the safe direction, while the derived
-   * rate is `revenue / viewsGained`, so a denominator short by a tenth raises
-   * the rate by an ninth — and that rate then multiplies EVERY niche's views
-   * into money. There, refusing with `no_view_history` until the history
+   * baseline USUALLY UNDERSTATES money, which is the safe direction, while the
+   * derived rate is `revenue / viewsGained`, so a denominator short by a tenth
+   * raises the rate by a ninth — and that rate then multiplies EVERY niche's
+   * views into money. There, refusing with `no_view_history` until the history
    * genuinely brackets the window, and falling through to the owner's
    * hand-entered range, is the honest answer.
    */
   readonly baselineGraceMs?: number;
+  /**
+   * The present instant, for the END-lag report only — never for choosing a
+   * reading. Injected so a test can pin the tail gap without reaching for the
+   * clock; production leaves it alone.
+   */
+  readonly nowMs?: number;
 }): Promise<ReadonlyMap<string, ChannelViewsGained>> {
   const { organizationId, channelIds, window, format } = params;
   const baselineGraceMs = Math.max(0, params.baselineGraceMs ?? 0);
   const graceLimitMs = window.startMs + baselineGraceMs;
   const endDate = new Date(window.endMs);
-  const lookbackFrom = new Date(window.startMs - SNAPSHOT_LOOKBACK_DAYS * DAY_MS);
+  const lookbackFromMs = window.startMs - SNAPSHOT_LOOKBACK_DAYS * DAY_MS;
+  const lookbackFrom = new Date(lookbackFromMs);
+  /** The same bounds for every reading, snapshot or live counter alike. */
+  const reach = { fromMs: lookbackFromMs, toMs: window.endMs };
+  /*
+   * What the END lag is measured back from. `endMs` is routinely in the FUTURE
+   * — the niches page snaps its range up to the next UTC midnight — and no
+   * reading can be taken after now, so measuring the tail against `endMs`
+   * would report the unelapsed remainder of today as missing data under every
+   * figure on the page.
+   */
+  const lagAnchorMs = Math.min(window.endMs, params.nowMs ?? Date.now());
 
   const videos = await prisma.video.findMany({
     where: {
@@ -218,6 +325,12 @@ export async function viewsGainedByChannel(params: {
       // different columns — `isVideoOfFormat` is the one home of that rule.
       isShort: true,
       classification: true,
+      // The live counter and the instant it was fetched: together they are a
+      // reading the snapshot series deliberately does not duplicate. See
+      // `observedReading`.
+      viewCount: true,
+      statsFetchedAt: true,
+      isAvailable: true,
       snapshots: {
         where: { capturedAt: { gte: lookbackFrom, lt: endDate } },
         select: { capturedAt: true, viewCount: true },
@@ -228,13 +341,25 @@ export async function viewsGainedByChannel(params: {
 
   const totals = new Map<
     string,
-    { gained: number; covered: number; total: number; lagMs: number }
+    {
+      gained: number;
+      covered: number;
+      total: number;
+      baselineLagMs: number;
+      endLagMs: number;
+    }
   >();
   // Seeded for every asked-about channel, so a channel with no videos at all
   // answers `{ 0, 0, 0 }` rather than vanishing — "nothing to measure" is an
   // answer the coverage arithmetic downstream has to be able to count.
   for (const channelId of channelIds) {
-    totals.set(channelId, { gained: 0, covered: 0, total: 0, lagMs: 0 });
+    totals.set(channelId, {
+      gained: 0,
+      covered: 0,
+      total: 0,
+      baselineLagMs: 0,
+      endLagMs: 0,
+    });
   }
 
   for (const video of videos) {
@@ -248,28 +373,36 @@ export async function viewsGainedByChannel(params: {
     if (!bucket) continue;
     bucket.total += 1;
 
+    const readings = readingsFor(video, reach);
+
     // Views at the window's close: the last reading taken before it. The
-    // current lifetime total is NOT a substitute — it is today's number, and
-    // using it would credit the window with everything earned since.
-    const atEnd = lastAtOrBefore(video.snapshots, window.endMs);
+    // current lifetime total is NOT a substitute for the window's end — it is
+    // today's number — but it IS a reading at its own fetch instant, which is
+    // why `readingsFor` carries it and `maxEndLagMs` reports how far short of
+    // the close the reading actually used falls.
+    const atEnd = lastAtOrBefore(readings, window.endMs);
     if (atEnd === null) continue;
+
+    const endLagMs = Math.max(0, lagAnchorMs - atEnd.capturedMs);
 
     if (video.publishedAt !== null && video.publishedAt.getTime() >= window.startMs) {
       // Published inside the window, so it started at nothing. This is the
       // one case where a zero baseline is a fact rather than an assumption.
-      // It carries no lag: publication IS the baseline instant, exactly.
+      // It carries no head lag: publication IS the baseline instant, exactly.
       bucket.gained += atEnd.views;
       bucket.covered += 1;
+      if (endLagMs > bucket.endLagMs) bucket.endLagMs = endLagMs;
       continue;
     }
 
-    const atStart = lastAtOrBefore(video.snapshots, window.startMs);
+    const atStart = lastAtOrBefore(readings, window.startMs);
     if (atStart !== null) {
       // Views can fall when YouTube purges inflated counts, and a negative
       // delta is real. It is kept rather than clamped: clamping every
       // negative to zero would bias the total upward, one video at a time.
       bucket.gained += atEnd.views - atStart.views;
       bucket.covered += 1;
+      if (endLagMs > bucket.endLagMs) bucket.endLagMs = endLagMs;
       continue;
     }
 
@@ -279,26 +412,32 @@ export async function viewsGainedByChannel(params: {
      * Its views at that instant are still genuinely unknown, so it is still
      * never zero-based; what changes is that its OWN first reading may stand in
      * as the baseline when that reading sits within the grace. The gain then
-     * covers a slightly shorter span than the window, which UNDERSTATES it —
-     * views the video already held at that first reading are subtracted out,
-     * and a reading can only be larger than an earlier one absent a purge — and
-     * `maxBaselineLagMs` carries exactly how short so the label can say so.
-     * Dropping it instead loses 100% of that video's gains AND, through
-     * `coveredVideos`, decides the own/competitor split by sweep order.
+     * covers a slightly shorter span than the window, which normally
+     * UNDERSTATES it — views the video already held at that first reading are
+     * subtracted out — and `maxBaselineLagMs` carries exactly how short so the
+     * label can say so. The exception is a purge landing inside that head, which
+     * the delta cannot see and which overstates instead; it is bounded in time
+     * by the grace and pinned by a test rather than asserted away. Dropping the
+     * video instead loses 100% of its gains AND, through `coveredVideos`,
+     * decides the own/competitor split by sweep order.
      *
      * TWO READINGS ARE REQUIRED, not one. A video whose only reading in the
      * window is its baseline has no delta to measure at all; counting it as
      * covered at zero gain would inflate coverage with a video nothing was
-     * measured from and hide it behind the very floor meant to catch it.
+     * measured from and hide it behind the very floor meant to catch it. This
+     * is NOT the stalled-video case — a Short nobody is watching still gets its
+     * counter fetched, so `observedReading` gives it a genuine second reading
+     * and a genuine zero. See that function for why that distinction matters.
      */
     if (baselineGraceMs === 0) continue;
-    const effective = firstInRange(video.snapshots, window.startMs, graceLimitMs);
+    const effective = firstInRange(readings, window.startMs, graceLimitMs);
     if (effective === null || effective.capturedMs >= atEnd.capturedMs) continue;
 
     bucket.gained += atEnd.views - effective.views;
     bucket.covered += 1;
-    const lagMs = effective.capturedMs - window.startMs;
-    if (lagMs > bucket.lagMs) bucket.lagMs = lagMs;
+    const baselineLagMs = effective.capturedMs - window.startMs;
+    if (baselineLagMs > bucket.baselineLagMs) bucket.baselineLagMs = baselineLagMs;
+    if (endLagMs > bucket.endLagMs) bucket.endLagMs = endLagMs;
   }
 
   const map = new Map<string, ChannelViewsGained>();
@@ -307,7 +446,8 @@ export async function viewsGainedByChannel(params: {
       viewsGained: bucket.gained,
       coveredVideos: bucket.covered,
       totalVideos: bucket.total,
-      maxBaselineLagMs: bucket.lagMs,
+      maxBaselineLagMs: bucket.baselineLagMs,
+      maxEndLagMs: bucket.endLagMs,
     });
   }
   return map;
@@ -318,18 +458,83 @@ interface Reading {
   readonly views: number;
 }
 
+/**
+ * THE READING THE SNAPSHOT SERIES DELIBERATELY DOES NOT HOLD.
+ *
+ * `channel-sync` writes a `VideoSnapshot` row only when the interval has
+ * elapsed AND the count actually moved (`if (!dueByTime || !changed) continue`).
+ * That is the right storage decision and it creates a measurement trap: a
+ * stalled Short — one the sync fetched, looked at, and found unchanged — keeps
+ * exactly ONE row forever. Under the delta rules alone that video is
+ * "unmeasured", so it is dropped and it DEPRESSES COVERAGE, pushing a niche
+ * under the 0.9 floor and printing "Not enough view history yet" over a library
+ * whose gain is not unknown at all: it is known, and it is zero. Simulated on a
+ * mature library with a benign 49-minute sweep spread, three stalled Shorts in
+ * ten took coverage to 0.73 on their own.
+ *
+ * `Video.viewCount` and `Video.statsFetchedAt` are written together on every
+ * successful fetch, so the pair IS a reading: "this video had exactly this many
+ * views at this instant". Admitting it is not an assumption and not a
+ * relaxation of the two-readings rule — it is the second reading, and the app
+ * had it all along.
+ *
+ * THREE CONDITIONS, each load-bearing:
+ *   • `isAvailable`, because the vanished-video path stamps `statsFetchedAt`
+ *     WITHOUT refreshing `viewCount` (`channel-sync.ts`: `data: { isAvailable:
+ *     false, statsFetchedAt: now }`). Reading that pair would date a stale
+ *     count to a fresh instant, which is the one way this could fabricate.
+ *   • inside the same `SNAPSHOT_LOOKBACK_DAYS` window the snapshot query is
+ *     bounded by, at both ends. Past the close it is not a reading in this
+ *     window; before the lookback it is the reading of a video the collector
+ *     has genuinely stopped seeing, which that constant deliberately treats as
+ *     UNCOVERED rather than as having stood still.
+ *   • present at all — a caller or fixture that did not select these columns
+ *     gets the snapshot-only behaviour, unchanged.
+ *
+ * WHAT THIS DOES TO THE DERIVED-RPM CALLER: nothing, in production. That
+ * window ends `RPM_SETTLE_DAYS` before today, so `statsFetchedAt` is always
+ * after it and this reading is never eligible. Where it ever were — a channel
+ * not synced for longer than the settle — it can only ADD a later end reading,
+ * which grows the denominator and LOWERS the derived rate. The unsafe direction
+ * for that caller is a short denominator, and this cannot produce one.
+ */
+function observedReading(video: VideoRow, reach: ReadingReach): Reading | null {
+  const { statsFetchedAt, viewCount, isAvailable } = video;
+  if (!statsFetchedAt || viewCount === null || viewCount === undefined) return null;
+  if (isAvailable !== true) return null;
+
+  const capturedMs = statsFetchedAt.getTime();
+  if (!Number.isFinite(capturedMs)) return null;
+  if (capturedMs > reach.toMs || capturedMs < reach.fromMs) return null;
+
+  const views = Number(viewCount);
+  if (!Number.isFinite(views)) return null;
+  return { capturedMs, views };
+}
+
+/** The instants a reading may fall between — the snapshot query's own bounds. */
+interface ReadingReach {
+  readonly fromMs: number;
+  readonly toMs: number;
+}
+
+/** Every reading this video offers inside the window's reach, unordered. */
+function readingsFor(video: VideoRow, reach: ReadingReach): readonly Reading[] {
+  const readings: Reading[] = video.snapshots.map((snapshot) => ({
+    capturedMs: snapshot.capturedAt.getTime(),
+    views: Number(snapshot.viewCount),
+  }));
+  const observed = observedReading(video, reach);
+  if (observed !== null) readings.push(observed);
+  return readings;
+}
+
 /** The last reading at or before an instant, or null when there is none. */
-function lastAtOrBefore(
-  snapshots: readonly { capturedAt: Date; viewCount: bigint }[],
-  atMs: number,
-): Reading | null {
+function lastAtOrBefore(readings: readonly Reading[], atMs: number): Reading | null {
   let best: Reading | null = null;
-  for (const snapshot of snapshots) {
-    const capturedMs = snapshot.capturedAt.getTime();
-    if (capturedMs > atMs) continue;
-    if (best === null || capturedMs > best.capturedMs) {
-      best = { capturedMs, views: Number(snapshot.viewCount) };
-    }
+  for (const reading of readings) {
+    if (reading.capturedMs > atMs) continue;
+    if (best === null || reading.capturedMs > best.capturedMs) best = reading;
   }
   return best;
 }
@@ -342,17 +547,14 @@ function lastAtOrBefore(
  * baselining a video on whichever reading happened to be listed first.
  */
 function firstInRange(
-  snapshots: readonly { capturedAt: Date; viewCount: bigint }[],
+  readings: readonly Reading[],
   fromMs: number,
   toMs: number,
 ): Reading | null {
   let best: Reading | null = null;
-  for (const snapshot of snapshots) {
-    const capturedMs = snapshot.capturedAt.getTime();
-    if (capturedMs < fromMs || capturedMs > toMs) continue;
-    if (best === null || capturedMs < best.capturedMs) {
-      best = { capturedMs, views: Number(snapshot.viewCount) };
-    }
+  for (const reading of readings) {
+    if (reading.capturedMs < fromMs || reading.capturedMs > toMs) continue;
+    if (best === null || reading.capturedMs < best.capturedMs) best = reading;
   }
   return best;
 }

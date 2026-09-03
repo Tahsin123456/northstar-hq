@@ -67,7 +67,7 @@ import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-nich
 import { nicheGainedById, useNicheViewsGained } from "@/hooks/use-views-gained";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
-import { measuredSpanNoteFrom } from "@/lib/analytics/niche-earnings";
+import { nicheMeasuredSpanNote } from "@/lib/analytics/niche-earnings";
 import type { NicheDTO, NicheViewsGainedEntryDTO } from "@/lib/dto";
 import {
   NICHE_KIND_DESCRIPTION,
@@ -116,15 +116,32 @@ export default function NichesPage() {
   const pageFormat = useDatasetFormat();
   const canReadEconomics = useCanReadNicheEconomics();
   const gainsQuery = useNicheViewsGained(pageFormat, range, canReadEconomics);
-  const gains: NicheGainsView = React.useMemo(
-    () => ({
-      byId: gainsQuery.data === undefined ? null : nicheGainedById(gainsQuery.data),
+  const gains: NicheGainsView = React.useMemo(() => {
+    const data = gainsQuery.data;
+    return {
+      byId: data === undefined ? null : nicheGainedById(data),
       loading: canReadEconomics && gainsQuery.isPending,
       error: gainsQuery.isError,
-      note: gainsQuery.data === undefined ? null : measuredSpanNoteFrom(gainsQuery.data),
-    }),
-    [canReadEconomics, gainsQuery.data, gainsQuery.isPending, gainsQuery.isError],
-  );
+      /*
+       * ONE NOTE PER NICHE, not one note for the page.
+       *
+       * The span half of the sentence is page-level — the history begins where
+       * it begins — but the raggedness half is a claim about the videos under
+       * the figure it sits beneath. Built here off each entry's own lags, so a
+       * niche every one of whose videos was measured end to end does not carry
+       * another niche's caveat under its money.
+       */
+      noteById:
+        data === undefined
+          ? null
+          : new Map(
+              data.niches.map((entry) => [
+                entry.nicheId,
+                nicheMeasuredSpanNote(data, entry),
+              ]),
+            ),
+    };
+  }, [canReadEconomics, gainsQuery.data, gainsQuery.isPending, gainsQuery.isError]);
 
   /*
    * Unconfigured niches float to the top.
@@ -280,8 +297,12 @@ interface NicheGainsView {
   readonly byId: ReadonlyMap<string, NicheViewsGainedEntryDTO> | null;
   readonly loading: boolean;
   readonly error: boolean;
-  /** "Measured over the last N of M days…" when the history falls short. */
-  readonly note: string | null;
+  /**
+   * "Measured over the last N of M days…" when the history falls short, plus
+   * that niche's OWN coverage gaps when it has any. Keyed per niche because the
+   * sentence is rendered under one niche's money figure.
+   */
+  readonly noteById: ReadonlyMap<string, string | null> | null;
 }
 
 function NicheKindGroup({
@@ -584,7 +605,7 @@ function NicheCard({
           gained={gains.byId?.get(niche.id) ?? null}
           loading={gains.loading}
           error={gains.error}
-          measuredNote={gains.note}
+          measuredNote={gains.noteById?.get(niche.id) ?? null}
         />
 
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">

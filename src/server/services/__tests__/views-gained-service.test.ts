@@ -40,7 +40,14 @@ function snapshot(capturedAtMs: number, viewCount: number) {
   return { capturedAt: new Date(capturedAtMs), viewCount: BigInt(viewCount) };
 }
 
-/** A video row as the service selects it. A positively classified Short. */
+/**
+ * A video row as the service selects it. A positively classified Short.
+ *
+ * `viewCount` / `statsFetchedAt` / `isAvailable` are OMITTED unless a case asks
+ * for them, which is deliberate: a row without them exercises the snapshot-only
+ * rules exactly as they stood, so every pin below that predates
+ * `observedReading` still pins what it always pinned.
+ */
 function video(overrides: {
   id: string;
   channelId: string;
@@ -48,6 +55,8 @@ function video(overrides: {
   snapshots: readonly { capturedAt: Date; viewCount: bigint }[];
   isShort?: boolean;
   classification?: string;
+  /** The live counter, and the instant YouTube last returned it. */
+  observed?: { atMs: number; views: number; isAvailable?: boolean };
 }) {
   return {
     id: overrides.id,
@@ -56,8 +65,21 @@ function video(overrides: {
     isShort: overrides.isShort ?? true,
     classification: overrides.classification ?? "short",
     snapshots: overrides.snapshots,
+    ...(overrides.observed === undefined
+      ? {}
+      : {
+          viewCount: BigInt(overrides.observed.views),
+          statsFetchedAt: new Date(overrides.observed.atMs),
+          isAvailable: overrides.observed.isAvailable ?? true,
+        }),
   };
 }
+
+/**
+ * `nowMs` defaults to a day past the window, so the end-lag every case reports
+ * is measured back from the window's own close rather than from the wall clock.
+ */
+const NOW_MS = END_MS + DAY_MS;
 
 async function measure(
   rows: readonly unknown[],
@@ -65,13 +87,16 @@ async function measure(
     channelIds?: readonly string[];
     format?: "shorts" | "longform";
     baselineGraceMs?: number;
+    window?: { startMs: number; endMs: number };
+    nowMs?: number;
   } = {},
 ) {
   mocks.videoFindMany.mockResolvedValue(rows);
   return viewsGainedByChannel({
     organizationId: ORG_ID,
     channelIds: options.channelIds ?? ["chan_a"],
-    window: WINDOW,
+    window: options.window ?? WINDOW,
+    nowMs: options.nowMs ?? NOW_MS,
     ...(options.format === undefined ? {} : { format: options.format }),
     ...(options.baselineGraceMs === undefined
       ? {}
@@ -103,6 +128,7 @@ describe("the delta rules", () => {
       // Publication IS the baseline instant, so nothing is missing from the head
       // of the span — a factual zero carries no lag.
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 
@@ -132,6 +158,7 @@ describe("the delta rules", () => {
       totalVideos: 2,
       // No grace was asked for, so nothing was baselined late.
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 
@@ -169,6 +196,7 @@ describe("the delta rules", () => {
       coveredVideos: 0,
       totalVideos: 1,
       maxBaselineLagMs: 0,
+      maxEndLagMs: 0,
     });
     // A channel with no videos at all still answers, with an empty library.
     expect(gained.get("chan_empty")).toEqual({
@@ -176,6 +204,7 @@ describe("the delta rules", () => {
       coveredVideos: 0,
       totalVideos: 0,
       maxBaselineLagMs: 0,
+      maxEndLagMs: 0,
     });
   });
 });
@@ -228,7 +257,7 @@ describe("the baseline grace", () => {
       new Map([
         [
           "chan_a",
-          { viewsGained: 50_000, coveredVideos: 1, totalVideos: 2, maxBaselineLagMs: 0 },
+          { viewsGained: 50_000, coveredVideos: 1, totalVideos: 2, maxBaselineLagMs: 0, maxEndLagMs: DAY_MS },
         ],
       ]),
     );
@@ -244,6 +273,7 @@ describe("the baseline grace", () => {
             coveredVideos: 2,
             totalVideos: 2,
             maxBaselineLagMs: 2 * HOUR_MS,
+            maxEndLagMs: DAY_MS,
           },
         ],
       ]),
@@ -304,6 +334,7 @@ describe("the baseline grace", () => {
       coveredVideos: 1,
       totalVideos: 2,
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 
@@ -327,6 +358,7 @@ describe("the baseline grace", () => {
       coveredVideos: 0,
       totalVideos: 1,
       maxBaselineLagMs: 0,
+      maxEndLagMs: 0,
     });
   });
 
@@ -359,6 +391,7 @@ describe("the baseline grace", () => {
       coveredVideos: 2,
       totalVideos: 2,
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 
@@ -367,6 +400,300 @@ describe("the baseline grace", () => {
     expect(baselineGraceMsFor(START_MS, START_MS + 7 * DAY_MS)).toBe(8.4 * HOUR_MS);
     // A window with no width earns no allowance at all.
     expect(baselineGraceMsFor(START_MS, START_MS)).toBe(0);
+  });
+
+  /**
+   * =======================================================================
+   * THE FLOOR — WHY THE FRACTION ALONE FAILED ON THE DAY IT WAS WRITTEN FOR
+   * =======================================================================
+   *
+   * The sweep's spread is ABSOLUTE — an hour per 25 channels — while a fraction
+   * of the span is smallest exactly when the history is youngest. At 5% and
+   * nothing else, 2 September with history from the 1st gave 108 minutes of
+   * allowance against a spread that is already an hour at 25 channels and three
+   * hours at 60, so the rescue did not fire on the day it exists for: simulated
+   * at 60 channels the page still read "Not enough view history yet" on both the
+   * 7- and 30-day periods.
+   */
+  it("floors the grace at six hours, so day two is sized to the sweep not to the span", () => {
+    // 36 hours of history: a twentieth is 108 minutes, which does not cover an
+    // hourly sweep of even 50 channels. The floor does.
+    expect(baselineGraceMsFor(START_MS, START_MS + 36 * HOUR_MS)).toBe(6 * HOUR_MS);
+    expect(baselineGraceMsFor(START_MS, START_MS + 5 * DAY_MS)).toBe(6 * HOUR_MS);
+    // Once the fraction overtakes the floor it governs again, unchanged.
+    expect(baselineGraceMsFor(START_MS, START_MS + 6 * DAY_MS)).toBe(7.2 * HOUR_MS);
+  });
+
+  it("caps the floor at a quarter of the span, so a tiny window is not swallowed", () => {
+    // Eight hours of history earns two, not six: past a quarter, "a little way
+    // into the window" stops being true and the bound becomes the figure.
+    expect(baselineGraceMsFor(START_MS, START_MS + 8 * HOUR_MS)).toBe(2 * HOUR_MS);
+  });
+
+  it("rescues the straggler on a 36-hour span, which the fraction alone did not", async () => {
+    const shortWindow = { startMs: START_MS, endMs: START_MS + 36 * HOUR_MS };
+    const rows = [
+      video({
+        id: "vid_first",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        snapshots: [
+          snapshot(START_MS, 1_000_000),
+          snapshot(START_MS + 30 * HOUR_MS, 1_050_000),
+        ],
+      }),
+      video({
+        // Three hours into the run: the 60-channel sweep's last batch.
+        id: "vid_late",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        snapshots: [
+          snapshot(START_MS + 3 * HOUR_MS, 2_000_000),
+          snapshot(START_MS + 30 * HOUR_MS, 2_020_000),
+        ],
+      }),
+    ];
+
+    // The old 108-minute allowance: the straggler falls outside it, coverage is
+    // 0.5, and the niche is refused — on the exact day the grace exists for.
+    const underFractionOnly = await measure(rows, {
+      window: shortWindow,
+      nowMs: shortWindow.endMs,
+      baselineGraceMs: Math.round(36 * HOUR_MS * 0.05),
+    });
+    expect(underFractionOnly.get("chan_a")?.coveredVideos).toBe(1);
+
+    const gained = await measure(rows, {
+      window: shortWindow,
+      nowMs: shortWindow.endMs,
+      baselineGraceMs: baselineGraceMsFor(shortWindow.startMs, shortWindow.endMs),
+    });
+    expect(gained.get("chan_a")).toEqual({
+      viewsGained: 70_000,
+      coveredVideos: 2,
+      totalVideos: 2,
+      maxBaselineLagMs: 3 * HOUR_MS,
+      maxEndLagMs: 6 * HOUR_MS,
+    });
+  });
+
+  /**
+   * =======================================================================
+   * THE ONE DIRECTION THE GRACE CAN GET WRONG, PINNED RATHER THAN ASSERTED AWAY
+   * =======================================================================
+   *
+   * "A later baseline can only subtract views that were already there" holds
+   * unless YouTube purged the count inside the missing head. Then the graced
+   * delta measures from AFTER the purge and reports a gain where the truth is a
+   * loss. It is bounded in TIME by the grace and not in magnitude, and it is
+   * still the better of the two options — dropping the video loses all of its
+   * gains and decides the own/competitor split by sweep order. What it may not
+   * be is undocumented, which is what this case is for.
+   */
+  it("can OVERSTATE when a purge lands inside the graced head — the known exception", async () => {
+    const purged = [
+      video({
+        id: "vid_purged_in_head",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        snapshots: [
+          // What really happened: 10,000,000 at the start, purged to 1,000,000
+          // two hours in. The true delta over the window is −8,900,000.
+          snapshot(START_MS + 2 * HOUR_MS, 1_000_000),
+          snapshot(END_MS - DAY_MS, 1_100_000),
+        ],
+      }),
+    ];
+
+    const graced = await measure(purged, { baselineGraceMs: GRACE_MS });
+    expect(graced.get("chan_a")?.viewsGained).toBe(100_000);
+
+    // The same video WITH the pre-purge reading the sweep would have taken.
+    const truth = await measure([
+      video({
+        id: "vid_purged_in_head",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        snapshots: [
+          snapshot(START_MS - HOUR_MS, 10_000_000),
+          snapshot(START_MS + 2 * HOUR_MS, 1_000_000),
+          snapshot(END_MS - DAY_MS, 1_100_000),
+        ],
+      }),
+    ]);
+    expect(truth.get("chan_a")?.viewsGained).toBe(-8_900_000);
+
+    // Overstated, not understated — and the lag that bounds it is reported, in
+    // time, which is the only thing about it that is bounded.
+    expect(graced.get("chan_a")!.viewsGained).toBeGreaterThan(
+      truth.get("chan_a")!.viewsGained,
+    );
+    expect(graced.get("chan_a")?.maxBaselineLagMs).toBe(2 * HOUR_MS);
+  });
+});
+
+/**
+ * =========================================================================
+ * THE READING THE SNAPSHOT SERIES DELIBERATELY DOES NOT HOLD
+ * =========================================================================
+ *
+ * `channel-sync` writes no snapshot row when the view count has not moved, so a
+ * stalled Short keeps exactly one row forever. Under the delta rules alone that
+ * video reads as UNMEASURED and depresses coverage — a dead long tail whose
+ * gain is not unknown at all, because the sync ran, fetched it, and saw no
+ * change. `Video.viewCount` and `Video.statsFetchedAt` are written together on
+ * every fetch, so the pair is a reading, and this is the second cause of the
+ * owner's blackout: with a benign 49-minute sweep spread, three stalled Shorts
+ * in ten took coverage to 0.73 against a 0.9 floor.
+ */
+describe("the live counter as a reading", () => {
+  it("measures a stalled video at a real zero instead of dropping it", async () => {
+    const stalled = video({
+      id: "vid_stalled",
+      channelId: "chan_a",
+      publishedAtMs: START_MS - 90 * DAY_MS,
+      // One first-ever snapshot inside the window, then nothing: the count
+      // never moved, so `channel-sync` never wrote another row.
+      snapshots: [snapshot(START_MS + HOUR_MS, 4_000_000)],
+      // ...but the sync kept fetching it, and it is still 4,000,000.
+      observed: { atMs: END_MS - HOUR_MS, views: 4_000_000 },
+    });
+
+    // WITHOUT the pair — the shape every pre-existing fixture uses — the two
+    // readings rule drops it, and it drags coverage down with it.
+    const withoutObservation = await measure(
+      [
+        video({
+          id: "vid_stalled",
+          channelId: "chan_a",
+          publishedAtMs: START_MS - 90 * DAY_MS,
+          snapshots: [snapshot(START_MS + HOUR_MS, 4_000_000)],
+        }),
+      ],
+      { baselineGraceMs: GRACE_MS },
+    );
+    expect(withoutObservation.get("chan_a")?.coveredVideos).toBe(0);
+
+    const gained = await measure([stalled], { baselineGraceMs: GRACE_MS });
+    expect(gained.get("chan_a")).toEqual({
+      // Zero because it gained nothing, which is a measurement — not zero
+      // because nothing was measured, which would be a refusal.
+      viewsGained: 0,
+      coveredVideos: 1,
+      totalVideos: 1,
+      maxBaselineLagMs: HOUR_MS,
+      maxEndLagMs: HOUR_MS,
+    });
+  });
+
+  it("closes the tail gap the daily cadence opens", async () => {
+    const rows = [
+      video({
+        id: "vid_old",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        // Past its hit window: one reading a day at best, so the last snapshot
+        // sits a full day before the period closes.
+        snapshots: [snapshot(START_MS - HOUR_MS, 100_000), snapshot(END_MS - DAY_MS, 150_000)],
+        observed: { atMs: END_MS - 10 * 60_000, views: 156_000 },
+      }),
+    ];
+
+    expect(await measure(rows)).toEqual(
+      new Map([
+        [
+          "chan_a",
+          {
+            // 56,000, not 50,000: the six thousand views gained on the last day
+            // are not missing data, they are on the video row.
+            viewsGained: 56_000,
+            coveredVideos: 1,
+            totalVideos: 1,
+            maxBaselineLagMs: 0,
+            maxEndLagMs: 10 * 60_000,
+          },
+        ],
+      ]),
+    );
+  });
+
+  it("refuses the pair for a vanished video, whose counter is stale by construction", async () => {
+    // `channel-sync` stamps `statsFetchedAt` on a video YouTube stopped
+    // returning WITHOUT refreshing `viewCount`. Reading that pair would date a
+    // stale count to a fresh instant, which is the one way this could fabricate.
+    const gained = await measure([
+      video({
+        id: "vid_gone",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        snapshots: [snapshot(START_MS + HOUR_MS, 4_000_000)],
+        observed: { atMs: END_MS - HOUR_MS, views: 4_000_000, isAvailable: false },
+      }),
+    ], { baselineGraceMs: GRACE_MS });
+
+    expect(gained.get("chan_a")?.coveredVideos).toBe(0);
+  });
+
+  it("refuses the pair when the fetch happened after the window closed", async () => {
+    // The derived-RPM window ends `RPM_SETTLE_DAYS` before today, so this is
+    // the branch that keeps this reading out of that denominator entirely.
+    const gained = await measure([
+      video({
+        id: "vid_stalled",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 90 * DAY_MS,
+        snapshots: [snapshot(START_MS + HOUR_MS, 4_000_000)],
+        observed: { atMs: END_MS + HOUR_MS, views: 4_500_000 },
+      }),
+    ], { baselineGraceMs: GRACE_MS });
+
+    expect(gained.get("chan_a")?.coveredVideos).toBe(0);
+  });
+
+  it("refuses the pair from before the lookback, where a reading is stale not still", async () => {
+    const gained = await measure([
+      video({
+        id: "vid_forgotten",
+        channelId: "chan_a",
+        publishedAtMs: START_MS - 400 * DAY_MS,
+        snapshots: [],
+        observed: {
+          atMs: START_MS - (SNAPSHOT_LOOKBACK_DAYS + 1) * DAY_MS,
+          views: 7_000_000,
+        },
+      }),
+    ]);
+
+    expect(gained.get("chan_a")?.coveredVideos).toBe(0);
+  });
+
+  it("measures the end lag back from NOW when the period has not closed yet", async () => {
+    // The niches page snaps its range up to the next UTC midnight, so `endMs`
+    // is routinely in the future. Counting the unelapsed remainder of today as
+    // missing data would print a caveat under every figure on the page.
+    const futureEnd = { startMs: START_MS, endMs: END_MS + 12 * HOUR_MS };
+    const gained = await measure(
+      [
+        video({
+          id: "vid_old",
+          channelId: "chan_a",
+          publishedAtMs: START_MS - 90 * DAY_MS,
+          snapshots: [snapshot(START_MS - HOUR_MS, 100_000)],
+          observed: { atMs: END_MS, views: 150_000 },
+        }),
+      ],
+      { window: futureEnd, nowMs: END_MS + 30 * 60_000 },
+    );
+
+    expect(gained.get("chan_a")).toEqual({
+      viewsGained: 50_000,
+      coveredVideos: 1,
+      totalVideos: 1,
+      maxBaselineLagMs: 0,
+      // Half an hour — the age of the reading — not the twelve and a half
+      // hours between it and a window boundary that has not arrived.
+      maxEndLagMs: 30 * 60_000,
+    });
   });
 });
 
@@ -406,6 +733,7 @@ describe("the format filter", () => {
       coveredVideos: 1,
       totalVideos: 1,
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 
@@ -419,6 +747,7 @@ describe("the format filter", () => {
       coveredVideos: 1,
       totalVideos: 1,
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 
@@ -430,6 +759,7 @@ describe("the format filter", () => {
       coveredVideos: 3,
       totalVideos: 3,
       maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
     });
   });
 });

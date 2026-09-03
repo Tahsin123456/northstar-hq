@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   BASELINE_LAG_FLOOR_MS,
+  LAG_NOTE_SPAN_FRACTION,
   NICHE_EARNINGS_DEFINITION,
   NICHE_EARNINGS_DEFINITION_LONGFORM,
   approxDurationCeil,
@@ -10,6 +11,7 @@ import {
   hasUsableGainsHistory,
   measuredSpanNote,
   measuredSpanNoteFrom,
+  nicheMeasuredSpanNote,
   type NicheEarningsInput,
 } from "../niche-earnings";
 import {
@@ -500,6 +502,7 @@ describe("the measured-span label", () => {
         measuredFromMs: END - 9 * DAY_MS,
         endMs: END,
         maxBaselineLagMs: 0,
+        maxEndLagMs: 0,
       }),
     ).toBe("Measured over the last 9 of 30 days — view history begins there.");
   });
@@ -511,6 +514,7 @@ describe("the measured-span label", () => {
         measuredFromMs: END - 30 * DAY_MS,
         endMs: END,
         maxBaselineLagMs: 0,
+        maxEndLagMs: 0,
       }),
     ).toBeNull();
     expect(
@@ -519,6 +523,7 @@ describe("the measured-span label", () => {
         measuredFromMs: null,
         endMs: END,
         maxBaselineLagMs: null,
+        maxEndLagMs: null,
       }),
     ).toBeNull();
   });
@@ -536,27 +541,59 @@ describe("the measured-span label", () => {
         requestedStartMs: END - 30 * DAY_MS,
         measuredFromMs: END - 30 * DAY_MS,
         endMs: END,
-        maxBaselineLagMs: 2 * 3_600_000,
+        maxBaselineLagMs: 12 * HOUR_MS,
+        maxEndLagMs: 0,
       }),
     ).toBe(
       "Measured over the full 30 days. The app started recording some of these " +
-        "videos up to 2 hours into that span, so their first views are missing " +
+        "videos up to 12 hours into that span, so their first views are missing " +
         "and this figure is a little low.",
     );
   });
 
-  it("states both caveats when the span is short AND the baselines are ragged", () => {
+  /**
+   * =======================================================================
+   * THE TAIL, WHICH THE LABEL USED TO BE SILENT ABOUT ENTIRELY
+   * =======================================================================
+   *
+   * A video past its hit window is snapshotted at most daily and not at all
+   * while its count has not moved, so the last reading inside the period can
+   * sit a long way before its close. On a short measured span that is the
+   * BIGGER of the two gaps, and it appears in the cleanest possible case — one
+   * channel, zero sweep stagger, head lag exactly 0 — which is precisely where
+   * a head-only caveat printed nothing at all over a figure a third low.
+   */
+  it("states the tail gap on its own, with no ragged head to report", () => {
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 36 * HOUR_MS,
+        endMs: END,
+        maxBaselineLagMs: 0,
+        maxEndLagMs: 12 * HOUR_MS,
+      }),
+    ).toBe(
+      "Measured over the last 2 of 30 days — view history begins there. " +
+        "The latest reading for some of these videos is up to 12 hours before " +
+        "the period ends, so their last views are missing and this figure is a " +
+        "little low.",
+    );
+  });
+
+  it("states both gaps in one sentence when both ends are ragged", () => {
     expect(
       measuredSpanNoteFrom({
         requestedStartMs: END - 30 * DAY_MS,
         measuredFromMs: END - 9 * DAY_MS,
         endMs: END,
-        maxBaselineLagMs: 49 * 60_000,
+        maxBaselineLagMs: 3 * HOUR_MS,
+        maxEndLagMs: 25 * HOUR_MS,
       }),
     ).toBe(
       "Measured over the last 9 of 30 days — view history begins there. " +
-        "The app started recording some of these videos up to 49 minutes into " +
-        "that span, so their first views are missing and this figure is a little low.",
+        "The app started recording some of these videos up to 3 hours into that " +
+        "span, and its latest reading for some of them is up to 25 hours before " +
+        "the period ends, so those views are missing and this figure is a little low.",
     );
   });
 
@@ -577,9 +614,101 @@ describe("the measured-span label", () => {
         measuredFromMs: END - 30 * DAY_MS,
         endMs: END,
         maxBaselineLagMs: 30_000,
+        maxEndLagMs: 30_000,
       }),
     ).toBeNull();
     expect(BASELINE_LAG_FLOOR_MS).toBe(60_000);
+  });
+
+  /**
+   * =======================================================================
+   * WHY A GAP IS ALSO JUDGED AGAINST THE SPAN, NOT ONLY AGAINST A MINUTE
+   * =======================================================================
+   *
+   * Reporting the tail made the minute floor untenable on its own. The tail gap
+   * is essentially never zero — the last channel the sweep reached was read
+   * minutes-to-hours ago at any instant — so a minute-floored caveat would
+   * print under every figure on the page forever. That is how an owner learns
+   * to skip the sentence, and skipping it costs them the one reading that
+   * mattered. A hundredth of the span is the line: 7 hours out of 30 days is
+   * noise, 22 minutes out of 36 hours is not, and the same rule says so.
+   */
+  it("judges a gap against the span it is a gap in, not against the clock alone", () => {
+    expect(LAG_NOTE_SPAN_FRACTION).toBe(0.01);
+
+    // Two hours is a fifth of a percent of a month. Silent.
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 30 * DAY_MS,
+        endMs: END,
+        maxBaselineLagMs: 2 * HOUR_MS,
+        maxEndLagMs: 2 * HOUR_MS,
+      }),
+    ).toBeNull();
+
+    // The same two hours inside a day and a half is a twentieth of the figure.
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 36 * HOUR_MS,
+        measuredFromMs: END - 36 * HOUR_MS,
+        endMs: END,
+        maxBaselineLagMs: 2 * HOUR_MS,
+        maxEndLagMs: 0,
+      }),
+    ).toBe(
+      "Measured over the full 2 days. The app started recording some of these " +
+        "videos up to 2 hours into that span, so their first views are missing " +
+        "and this figure is a little low.",
+    );
+  });
+});
+
+/**
+ * =========================================================================
+ * THE CARD'S NOTE IS THE CARD'S, NOT THE PAGE'S
+ * =========================================================================
+ *
+ * The sentence renders directly beneath ONE niche's money figure. Fed the
+ * page-wide maxima it asserted a shortfall that niche may not have — "some of
+ * these videos" and "this figure is a little low" are both false of a niche
+ * whose every video was measured end to end. Conservative, and still invented,
+ * which is the same class of defect as an invented number.
+ */
+describe("the per-niche measured-span note", () => {
+  const DAY_MS = 86_400_000;
+  const HOUR_MS = 3_600_000;
+  const END = Date.UTC(2026, 7, 31);
+  const response = {
+    requestedStartMs: END - 30 * DAY_MS,
+    measuredFromMs: END - 9 * DAY_MS,
+    endMs: END,
+  };
+
+  it("says only what is true of THIS niche's videos", () => {
+    // A clean niche keeps the span sentence — which is a fact about the page's
+    // history — and carries no raggedness caveat under its figure.
+    expect(
+      nicheMeasuredSpanNote(response, { maxBaselineLagMs: 0, maxEndLagMs: 0 }),
+    ).toBe("Measured over the last 9 of 30 days — view history begins there.");
+
+    // Its ragged neighbour on the same page does.
+    expect(
+      nicheMeasuredSpanNote(response, {
+        maxBaselineLagMs: 3 * HOUR_MS,
+        maxEndLagMs: 0,
+      }),
+    ).toBe(
+      "Measured over the last 9 of 30 days — view history begins there. " +
+        "The app started recording some of these videos up to 3 hours into that " +
+        "span, so their first views are missing and this figure is a little low.",
+    );
+  });
+
+  it("falls back to the span alone for a niche the response did not answer for", () => {
+    expect(nicheMeasuredSpanNote(response, null)).toBe(
+      "Measured over the last 9 of 30 days — view history begins there.",
+    );
   });
 });
 

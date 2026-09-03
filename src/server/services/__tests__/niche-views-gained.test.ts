@@ -57,7 +57,7 @@ vi.mock("../user-service", () => ({
 }));
 
 const { getNicheViewsGained } = await import("../niche-views-gained-service");
-const { hasUsableGainsHistory, measuredSpanNoteFrom } = await import(
+const { hasUsableGainsHistory, measuredSpanNoteFrom, nicheMeasuredSpanNote } = await import(
   "@/lib/analytics/niche-earnings"
 );
 
@@ -127,6 +127,8 @@ describe("grouping and the own/competitor split", () => {
         competitorViewsGained: 40_000,
         coveredVideos: 2,
         totalVideos: 2,
+        maxBaselineLagMs: 0,
+        maxEndLagMs: DAY_MS,
         ownChannelIds: ["chan_ours"],
       },
       // The shared channel counts here TOO — correct per niche, and exactly
@@ -137,6 +139,8 @@ describe("grouping and the own/competitor split", () => {
         competitorViewsGained: 0,
         coveredVideos: 1,
         totalVideos: 1,
+        maxBaselineLagMs: 0,
+        maxEndLagMs: DAY_MS,
         ownChannelIds: ["chan_ours"],
       },
     ]);
@@ -170,10 +174,74 @@ describe("grouping and the own/competitor split", () => {
       competitorViewsGained: 0,
       coveredVideos: 1,
       totalVideos: 2,
+      maxBaselineLagMs: 0,
+      maxEndLagMs: DAY_MS,
       // The dark channel measured nothing, so it is not an id the total's
       // double-count check needs to see.
       ownChannelIds: ["chan_ours"],
     });
+  });
+
+  /**
+   * The caveat under a niche card's money figure is a claim about THAT niche's
+   * videos. Built from the page-wide maximum it read "the app started recording
+   * some of these videos up to 3 hours into that span … this figure is a little
+   * low" under a niche every one of whose videos was measured end to end.
+   * Conservative, and still invented.
+   */
+  it("keeps one niche's raggedness off another niche's figure", async () => {
+    const sweepMs = START_MS + 21 * DAY_MS;
+    mocks.snapshotFindFirst.mockResolvedValue({ capturedAt: new Date(sweepMs) });
+    mocks.trackedFindMany.mockResolvedValue([
+      tracked("chan_clean", "own", ["niche_gta"]),
+      tracked("chan_ragged", "own", ["niche_football"]),
+    ]);
+    mocks.videoFindMany.mockResolvedValue([
+      {
+        id: "vid_clean",
+        channelId: "chan_clean",
+        publishedAt: new Date(START_MS - 90 * DAY_MS),
+        isShort: true,
+        classification: "short",
+        // Bracketed at both ends of the measured span, to the minute.
+        snapshots: [
+          snapshot(START_MS - DAY_MS, 1_000_000),
+          snapshot(END_MS - 10 * 60_000, 1_100_000),
+        ],
+      },
+      {
+        id: "vid_ragged",
+        channelId: "chan_ragged",
+        publishedAt: new Date(START_MS - 90 * DAY_MS),
+        isShort: true,
+        classification: "short",
+        // First ever seen three hours into the span.
+        snapshots: [
+          snapshot(sweepMs + 3 * HOUR_MS, 1_000_000),
+          snapshot(END_MS - 10 * 60_000, 1_050_000),
+        ],
+      },
+    ]);
+
+    const result = await request();
+    const [gta, football] = result.niches;
+
+    expect(gta?.maxBaselineLagMs).toBe(0);
+    expect(football?.maxBaselineLagMs).toBe(3 * HOUR_MS);
+    // The page-level figure is the maximum over both, which is what the
+    // Overview panel — a statement about the page — is entitled to say.
+    expect(result.maxBaselineLagMs).toBe(3 * HOUR_MS);
+
+    // The clean niche carries the SPAN sentence, which is a fact about the
+    // page's history, and no raggedness clause at all.
+    expect(nicheMeasuredSpanNote(result, gta ?? null)).toBe(
+      "Measured over the last 9 of 30 days — view history begins there.",
+    );
+    expect(nicheMeasuredSpanNote(result, football ?? null)).toBe(
+      "Measured over the last 9 of 30 days — view history begins there. " +
+        "The app started recording some of these videos up to 3 hours into that " +
+        "span, so their first views are missing and this figure is a little low.",
+    );
   });
 });
 
@@ -197,6 +265,7 @@ describe("the measured span", () => {
   });
 
   it("answers the no-history shape when the organization has no snapshots at all", async () => {
+    mocks.trackedFindMany.mockResolvedValue([tracked("chan_ours", "own", ["niche_gta"])]);
     mocks.snapshotFindFirst.mockResolvedValue(null);
 
     const result = await request();
@@ -209,15 +278,17 @@ describe("the measured span", () => {
       // Nothing was measured, so there is no raggedness to report — `null`,
       // never a 0 that would read as "measured, and perfectly uniform".
       maxBaselineLagMs: null,
+      maxEndLagMs: null,
       niches: [],
     });
     // Said, not computed: no measurement ran, so nothing could be dressed as
-    // a zero.
+    // a zero. The MEMBER read does happen — the anchor is defined in terms of
+    // the priced population, so it has to know that population first.
     expect(mocks.videoFindMany).not.toHaveBeenCalled();
-    expect(mocks.trackedFindMany).not.toHaveBeenCalled();
   });
 
   it("answers the no-history shape for a period that ends before the history begins", async () => {
+    mocks.trackedFindMany.mockResolvedValue([tracked("chan_ours", "own", ["niche_gta"])]);
     mocks.snapshotFindFirst.mockResolvedValue({ capturedAt: new Date(END_MS + DAY_MS) });
 
     const result = await request();
@@ -226,6 +297,49 @@ describe("the measured span", () => {
     expect(result.earliestSnapshotMs).toBe(END_MS + DAY_MS);
     expect(result.niches).toEqual([]);
     expect(mocks.videoFindMany).not.toHaveBeenCalled();
+  });
+
+  /**
+   * =======================================================================
+   * THE ANCHOR IS DRAWN FROM THE POPULATION BEING PRICED, NOT A WIDER ONE
+   * =======================================================================
+   *
+   * The earliest-snapshot query used to be org-wide, with no format filter and
+   * no channel filter, while the measurement that follows covers only this
+   * format's visible-niche members. A long-form-only channel — or one filed
+   * under no niche at all — that happened to be swept first then set the start
+   * instant for the Shorts page and could consume the entire baseline grace
+   * before a single priced video was considered. That is the same
+   * argmin-of-coverage flaw the grace exists to kill, surviving one layer up.
+   */
+  it("narrows the anchor to the member channels and the format being priced", async () => {
+    mocks.trackedFindMany.mockResolvedValue([
+      tracked("chan_ours", "own", ["niche_gta"]),
+      tracked("chan_rival", "competitor", ["niche_gta"]),
+    ]);
+
+    await request();
+
+    const args = mocks.snapshotFindFirst.mock.calls[0][0];
+    expect(args.where.video.channelId).toEqual({ in: ["chan_ours", "chan_rival"] });
+    // `isVideoOfFormat` as a where clause — and on the longform side it must be
+    // `classification: "not_short"`, never `isShort: false`.
+    expect(args.where.video.isShort).toBe(true);
+    expect(args.where.video.channel).toEqual({
+      trackedBy: { some: { organizationId: ORG_ID, isActive: true } },
+    });
+  });
+
+  it("asks nothing of the snapshot series when no channel is being priced", async () => {
+    mocks.trackedFindMany.mockResolvedValue([]);
+
+    const result = await request();
+
+    // No member, no priced video, no anchor to look for. An org-wide minimum
+    // here would promise history for a population that is empty.
+    expect(mocks.snapshotFindFirst).not.toHaveBeenCalled();
+    expect(result.measuredFromMs).toBeNull();
+    expect(result.earliestSnapshotMs).toBeNull();
   });
 });
 
@@ -298,19 +412,62 @@ describe("staggered first snapshots across channels", () => {
       competitorViewsGained: 30_000,
       coveredVideos: 3,
       totalVideos: 3,
+      maxBaselineLagMs: 3 * HOUR_MS,
+      maxEndLagMs: DAY_MS,
       ownChannelIds: ["chan_ours"],
     });
     expect(hasUsableGainsHistory(entry)).toBe(true);
 
-    // The span stays honest: the clamp is unmoved, and the three hours the
-    // raggedest video is missing are reported rather than assumed away.
+    // The span stays honest: the clamp is unmoved, and BOTH gaps — the three
+    // hours the raggedest video is missing at the head, and the day the daily
+    // cadence leaves at the tail — are reported rather than assumed away.
     expect(result.measuredFromMs).toBe(SWEEP_MS);
     expect(result.maxBaselineLagMs).toBe(3 * HOUR_MS);
+    expect(result.maxEndLagMs).toBe(DAY_MS);
     expect(measuredSpanNoteFrom(result)).toBe(
       "Measured over the last 9 of 30 days — view history begins there. " +
         "The app started recording some of these videos up to 3 hours into that " +
-        "span, so their first views are missing and this figure is a little low.",
+        "span, and its latest reading for some of them is up to 24 hours before " +
+        "the period ends, so those views are missing and this figure is a little low.",
     );
+  });
+
+  /**
+   * =======================================================================
+   * THE SECOND CAUSE OF THE SAME BLACKOUT: THE DEAD LONG TAIL
+   * =======================================================================
+   *
+   * `channel-sync` writes no snapshot row when the count has not moved, so a
+   * stalled Short keeps one row forever and read as UNMEASURED — pushing
+   * coverage under the 0.9 floor with videos whose gain is not unknown at all.
+   * `Video.viewCount` + `Video.statsFetchedAt` is the reading that says so.
+   */
+  it("counts a stalled video as measured-at-zero, not as unmeasured", async () => {
+    mocks.trackedFindMany.mockResolvedValue([tracked("chan_ours", "own", ["niche_gta"])]);
+    mocks.videoFindMany.mockResolvedValue([
+      stagger("vid_moving", "chan_ours", SWEEP_MS, 50_000),
+      {
+        id: "vid_stalled",
+        channelId: "chan_ours",
+        publishedAt: new Date(START_MS - 90 * DAY_MS),
+        isShort: true,
+        classification: "short",
+        // Swept two hours after the first channel, one first-ever reading, and
+        // then nothing — because nothing moved.
+        snapshots: [snapshot(SWEEP_MS + 2 * HOUR_MS, 300_000)],
+        // The sync kept fetching it and kept seeing 300,000.
+        viewCount: BigInt(300_000),
+        statsFetchedAt: new Date(END_MS - DAY_MS),
+        isAvailable: true,
+      },
+    ]);
+
+    const entry = (await request()).niches[0]!;
+
+    expect(entry.coveredVideos).toBe(2);
+    expect(entry.totalVideos).toBe(2);
+    expect(entry.ourViewsGained).toBe(50_000);
+    expect(hasUsableGainsHistory(entry)).toBe(true);
   });
 
   it("still refuses a niche whose videos genuinely have no usable readings", async () => {
@@ -347,6 +504,9 @@ describe("the niche scope", () => {
   it("omits a scoped reader's invisible niches from the query and the response", async () => {
     mocks.role = "short_form_editor";
     mocks.memberNicheFindMany.mockResolvedValue([{ nicheId: "niche_gta" }]);
+    // A member channel, so the anchor has a population to be drawn from and the
+    // response carries an entry rather than the no-history shape.
+    mocks.trackedFindMany.mockResolvedValue([tracked("chan_ours", "own", ["niche_gta"])]);
     mocks.nicheFindMany.mockImplementation(async (args: { where: { id?: { in: string[] } } }) => {
       // The narrowing must live in the WHERE — filtering the response after
       // loading the rows is the leak every other scoped read refuses.

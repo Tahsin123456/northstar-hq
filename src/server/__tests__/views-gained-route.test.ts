@@ -62,6 +62,7 @@ beforeEach(() => {
     // The stub carries the real shape, or the route test drifts from what the
     // service actually returns and stops proving the pass-through.
     maxBaselineLagMs: 0,
+    maxEndLagMs: 0,
     niches: [],
   });
 });

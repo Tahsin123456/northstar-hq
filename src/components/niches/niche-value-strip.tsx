@@ -187,7 +187,12 @@ export function NicheValueStrip({
   loading: boolean;
   /** The page-level read failed. Words, never a zero. */
   error: boolean;
-  /** "Measured over the last N of M days…" when the history falls short. */
+  /**
+   * "Measured over the last N of M days…" when the history falls short, plus
+   * THIS niche's own coverage gaps when it has any. Per niche, not per page:
+   * fed the page-wide maximum this sentence claimed a shortfall under a figure
+   * that may be exact, which is an invented caveat attached to a real number.
+   */
   measuredNote: string | null;
 }) {
   const rpm = niche.rpm;

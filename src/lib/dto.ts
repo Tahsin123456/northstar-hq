@@ -209,6 +209,20 @@ export interface NicheViewsGainedEntryDTO {
    */
   readonly coveredVideos: number;
   readonly totalVideos: number;
+  /**
+   * THIS niche's ragged head and tail, in milliseconds — how far into the
+   * measured span the latest baseline used sits, and how far short of its close
+   * the earliest end reading used falls. Both 0 means this niche's figure
+   * covers the whole span.
+   *
+   * Per niche and not only per page, because the caveat these produce is
+   * rendered directly beneath ONE niche's money figure on its card. The
+   * page-level maxima on the DTO root belong to the Overview panel, which
+   * describes the page; putting them under a single niche asserted a
+   * (conservative, but invented) fact about a figure that may be exact.
+   */
+  readonly maxBaselineLagMs: number;
+  readonly maxEndLagMs: number;
   /** Own channels that actually measured something — the double-count check's
    * input, mirroring `NicheEarningsInput.ownChannelIds`. */
   readonly ownChannelIds: readonly string[];
@@ -230,23 +244,50 @@ export interface NicheViewsGainedDTO {
   readonly requestedStartMs: number;
   readonly endMs: number;
   readonly measuredFromMs: number | null;
+  /**
+   * The first instant the PRICED population's snapshot history covers — the
+   * member channels of this format's visible niches, and only this format's
+   * videos. Not an org-wide minimum: one drawn from a wider population sits
+   * earlier than any priced video's first reading and spends the whole baseline
+   * grace before the measurement starts.
+   */
   readonly earliestSnapshotMs: number | null;
   /**
    * How far into the measured span the raggedest video's own history starts,
-   * in milliseconds. 0 means every counted video was measured over the whole
-   * span; `null` means nothing was measured at all.
+   * in milliseconds — the PAGE-wide maximum, for the page-wide label. 0 means
+   * no counted video was baselined after the span opened; `null` means nothing
+   * was measured at all.
    *
    * First-ever snapshots are written channel by channel over minutes to hours,
-   * so `measuredFromMs` — the org-wide earliest capture — is the instant at
-   * which the FEWEST videos have a reading. Videos that start a little later
-   * are measured from their own first reading rather than dropped (which is
-   * what previously took coverage to a few percent and printed "Not enough
-   * view history yet" under every niche); this is the exact size of the head of
-   * the span the worst of them is missing. The figure can only be understated
-   * by it, never overstated, and `measuredSpanNoteFrom` turns it into the
-   * sentence the owner reads.
+   * so `measuredFromMs` — the earliest capture among the priced videos — is the
+   * instant at which the FEWEST of them have a reading. Videos that start a
+   * little later are measured from their own first reading rather than dropped
+   * (which is what previously took coverage to a few percent and printed "Not
+   * enough view history yet" under every niche); this is the exact size of the
+   * head of the span the worst of them is missing, and `measuredSpanNoteFrom`
+   * turns it into the sentence the owner reads.
+   *
+   * WHAT IT DOES TO THE FIGURE, honestly: a later baseline normally subtracts
+   * views that were already there, so the figure is understated. The exception
+   * is a YouTube purge landing inside that missing head — the delta cannot see
+   * it, and the figure is overstated by the purged amount. Bounded in TIME by
+   * the grace, not in magnitude. Rare, real, and pinned by a test rather than
+   * asserted away.
    */
   readonly maxBaselineLagMs: number | null;
+  /**
+   * How far BEFORE the measured span's close (or before now, when the period
+   * has not closed yet) the earliest end reading used sits — again the
+   * page-wide maximum. 0 means every counted video was read at the very end.
+   *
+   * The two gaps are reported separately because they have different causes and
+   * different sizes. A video past its hit window is snapshotted at most daily
+   * and not at all while its count is unmoved, so the tail is routinely the
+   * LARGER of the two: on a 36-hour measured span a one-day tail is a third of
+   * the figure, with a perfectly clean head — which is exactly the case a
+   * head-only caveat stayed silent for.
+   */
+  readonly maxEndLagMs: number | null;
   /** One entry per visible niche of the requested format. A niche outside the
    * reader's scope is OMITTED — same absence-not-empty rule as `NicheDTO.rpm`. */
   readonly niches: readonly NicheViewsGainedEntryDTO[];
