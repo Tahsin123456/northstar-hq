@@ -371,6 +371,11 @@ describe("copy pins", () => {
 
   it("keeps the renamed pages' titles in lockstep with their nav labels", () => {
     const lockstep: Record<string, string> = {
+      // The two overviews are the pair the whole layout exists to make
+      // symmetric; a page titled "Long Form" under a section headed "Long
+      // Form" is the heading repeated, not a page name.
+      "/": "page.tsx",
+      "/longform": "longform/page.tsx",
       "/outliers": "outliers/page.tsx",
       "/our-vs-market": "our-vs-market/page.tsx",
       "/longform/videos": "longform/videos/page.tsx",
@@ -383,6 +388,25 @@ describe("copy pins", () => {
     expect(link("/outliers").label).toBe("Breakouts");
     expect(link("/our-vs-market").label).toBe("Us vs Market");
     expect(link("/longform/videos").label).toBe("Winners");
+  });
+
+  it("uses none of the retired names as a heading in the PDF report", () => {
+    // The report is the one screen that leaves the building. It summarises
+    // the Winners and Breakouts pages, and must call them what the app does.
+    const source = readFileSync(
+      join(process.cwd(), "src", "lib", "report", "report-document.tsx"),
+      "utf8",
+    );
+    const headings = [...source.matchAll(/<SectionHeading\b[^>]*?\btitle="([^"]*)"/g)].map(
+      (match) => match[1] ?? "",
+    );
+    expect(headings).toContain("Winners");
+    expect(headings).toContain("Breakouts");
+    for (const heading of headings) {
+      for (const retired of RETIRED) {
+        expect(heading, `report: "${heading}" vs ${retired}`).not.toContain(retired);
+      }
+    }
   });
 
   it("calls the admin niche screen Hit Rules, in the tab and on the page", () => {
@@ -429,5 +453,18 @@ describe("the Shorts channels page, word for word", () => {
   it("links a Shorts row to the Shorts channel page and a Long Form row to the Long Form one", () => {
     expect(channelHref("shorts", "abc")).toBe("/channels/abc");
     expect(channelHref("longform", "abc")).toBe("/longform/channels/abc");
+  });
+
+  it("sends the card menu's View analytics to the same format as the card's own link", () => {
+    // The kebab menu is rendered on every roster card, every overview row and
+    // both channel headers. A literal /channels/ URL in it is a Shorts link on
+    // a Long Form surface — the leak channel-href.ts exists to close.
+    const source = readFileSync(
+      join(process.cwd(), "src", "components", "channels", "channel-row-menu.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("router.push(channelHref(format, channel.id))");
+    expect(source).toContain("const format = useDatasetFormat();");
+    expect(source).not.toMatch(/[`"']\/channels\//);
   });
 });

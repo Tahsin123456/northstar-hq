@@ -165,7 +165,7 @@ export default function LongformOverviewPage() {
   return (
     <PageContainer className="flex flex-col gap-5">
       <PageHeader
-        title="Long Form"
+        title="Overview"
         description={
           !hasChannels
             ? "Track the long-form channels the studio cares about. Channels filed under a Long Form niche — and any not filed anywhere yet — appear here."

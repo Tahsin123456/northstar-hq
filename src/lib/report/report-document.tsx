@@ -723,7 +723,7 @@ export function ReportDocument({ report }: { report: ReportData }) {
 
         <View style={s.section}>
           <SectionHeading
-            title="Biggest winners"
+            title="Winners"
             sub="Highest-viewed Shorts across the tracked set this period."
           />
           <ShortsTable shorts={report.topWinners} mode="views" />
@@ -731,7 +731,7 @@ export function ReportDocument({ report }: { report: ReportData }) {
 
         <View style={s.section}>
           <SectionHeading
-            title="Biggest outliers"
+            title="Breakouts"
             sub="Shorts that most exceeded their own channel's median. The clearest signal of what to study."
           />
           <ShortsTable shorts={report.topOutliers} mode="multiple" />

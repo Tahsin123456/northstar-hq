@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type { ChannelDTO } from "@/lib/dto";
+import { channelHref } from "@/lib/channel-href";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { useRefreshChannel } from "@/hooks/use-dataset";
 import { useSetChannelOwnership } from "@/hooks/use-niches";
 import { AssignNichesDialog } from "./assign-niches-dialog";
@@ -42,6 +44,12 @@ export function ChannelRowMenu({
   trigger: React.ReactNode;
 }) {
   const router = useRouter();
+  // This menu sits on the Shorts roster, the Long Form roster, both overview
+  // tables and both channel headers. "View analytics" must open the channel
+  // page of the format the reader is already in — a Long Form roster whose
+  // card link says /longform/channels/… while its menu says /channels/… would
+  // send the reader to a page where every figure counts the other format.
+  const format = useDatasetFormat();
   const refresh = useRefreshChannel();
   const [renameOpen, setRenameOpen] = React.useState(false);
   const [removeOpen, setRemoveOpen] = React.useState(false);
@@ -92,7 +100,7 @@ export function ChannelRowMenu({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onSelect={() => router.push(`/channels/${channel.id}`)}>
+          <DropdownMenuItem onSelect={() => router.push(channelHref(format, channel.id))}>
             <LineChart />
             View analytics
           </DropdownMenuItem>
