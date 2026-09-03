@@ -22,13 +22,18 @@ import { isVideoOfFormat, type NicheFormat } from "@/lib/niches/niche-format";
  * actually earned divided by this exact delta, and `niche-rpm-views-gained-pin`
  * holds it to the view.
  *
- * The second caller, `niche-views-gained-service.ts`, is RETAINED BUT NO
- * LONGER RENDERED: the niche money surfaces price every view the tracked
- * channels have rather than the views gained in a period, because a gains
- * figure cannot render at all where the recorded history is shallower than the
- * period. Nothing below changes on that account — the rules here serve the
- * derived rate first — but do not assume a change here moves a dollar figure
- * on the niche pages. It does not.
+ * THE NICHE MONEY FIGURES DO NOT READ THIS MODULE ANY MORE. They price the
+ * views each tracked channel gained over the period from the CHANNEL counter
+ * series — `ChannelViewSnapshot`, one lifetime count per channel per sync —
+ * through `channel-views-gained.ts`, because that count covers every video
+ * the channel has however old, needs no per-video bracketing, and has no
+ * coverage floor to black a niche out with. The per-video delta below is
+ * kept SOLELY for the derived RPM's denominator, where it is the right tool:
+ * the revenue in the numerator was paid on exactly these videos' views. The
+ * baseline grace and its constants are the retained per-video rules, still
+ * pinned by `views-gained-service.test.ts`, and no money surface reads them.
+ * Do not assume a change here moves a dollar figure on the niche pages. It
+ * does not.
  *
  * The RULES ARE SHARED AND MUST NOT FORK — a video with no reading at the
  * window's start is dropped from both sides, a video born inside the window

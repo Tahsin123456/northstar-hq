@@ -1,5 +1,6 @@
 import { roundTo } from "./stats";
 import { convertMinorBetween, minorUnitsFor, symbolFor } from "@/lib/finance/money";
+import { formatDate } from "@/lib/format";
 import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
@@ -1219,19 +1220,27 @@ export function projectRevenue(
  * handful out of a niche that may hold thousands — so this is what the TRACKED
  * niche is worth, never what the niche is worth.
  *
- * THE SECOND BOUND, NAMED FOR THE SAME REASON: "every view on record" reaches
- * back exactly as far as the org's history window and no further, because
- * `buildDataset` filters videos on `publishedAt >= since` and `channel-sync`
- * never ingested the older ones. Both bounds are stated in the sentence below
- * rather than left to be discovered, on the rule that an assumption a reader
- * can argue with is a caveat and a silent one is a bug.
+ * WHAT IS PRICED IS THE PERIOD'S GAIN, from the channel counter: the views
+ * each tracked channel gained during the selected period, across every video
+ * it has however long ago it was posted, split between Shorts and long-form
+ * by the mix seen in its uploads. Three facts a reader needs, in the order
+ * they need them: what is multiplied by what; that the split is an ESTIMATE,
+ * because YouTube reports one count per channel; and that the history has a
+ * beginning, so a period reaching further back is measured over the recorded
+ * days and labelled as such. Each is stated rather than left to be
+ * discovered, on the rule that an assumption a reader can argue with is a
+ * caveat and a silent one is a bug.
  *
- * The denominator moves when a
- * competitor is added or removed, which is the whole reason the qualifier has
- * to survive into every label, tooltip and export.
+ * `{date}` IS A PLACEHOLDER, filled by `trackedNicheValueDefinition` from the
+ * response's own `historyBeganMs`. The constant is the template a copy pin
+ * can hold; nothing renders it raw.
+ *
+ * The denominator moves when a competitor is added or removed, which is the
+ * whole reason the qualifier has to survive into every label, tooltip and
+ * export.
  */
 export const TRACKED_NICHE_VALUE_DEFINITION =
-  "Tracked niche revenue prices every Shorts view the channels currently tracked for this niche have at its RPM — revenue per 1,000 views. It is the whole of what those channels have earned in views, across every Short the tracker has on record: it is not limited to the period selected at the top of the page, and changing that period does not change this figure. The one limit on it is the history window set under Settings — anything posted before that was never recorded, so it is not in this figure either. It is also not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove a competitor — and where the RPM is a hand-entered estimate the money is an estimate too. A hand-entered rate is applied to ENGAGED views only — the paid subset of the view count, set under Settings — while a rate measured from Northstar's own channel already accounts for engagement and is applied to the full count.";
+  "Tracked niche revenue is the views the channels tracked for this niche gained during the selected period — across every video they have, however long ago it was posted — priced at the niche's RPM, revenue per 1,000 views. Each channel's total is split between Shorts and long-form by the mix seen in its uploads, so the Shorts figure is an estimate. View history began on {date}; when the period reaches further back, the figure covers the recorded days and the label says so. Only channels in your tracker count, so it moves when you add or remove a competitor, and where the RPM is a hand-entered estimate the money is an estimate too. A hand-entered rate is applied to ENGAGED views only — the paid subset of the view count, set under Settings — while a rate measured from Northstar's own channel already accounts for engagement and is applied to the full count.";
 
 /**
  * The long-form counterpart, WHOSE LAST SENTENCE INVERTS. On a Long Form niche
@@ -1243,13 +1252,40 @@ export const TRACKED_NICHE_VALUE_DEFINITION =
  * the basis rules exist to prevent.
  */
 export const TRACKED_NICHE_VALUE_DEFINITION_LONGFORM =
-  "Tracked niche revenue prices every long-form view the channels currently tracked for this niche have at its RPM — revenue per 1,000 views. It is the whole of what those channels have earned in views, across every video the tracker has on record: it is not limited to the period selected at the top of the page, and changing that period does not change this figure. The one limit on it is the history window set under Settings — anything posted before that was never recorded, so it is not in this figure either. It is also not what the niche as a whole generates — the view total only contains channels you have added to the tracker, so it moves when you add or remove a competitor — and where the RPM is a hand-entered estimate the money is an estimate too. Every rate here — entered or measured — is applied to the full view count: long-form RPM is quoted per 1,000 views, and no engaged-view share applies.";
+  "Tracked niche revenue is the long-form views the channels tracked for this niche gained during the selected period — across every video they have, however long ago it was posted — priced at the niche's RPM, revenue per 1,000 views. Each channel's total is split between Shorts and long-form by the mix seen in its uploads, so the long-form figure is an estimate. View history began on {date}; when the period reaches further back, the figure covers the recorded days and the label says so. Only channels in your tracker count, so it moves when you add or remove a competitor, and where the RPM is a hand-entered estimate the money is an estimate too. Every rate here — entered or measured — is applied to the full view count: long-form RPM is quoted per 1,000 views, and no engaged-view share applies.";
 
-/** The definition for a niche of the given format. The wording differs where the arithmetic does. */
-export function trackedNicheValueDefinition(format: NicheFormat): string {
-  return format === "shorts"
-    ? TRACKED_NICHE_VALUE_DEFINITION
-    : TRACKED_NICHE_VALUE_DEFINITION_LONGFORM;
+/** The template's date placeholder. Exported so the earnings copy fills it the same way. */
+export const HISTORY_DATE_PLACEHOLDER = "{date}";
+
+/**
+ * The template with its date filled in.
+ *
+ * "View history began on 1 Sep 2026" when the response says when; when it
+ * does not — nothing measured yet, or the read not back — the sentence keeps
+ * its claim and drops the date rather than printing a placeholder or a
+ * fabricated day.
+ */
+export function fillHistoryDate(template: string, historyBeganMs: number | null): string {
+  const date = historyBeganMs === null ? null : formatDate(historyBeganMs);
+  return date === null
+    ? template.replace(`View history began on ${HISTORY_DATE_PLACEHOLDER};`, "View history has a beginning;")
+    : template.replace(HISTORY_DATE_PLACEHOLDER, date);
+}
+
+/**
+ * The definition for a niche of the given format, with the history date in.
+ * The wording differs where the arithmetic does.
+ */
+export function trackedNicheValueDefinition(
+  format: NicheFormat,
+  historyBeganMs: number | null = null,
+): string {
+  return fillHistoryDate(
+    format === "shorts"
+      ? TRACKED_NICHE_VALUE_DEFINITION
+      : TRACKED_NICHE_VALUE_DEFINITION_LONGFORM,
+    historyBeganMs,
+  );
 }
 
 export interface NicheValue {
@@ -1531,40 +1567,54 @@ export const UNPRICED_NICHE_EXPLANATION =
   "Nobody has said what 1,000 views in this niche are worth, and Northstar has no monetized channel here whose own revenue could stand in. Until one of those exists there is no honest way to put a number on the niche — an empty figure here is a missing decision, not a niche worth nothing.";
 
 /**
- * A priced niche whose tracked channels hold no views of this format at all.
+ * A priced, measured niche whose tracked channels gained no views in the
+ * period.
  *
- * ONE LINE FOR BOTH FORMATS, where an earlier basis needed two: "no Shorts in
+ * ONE LINE FOR BOTH FORMATS, where the upload basis needed two: "no Shorts in
  * this period" was a sentence about what was PUBLISHED, so each format named
- * its own noun. This is a statement about a view TOTAL — the same word on both
- * sides — and inventing a per-format variant would only give the two products
- * a way to drift apart on the same state.
+ * its own noun. A gain is a movement of views — the same word on both sides —
+ * and inventing a per-format variant would only give the two products a way
+ * to drift apart on the same state.
  *
- * NO PERIOD IN THE SENTENCE, deliberately. The figure it stands in for counts
- * every view the tracked channels have, so "in this period" would name a
- * window that has nothing to do with why the number is missing.
+ * THE PERIOD IS IN THE SENTENCE, deliberately, because the figure it stands
+ * in for is a period's gain: the same channels may well have gained plenty
+ * over a wider one, and the sentence should send a reader to the selector
+ * rather than to the tracker.
  */
-export const NICHE_NO_VIEWS = "No views to price";
+export const NICHE_NO_VIEWS = "No views gained in this period";
 
 /**
- * What a priced niche with no views says instead of a figure.
+ * What a priced niche with no gained views says instead of a figure.
  *
  * WORDS, NOT "$0", and this is the same rule as everywhere else in this module
- * rather than a special case. Zero views really do price to zero money, so the
- * arithmetic is not wrong — but "$0" sitting under "Tracked niche revenue" is
- * read as "this niche generates nothing", which is a claim about the niche
- * rather than about an empty tracker. The `MiniStat` beside it uses words for
- * exactly this reason.
- */
-/*
- * NO CAUSE ASSERTED. The state is `trackedNicheViews === 0` — zero VIEWS, not
- * zero videos — and several situations reach it: nothing filed under the niche,
- * channels that only post the other format, or channels whose whole catalogue
- * predates the history window. An earlier draft named the first as if it were
- * the only one and told the reader to "add the channels", which is advice to
- * add channels he can see on the card in front of him.
+ * rather than a special case. Zero gained views really do price to zero money,
+ * so the arithmetic is not wrong — but "$0" sitting under "Tracked niche
+ * revenue" is read as "this niche generates nothing", which is a claim about
+ * the niche rather than about the period somebody selected. The `MiniStat`
+ * beside it uses words for exactly this reason.
+ *
+ * NO CAUSE ASSERTED beyond the two that are true of every such niche: either
+ * nothing is filed under it, or what is filed there stood still over the
+ * measured days. An earlier draft told the reader to "add the channels",
+ * which is advice to add channels he can see on the card in front of him.
  */
 export const NO_VIEWS_TO_PRICE_EXPLANATION =
-  "Nothing tracked in this niche has any views of this format on record yet, so there are no views to price. That can mean no channel is filed here, or that nothing those channels posted falls inside the history window set under Settings. The rate below still applies.";
+  "The channels tracked in this niche gained no views of this format over the measured days, or no channel is filed here yet, so there is nothing to price. The rate below still applies — try a wider period, or check back after the next refresh.";
+
+/**
+ * A priced niche none of whose channels has been measured yet.
+ *
+ * A THIRD STATE, not a variant of "no views gained": here the channels may
+ * well be gaining views and the app simply has only one reading of each so
+ * far — a delta needs two. The fix is time, and the sentence says how much:
+ * one refresh. Nothing about coverage, floors or history in it, because a
+ * non-technical owner needs to know WHEN, not why.
+ */
+export const NICHE_MEASURING = "Measuring — first figure after the next refresh";
+
+/** The explanation under the measuring line. */
+export const NICHE_MEASURING_EXPLANATION =
+  "The app has one reading of these channels' view counts so far. Views gained is the difference between two readings, so the first figure appears once the next refresh has taken the second one — usually within a few hours.";
 
 /** A niche whose stored estimate exists but cannot be shown in the base currency. */
 export const UNCONVERTIBLE_NICHE_SHORT = "Estimate unusable";

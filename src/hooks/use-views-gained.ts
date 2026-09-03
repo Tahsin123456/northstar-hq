@@ -7,25 +7,22 @@ import type { DateRange } from "@/lib/analytics/types";
 import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
- * Views gained per niche.
+ * Views gained per niche — the read behind every niche money figure.
  *
- * RETAINED, AND CURRENTLY UNUSED BY ANY SCREEN. This hook used to be the read
- * behind every niche money figure; those surfaces now price every view the
- * tracked channels have, straight from the dataset payload, because a gains
- * figure refuses to render wherever the recorded view history is shallower
- * than the selected period — see `niche-earnings.ts`. It is kept, with its
- * endpoint and services, for a future "earned in this period" figure. Wiring
- * it back into a money surface would reintroduce the refusal, so do not,
- * until the history is deep.
+ * The Overview earnings panel and the niche card's value strip price what the
+ * tracked channels GAINED over the selected period: each channel's counter at
+ * the period's close minus the same counter at its start, read from the
+ * `ChannelViewSnapshot` series the sync writes on every run. See
+ * `channel-views-gained.ts` for the rules.
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * WHY THE RANGE IS IN THIS QUERY KEY, AND WHY THAT DOES NOT BREAK THE RULE
  * ─────────────────────────────────────────────────────────────────────────────
  * The dataset's promise — moving a filter never refetches — holds for filters
  * that are pure re-slices of a payload already in the browser. A views-GAINED
- * figure is not one of those: it is a difference between snapshot readings
+ * figure is not one of those: it is a difference between counter readings
  * bracketing the period's ends, aggregated on the server, and the browser
- * never receives the snapshot series to re-slice. A wider period is different
+ * never receives the reading series to re-slice. A wider period is different
  * data, exactly as the finance ledger's is, so the range keys the query — the
  * same reasoning `use-finance.ts` records at length. What must still never
  * appear in the key is any filter the dataset DOES answer client-side, and

@@ -275,10 +275,10 @@ export default function LongformOverviewPage() {
               payload is a longform niche, so `NicheEarningsPanel` reads each
               row's own format and quotes a hand-entered rate per 1,000 plain
               views with no engaged-view share — see `manualRpmBasis`. The
-              panel prices every long-form view the tracked channels have,
-              with no date filter at all; the table rows above stay on the
-              upload basis by design. */}
-          <NicheEarningsPanel niches={niches} rows={rows} />
+              panel fetches the long-form share of what each tracked channel
+              GAINED over the period; the table rows above stay on the upload
+              basis by design. */}
+          <NicheEarningsPanel niches={niches} range={range} />
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION_LONGFORM}

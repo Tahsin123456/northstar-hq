@@ -55,6 +55,7 @@ import {
   NicheRpmDialog,
   RPM_MENU_ITEM_LABEL,
   useCanConfigureRpm,
+  useCanReadNicheEconomics,
 } from "@/components/niches/niche-rpm-dialog";
 import { NicheValueStrip } from "@/components/niches/niche-value-strip";
 import { NotesPanel } from "@/components/notes/notes-panel";
@@ -63,11 +64,11 @@ import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
 import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
+import { nicheGainedById, useNicheViewsGained } from "@/hooks/use-views-gained";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
-import { nicheViewTotals } from "@/lib/analytics/niche-earnings";
-import { toNicheFormat } from "@/lib/niches/niche-format";
-import type { NicheDTO } from "@/lib/dto";
+import { measuredSpanNoteFrom } from "@/lib/analytics/views-gained-labels";
+import type { NicheDTO, NicheViewsGainedEntryDTO } from "@/lib/dto";
 import {
   NICHE_KIND_DESCRIPTION,
   NICHE_KIND_LABEL,
@@ -100,17 +101,39 @@ export default function NichesPage() {
   const rows = useChannelRows(data);
 
   /*
-   * NOTHING IS FETCHED FOR THE MONEY STRIPS ANY MORE.
+   * ONE views-gained read for the whole grid, at page level.
    *
-   * Each card's strip prices every view the channels tracked in that niche
-   * have, of the niche's format — a sum over `row.videos`, which the dataset
-   * payload already carries. There was a page-level views-gained read here,
-   * feeding a snapshot-delta basis; it is gone from this page because the
-   * figure it produced refused to render wherever the recorded view history
-   * was shallower than the selected period, which is everywhere. The endpoint
-   * and its service survive for a future "earned in this period" figure — see
-   * `views-gained-labels.ts` — and no longer decide what money renders.
+   * Every card's money strip prices views GAINED in the period, which is a
+   * server-side delta between two readings of each channel's counter rather
+   * than a re-slice of the dataset — see `use-views-gained.ts`. Fetching per
+   * card would be one request per niche for slices of the same response;
+   * fetching here, with the same key the Overview panel uses, means the two
+   * surfaces share one cached measurement and cannot price the same period
+   * differently. Disabled for a reader without finance access: their `rpm`
+   * is null on every niche, no strip renders, and the read would be waste.
    */
+  const { range } = useFilters();
+  const pageFormat = useDatasetFormat();
+  const canReadEconomics = useCanReadNicheEconomics();
+  const gainsQuery = useNicheViewsGained(pageFormat, range, canReadEconomics);
+  const gains: NicheGainsView = React.useMemo(() => {
+    const data = gainsQuery.data;
+    return {
+      byId: data === undefined ? null : nicheGainedById(data),
+      loading: canReadEconomics && gainsQuery.isPending,
+      error: gainsQuery.isError,
+      /*
+       * ONE NOTE FOR THE PAGE. The span is a fact about the history — it
+       * begins where it begins, for every channel at once, because the
+       * measurement starts where every channel holds a reading — so the same
+       * sentence is true under every card. What differs per card is how many
+       * of ITS channels the figure covers, and the strip derives that from
+       * its own entry.
+       */
+      note: data === undefined ? null : measuredSpanNoteFrom(data),
+      historyBeganMs: data?.historyBeganMs ?? null,
+    };
+  }, [canReadEconomics, gainsQuery.data, gainsQuery.isPending, gainsQuery.isError]);
 
   /*
    * Unconfigured niches float to the top.
@@ -207,6 +230,24 @@ export default function NichesPage() {
             <ThresholdSelector />
           </div>
 
+          {/*
+            THE CHANNELS NO FIGURE ON THIS PAGE INCLUDES, said at the top.
+
+            Every money figure here is a sum over the channels FILED UNDER a
+            niche, so a tracked channel in no niche is in none of them — and
+            the "Uncategorised" list at the foot of the page is three screens
+            away from the figure a reader is doubting. Same count the Overview
+            filter shows as "Unassigned"; one sentence, above the grid, gone
+            the moment the last channel is filed.
+          */}
+          {!isLoading && unassigned.length > 0 ? (
+            <p className="text-[12px] leading-relaxed text-muted-foreground">
+              {formatNumber(unassigned.length)} tracked{" "}
+              {unassigned.length === 1 ? "channel is" : "channels are"} not in any
+              niche and {unassigned.length === 1 ? "counts" : "count"} towards no figure.
+            </p>
+          ) : null}
+
           {isLoading ? (
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {Array.from({ length: 3 }, (_, i) => (
@@ -233,8 +274,8 @@ export default function NichesPage() {
                 <UnconfiguredSummary count={unconfiguredCount} />
               ) : null}
 
-              <NicheKindGroup kind="production" niches={production} rows={rows} />
-              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} />
+              <NicheKindGroup kind="production" niches={production} rows={rows} gains={gains} />
+              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} gains={gains} />
             </>
           )}
 
@@ -261,14 +302,31 @@ export default function NichesPage() {
  * Renders nothing when the group is empty. An account with no watchlist niches
  * should not carry a heading explaining a concept it is not using.
  */
+/** The page-level views-gained read, as every card consumes it. */
+interface NicheGainsView {
+  readonly byId: ReadonlyMap<string, NicheViewsGainedEntryDTO> | null;
+  readonly loading: boolean;
+  readonly error: boolean;
+  /**
+   * "Measured over the last N of M days…" when the history falls short, and
+   * how old the newest reading is when that is worth saying. One sentence
+   * for the page: the span is the same under every card.
+   */
+  readonly note: string | null;
+  /** When the view history began, for each strip's definition sentence. */
+  readonly historyBeganMs: number | null;
+}
+
 function NicheKindGroup({
   kind,
   niches,
   rows,
+  gains,
 }: {
   kind: NicheKind;
   niches: readonly NicheDTO[];
   rows: readonly ChannelRow[];
+  gains: NicheGainsView;
 }) {
   if (niches.length === 0) return null;
 
@@ -288,7 +346,7 @@ function NicheKindGroup({
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {niches.map((niche) => (
-          <NicheCard key={niche.id} niche={niche} rows={rows} />
+          <NicheCard key={niche.id} niche={niche} rows={rows} gains={gains} />
         ))}
       </div>
     </section>
@@ -298,9 +356,11 @@ function NicheKindGroup({
 function NicheCard({
   niche,
   rows,
+  gains,
 }: {
   niche: NicheDTO;
   rows: readonly ChannelRow[];
+  gains: NicheGainsView;
 }) {
   const { range } = useFilters();
   /*
@@ -373,40 +433,18 @@ function NicheCard({
   const summary = React.useMemo(() => calculatePortfolioSummary(entries), [entries]);
 
   /*
-   * The two view totals the money strip prices: ours, and everybody else we
-   * track in this niche.
+   * The money strip's view totals no longer come from this card.
    *
-   * ALL OF THEM, WITH NO DATE FILTER — `videosOfFormat`, never
-   * `videosInDateRange`. What a niche generates is every view its tracked
-   * channels have earned, and a channel's back catalogue keeps earning long
-   * after its upload date leaves whatever period the selector names. Filtering
-   * by upload date is what made this strip print words instead of money for a
-   * niche whose channels published before the period, which is most niches
-   * most of the time.
-   *
-   * Read on the NICHE'S OWN format rather than the page's, so the views
-   * counted and the rate applied are quoted against the same population — the
-   * two are chosen by one value in one place.
-   *
-   * The upload-date basis keeps every job it still has on this card — the hit
-   * rate and the Shorts count above — because "how did recent output do?" is a
-   * real question about a period, and it is not this one. The stats above this
-   * strip move with the selector; this figure does not, and its tooltip says
-   * so.
+   * They used to be `calculateMarketShare` over the members' videos — lifetime
+   * views of what was PUBLISHED in the period. The money now prices views
+   * GAINED in the period, which is a snapshot delta the browser cannot
+   * compute from the dataset, so the page fetches it once (see `NichesPage`)
+   * and each card receives its own niche's slice through `gains`. The upload
+   * measure keeps every job it still has — the hit rate, the Shorts count,
+   * the market-share percentages elsewhere — because "how did recent output
+   * do?" and "what did the period pay?" are different questions, and only the
+   * second one is money.
    */
-  const nicheFormat = toNicheFormat(niche.format);
-  const totals = React.useMemo(
-    () =>
-      nicheViewTotals(
-        members.map((row) => ({
-          ownedByNorthstar: row.channel.ownershipType === "own",
-          videos: row.videos,
-        })),
-        nicheFormat,
-      ),
-    [members, nicheFormat],
-  );
-
   const best = summary.topChannel;
   /*
    * The top channel's OWN verdicts, so the range printed beside its rate is its
@@ -576,8 +614,11 @@ function NicheCard({
             access — see the note on `NicheDTO.rpm`. */}
         <NicheValueStrip
           niche={niche}
-          ourViews={totals.ourViews}
-          competitorViews={totals.competitorViews}
+          gained={gains.byId?.get(niche.id) ?? null}
+          loading={gains.loading}
+          error={gains.error}
+          measuredNote={gains.note}
+          historyBeganMs={gains.historyBeganMs}
         />
 
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">

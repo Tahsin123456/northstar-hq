@@ -14,7 +14,7 @@ import type {
   YouTubeConnectionDTO,
 } from "@/lib/dto";
 import { youtubeChannelUrl } from "@/lib/format";
-import { upsertChannel, type ChannelCredential } from "./channel-sync";
+import { recordChannelReading, upsertChannel, type ChannelCredential } from "./channel-sync";
 import { getCurrentOrgId } from "./user-service";
 import type { RawChannelItem, RawListResponse, RawThumbnails, YouTubeChannel } from "./youtube/types";
 
@@ -954,6 +954,9 @@ export async function linkConnectionToTrackedChannel(
   // The globally deduplicated Channel row, shared with competitor tracking —
   // the same channel must not exist twice because one route to it was OAuth.
   const channelRow = await upsertChannel(resolved);
+  // And its first channel-level reading, so the views-gained series starts
+  // the moment the channel is known rather than at its first sweep.
+  await recordChannelReading(channelRow, new Date());
 
   /*
    * READABILITY BEFORE OWNERSHIP. These two writes come first, and the order
@@ -1991,6 +1994,10 @@ export async function trackOwnChannel(options: {
   });
 
   const channelRow = await upsertChannel(resolved);
+  // Same as every other path that upserts a channel: the reading is filed at
+  // once, so the delta series has its first point today rather than at the
+  // next sweep.
+  await recordChannelReading(channelRow, new Date());
 
   const existing = await prisma.trackedChannel.findUnique({
     where: {

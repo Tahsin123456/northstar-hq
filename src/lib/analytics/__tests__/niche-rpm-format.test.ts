@@ -158,10 +158,12 @@ describe("the pricing-basis COPY tells each format's own truth", () => {
    * disagree in exactly the load-bearing sentence.
    */
   it("keeps the Shorts definition's engaged-views sentence, byte-identical", () => {
-    expect(trackedNicheValueDefinition("shorts")).toBe(TRACKED_NICHE_VALUE_DEFINITION);
-    expect(TRACKED_NICHE_VALUE_DEFINITION).toContain(
-      "A hand-entered rate is applied to ENGAGED views only",
-    );
+    // The function fills the history date into the template; the sentence
+    // that carries the arithmetic survives the fill untouched.
+    const sentence = "A hand-entered rate is applied to ENGAGED views only";
+    expect(TRACKED_NICHE_VALUE_DEFINITION).toContain(sentence);
+    expect(trackedNicheValueDefinition("shorts")).toContain(sentence);
+    expect(trackedNicheValueDefinition("shorts", Date.UTC(2026, 8, 1))).toContain(sentence);
   });
 
   it("says no engaged-view share applies on the longform variant", () => {
@@ -173,14 +175,14 @@ describe("the pricing-basis COPY tells each format's own truth", () => {
     expect(longform).not.toContain("Shorts view");
   });
 
-  it("uses one no-views line for both formats, and names no period in it", () => {
+  it("uses one no-views line for both formats, and names the period in it", () => {
     // The upload basis needed a per-format noun ("No Shorts in this period" /
-    // "No videos…"); this is a statement about a view TOTAL, so one line
-    // serves both and the two products cannot drift apart on the same state.
-    expect(NICHE_NO_VIEWS).toBe("No views to price");
-    // The figure it stands in for counts every view the tracked channels
-    // have, so naming a period here would blame a window that is not
-    // involved.
-    expect(NICHE_NO_VIEWS).not.toContain("period");
+    // "No videos…"); a gain is a movement of views, the same word on both
+    // sides, so one line serves both and the two products cannot drift
+    // apart on the same state.
+    expect(NICHE_NO_VIEWS).toBe("No views gained in this period");
+    // The figure it stands in for is a PERIOD's gain, so the sentence sends
+    // the reader to the selector rather than to the tracker.
+    expect(NICHE_NO_VIEWS).toContain("period");
   });
 });

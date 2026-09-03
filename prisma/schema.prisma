@@ -616,9 +616,55 @@ model Channel {
   notes          Note[]
   financeEntries FinanceEntry[]
   revenueDays    ChannelRevenueDay[]
+  viewSnapshots  ChannelViewSnapshot[]
 
   @@index([lastFetchedAt])
   @@map("channels")
+}
+
+/// Append-only history of a CHANNEL's public counters — one row per sync.
+///
+/// WHY CHANNEL-LEVEL, WHEN `VideoSnapshot` ALREADY EXISTS. The niche money
+/// figure is "the views a channel gained in the period, however old the video
+/// that earned them", and YouTube reports exactly that number once per
+/// channel: `statistics.viewCount` is the lifetime total over EVERY upload,
+/// including the ones older than the lookback the video walk stops at. A sum
+/// of per-video deltas can only ever cover the videos the app holds rows for,
+/// needs a reading on both sides of the period for each of them, and is
+/// therefore thinned by every video swept late or never seen. One reading of
+/// the channel counter, subtracted from an earlier one, is the whole answer
+/// with none of those holes — and it costs nothing extra, because
+/// `getChannelsByIds` is already spent on every sync.
+///
+/// NO CHANGED-ONLY GUARD, unlike `VideoSnapshot`. A video row that has not
+/// moved is skipped there to keep a stalled Short from costing 24 identical
+/// rows a day. A channel reading that has not moved is INFORMATION for a
+/// delta: it proves the count stood still across that interval, and a series
+/// with the unchanged readings left out cannot distinguish "nothing happened"
+/// from "nobody looked". One row per channel per sync is a few rows a day.
+///
+/// `capturedAt` is the five-minute bucket of the sync, exactly as
+/// `VideoSnapshot.capturedAt` is, and the unique below makes an overlapping
+/// pair of syncs collide rather than double-write — see the upsert in
+/// `channel-sync`.
+///
+/// Portability contract as everywhere in this file: no enums, no scalar
+/// lists, no `@db.*`. Counters are BigInt because channel lifetime views
+/// routinely exceed 2^31.
+model ChannelViewSnapshot {
+  id        String  @id @default(cuid())
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  viewCount       BigInt
+  subscriberCount BigInt?
+  videoCount      BigInt?
+
+  capturedAt DateTime @default(now())
+
+  @@unique([channelId, capturedAt])
+  @@index([capturedAt])
+  @@map("channel_view_snapshots")
 }
 
 /// Join between a user and a channel they track. Removing a channel from the

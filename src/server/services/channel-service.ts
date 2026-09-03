@@ -19,7 +19,12 @@ import type {
 import { youtubeChannelUrl } from "@/lib/format";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { setChannelNiches } from "./niche-service";
-import { syncChannel, upsertChannel, type SyncOptions } from "./channel-sync";
+import {
+  recordChannelReading,
+  syncChannel,
+  upsertChannel,
+  type SyncOptions,
+} from "./channel-sync";
 import {
   buildChannelSyncOptions,
   buildSyncOptions,
@@ -178,6 +183,9 @@ export async function addChannel(
   const { channel: resolved } = await resolveChannel(input);
 
   const channelRow = await upsertChannel(resolved);
+  // The channel's first reading in the views-gained series, filed the moment
+  // it is added — see `recordChannelReading` for why every upsert path does.
+  await recordChannelReading(channelRow, new Date());
 
   const existingTracking = await prisma.trackedChannel.findUnique({
     where: { organizationId_channelId: { organizationId, channelId: channelRow.id } },

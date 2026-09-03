@@ -190,42 +190,39 @@ export interface NicheDTO extends NicheRefDTO {
  * VIEW COUNTS ONLY — no rate and no money. The pricing happens in the browser
  * against `NicheDTO.rpm`, which stays behind `finance.view`; these are the
  * same class of figures the dataset already publishes to every
- * `analytics.view` holder, read from the snapshot series instead of from the
- * lifetime counters.
+ * `analytics.view` holder, read from the CHANNEL counter series
+ * (`ChannelViewSnapshot`) rather than from the lifetime counters.
  */
 export interface NicheViewsGainedEntryDTO {
   readonly nicheId: string;
-  /** Snapshot-delta views gained by channels Northstar owns. Clamped nowhere:
-   * a purge-driven negative sum is real and the pricing layer clamps for
-   * display. */
+  /**
+   * Views gained by channels Northstar owns — each channel's counter delta
+   * over the span, scaled by its estimated share of this niche's format.
+   * Clamped nowhere: a purge-driven negative sum is real and the pricing
+   * layer clamps for display.
+   */
   readonly ourViewsGained: number;
-  /** The same delta for every other tracked channel in the niche. */
+  /** The same figure for every other tracked channel in the niche. */
   readonly competitorViewsGained: number;
   /**
-   * Coverage, summed over EVERY member channel's library — including channels
-   * where nothing could be measured. The money layer holds these against the
-   * 0.9 floor before it prints a figure; a covered count quietly excluding
-   * the unmeasured channels would let a thin history price a whole niche.
+   * How many of the niche's member channels the figure actually covers. A
+   * channel with fewer than two readings across the span, or with no
+   * classified video to estimate a format share from, is in `totalChannels`
+   * and in nothing else — its missing views are unknown, not zero, and the
+   * surfaces caption a partial figure with these two counts.
    */
-  readonly coveredVideos: number;
-  readonly totalVideos: number;
-  /**
-   * THIS niche's ragged head and tail, in milliseconds — how far into the
-   * measured span the latest baseline used sits, and how far short of its close
-   * the earliest end reading used falls. Both 0 means this niche's figure
-   * covers the whole span.
-   *
-   * Per niche and not only per page, because the caveat these produce is
-   * rendered directly beneath ONE niche's money figure on its card. The
-   * page-level maxima on the DTO root belong to the Overview panel, which
-   * describes the page; putting them under a single niche asserted a
-   * (conservative, but invented) fact about a figure that may be exact.
-   */
-  readonly maxBaselineLagMs: number;
-  readonly maxEndLagMs: number;
+  readonly measuredChannels: number;
+  readonly totalChannels: number;
   /** Own channels that actually measured something — the double-count check's
    * input, mirroring `NicheEarningsInput.ownChannelIds`. */
   readonly ownChannelIds: readonly string[];
+  /**
+   * How the channel-wide counter was split between Shorts and long-form:
+   * always by the mix seen in the channel's stored uploads, never measured —
+   * YouTube reports one lifetime count per channel. Carried on the wire so
+   * no surface can forget to say the figure is an estimate.
+   */
+  readonly shareBasis: "estimated";
 }
 
 /**
@@ -233,59 +230,29 @@ export interface NicheViewsGainedEntryDTO {
  * history actually reaches.
  *
  * `measuredFromMs` is the honest start: the requested start, or the first
- * instant the organization's snapshot history covers, whichever is later.
- * `null` means NOTHING could be measured — no snapshots at all, or a period
- * that ends before the history begins — and the client renders words for that
- * state rather than a fabricated zero. `requestedStartMs` travels back so the
- * label "measured over the last N of M days" can be derived without trusting
- * the client's own copy of the range.
+ * instant EVERY measurable channel holds a reading, whichever is later — see
+ * `channel-views-gained.ts` for why the max of first readings rather than
+ * the min. `null` means NOTHING could be measured — no readings at all, or a
+ * history beginning at or after the period's close — and the client renders
+ * words for that state rather than a fabricated zero. `requestedStartMs`
+ * travels back so the label "measured over the last N of M days" can be
+ * derived without trusting the client's own copy of the range.
  */
 export interface NicheViewsGainedDTO {
   readonly requestedStartMs: number;
   readonly endMs: number;
   readonly measuredFromMs: number | null;
   /**
-   * The first instant the PRICED population's snapshot history covers — the
-   * member channels of this format's visible niches, and only this format's
-   * videos. Not an org-wide minimum: one drawn from a wider population sits
-   * earlier than any priced video's first reading and spends the whole baseline
-   * grace before the measurement starts.
+   * The instant from which every measurable member channel holds a reading —
+   * the unclamped span start — so a tooltip can say when the view history
+   * began. `null` when no channel holds a usable reading.
    */
-  readonly earliestSnapshotMs: number | null;
+  readonly historyBeganMs: number | null;
   /**
-   * How far into the measured span the raggedest video's own history starts,
-   * in milliseconds — the PAGE-wide maximum, for the page-wide label. 0 means
-   * no counted video was baselined after the span opened; `null` means nothing
-   * was measured at all.
-   *
-   * First-ever snapshots are written channel by channel over minutes to hours,
-   * so `measuredFromMs` — the earliest capture among the priced videos — is the
-   * instant at which the FEWEST of them have a reading. Videos that start a
-   * little later are measured from their own first reading rather than dropped
-   * (which is what previously took coverage to a few percent and printed "Not
-   * enough view history yet" under every niche); this is the exact size of the
-   * head of the span the worst of them is missing, and `measuredSpanNoteFrom`
-   * turns it into the sentence the owner reads.
-   *
-   * WHAT IT DOES TO THE FIGURE, honestly: a later baseline normally subtracts
-   * views that were already there, so the figure is understated. The exception
-   * is a YouTube purge landing inside that missing head — the delta cannot see
-   * it, and the figure is overstated by the purged amount. Bounded in TIME by
-   * the grace, not in magnitude. Rare, real, and pinned by a test rather than
-   * asserted away.
-   */
-  readonly maxBaselineLagMs: number | null;
-  /**
-   * How far BEFORE the measured span's close (or before now, when the period
-   * has not closed yet) the earliest end reading used sits — again the
-   * page-wide maximum. 0 means every counted video was read at the very end.
-   *
-   * The two gaps are reported separately because they have different causes and
-   * different sizes. A video past its hit window is snapshotted at most daily
-   * and not at all while its count is unmoved, so the tail is routinely the
-   * LARGER of the two: on a 36-hour measured span a one-day tail is a third of
-   * the figure, with a perfectly clean head — which is exactly the case a
-   * head-only caveat stayed silent for.
+   * How far BEFORE the period's close (or before now, when the period has not
+   * closed yet) the oldest end reading actually used sits — the page-wide
+   * maximum. Readings arrive every sweep, so this is normally hours; the label
+   * states it when it passes an hour. `null` when nothing was measured.
    */
   readonly maxEndLagMs: number | null;
   /** One entry per visible niche of the requested format. A niche outside the

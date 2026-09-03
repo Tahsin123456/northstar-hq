@@ -1,13 +1,13 @@
-import { videosOfFormat } from "./filters";
-import { sum } from "./stats";
 import {
+  HISTORY_DATE_PLACEHOLDER,
   calculateNicheValue,
+  fillHistoryDate,
   rpmBounds,
   type NicheRpmResolution,
   type NicheValue,
   type ProjectedMoney,
 } from "./niche-rpm";
-import type { AnalyticsVideo } from "./types";
+import { measuredChannelsCaption } from "./views-gained-labels";
 import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-format";
 
 /**
@@ -17,34 +17,26 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  *
  * The owner's seventh request: "I should be able to see how much the niche
  * generates in $ under Overview, but again, this should only be visible to
- * Admins."
+ * Admins." And his definition of the figure, verbatim: "Niche earnings = the
+ * overall views a channel generated in the given timeframe — the channel
+ * might have videos from 2-3 months before that still generate views and they
+ * should count — x the set niche RPM range."
  *
  * ---------------------------------------------------------------------------
- * WHAT IS PRICED: ALL THE VIEWS THE TRACKED CHANNELS HAVE
+ * WHAT IS PRICED: THE VIEWS THE TRACKED CHANNELS GAINED IN THE PERIOD
  * ---------------------------------------------------------------------------
- * Every view of every video the tracker holds for the channels in this niche,
- * of this niche's format, multiplied by the niche's rate. Not the views of
- * what happened to be uploaded inside the selected period, and not a snapshot
- * delta over the period either.
+ * Each member channel's lifetime view counter, read at the period's start and
+ * at its close, the difference scaled by the channel's estimated share of the
+ * niche's format, summed over the niche, priced at the niche's rate. Every
+ * video the channel has is inside that counter however old it is; nothing
+ * depends on when anything was uploaded.
  *
- * BOTH OF THOSE WERE TRIED AND BOTH PRINTED WORDS INSTEAD OF MONEY, for the
- * same underlying reason: they asked what a WINDOW produced, and a window is
- * exactly the thing the app cannot always see. The upload basis showed nothing
- * for a niche whose channels published before the period — which is most
- * niches, most of the time. The gains basis showed nothing wherever the
- * recorded view history was shallower than the period — which was everywhere,
- * because the history is days old.
- *
- * This basis needs neither. Every video's current view count is already in the
- * dataset payload the browser is holding, so the figure is computable today,
- * always, with no endpoint, no coverage floor and nothing to wait for.
- *
- * THE PERIOD SELECTOR THEREFORE DOES NOT MOVE THESE FIGURES, and the
- * definition says so out loud — a money number sitting beside a 7d/30d control
- * that ignores it is a number a reader will otherwise assume is broken. The
- * hit rate, Upload views and the market-share percentages keep the upload-date
- * basis: "how did recent output do?" is a real question about a period, and it
- * is not this one.
+ * TWO OTHER BASES WERE SHIPPED AND BOTH WERE WRONG, in opposite directions.
+ * The upload-date basis priced the lifetime views of whatever was PUBLISHED in
+ * the period, so a niche whose channels posted before it showed nothing. The
+ * lifetime basis priced every view the channels had EVER had, so a 30-day
+ * label sat over a figure six figures too high and the period selector did
+ * not move it. The channel delta is the one the owner actually described.
  *
  * ---------------------------------------------------------------------------
  * A PURE FUNCTION, BECAUSE THE HARD PARTS ARE ALL RULES
@@ -57,7 +49,7 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  * test states rather than a component nobody can mount.
  *
  * ---------------------------------------------------------------------------
- * THREE REFUSALS, AND WHY EACH ONE IS A REFUSAL RATHER THAN A ZERO
+ * FOUR REFUSALS, AND WHY EACH ONE IS A REFUSAL RATHER THAN A ZERO
  * ---------------------------------------------------------------------------
  * 1. WITHHELD. `NicheDTO.rpm` is `null` for a reader without `finance.view` —
  *    the server does not send the economics at all. The panel is then ABSENT,
@@ -71,11 +63,16 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  *    the resolver already computed. It does NOT render a table of "$0.00",
  *    which would tell an owner his catalogue generates nothing.
  *
- * 3. NO VIEWS. A priced niche whose tracked channels hold no views of this
- *    format really does price to zero, and the arithmetic is correct — but "$0"
- *    under a niche's name reads as a claim about the niche's worth rather than
- *    about an empty tracker. Words, not a figure. Same rule the niche card
- *    already follows.
+ * 3. MEASURING. A priced niche none of whose channels holds two readings yet
+ *    — the first reading was taken, the second comes with the next refresh.
+ *    Its gain is UNKNOWN, not zero, and the sentence says when the figure
+ *    arrives. A PARTIALLY measured niche is priced, with a caption saying how
+ *    many of its channels the figure covers.
+ *
+ * 4. NO VIEWS. A priced, measured niche whose channels gained nothing really
+ *    does price to zero, and the arithmetic is correct — but "$0" under a
+ *    niche's name reads as a claim about the niche rather than about the
+ *    period. Words, not a figure. Same rule the niche card follows.
  *
  * ---------------------------------------------------------------------------
  * THE TOTAL IS THE DANGEROUS PART
@@ -93,61 +90,16 @@ import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-forma
  * silently doubled one costs him a decision.
  */
 
-/** One tracked channel, as the money basis needs it. */
-export interface NicheChannelViews {
-  /** True for a channel Northstar operates — `ownershipType === "own"`. */
-  readonly ownedByNorthstar: boolean;
-  /** Every video the dataset holds for it. Not pre-filtered by date; see below. */
-  readonly videos: readonly AnalyticsVideo[];
-}
+/** How much of a niche the gains figure covers, or `null` when nothing was measured at all. */
+export type MeasuredChannels = {
+  readonly measuredChannels: number;
+  readonly totalChannels: number;
+} | null;
 
-/** The two totals every niche money figure is built from. */
-export interface NicheViewTotals {
-  readonly ourViews: number;
-  readonly competitorViews: number;
-}
-
-/**
- * THE MONEY BASIS, IN ONE FUNCTION, FOR BOTH SURFACES.
- *
- * Every view of this format that the tracker holds for these channels, split
- * into Northstar's and everybody else's. `videosOfFormat`, deliberately — no
- * date window anywhere in it:
- *
- *   • A channel's back catalogue keeps earning long after its upload date
- *     leaves any period a selector can name, so filtering by upload date
- *     answers "how did recent output do?" while the label above it says
- *     "what is this niche generating".
- *   • It is also what made these surfaces print sentences instead of money.
- *     A niche whose channels all published before the selected period had a
- *     total of zero, which the honesty rules correctly refuse to render as
- *     "$0" — so the owner saw words where he had asked for a figure, in the
- *     ordinary case rather than an edge one.
- *
- * ONE FUNCTION BECAUSE THERE ARE TWO SURFACES. The Overview panel and the
- * niche card's value strip must never report different money for the same
- * niche; sharing the selector is what makes that structural rather than a
- * thing two files remember to keep in step — the same argument
- * `calculateMarketShare` carries for the share percentages.
- *
- * The format filter is `isVideoOfFormat`, so a video the classifier could not
- * resolve is in NEITHER format and its views are never priced into a format
- * that never claimed it.
- */
-export function nicheViewTotals(
-  channels: readonly NicheChannelViews[],
-  format: NicheFormat,
-): NicheViewTotals {
-  const viewsOf = (owned: boolean): number =>
-    sum(
-      channels
-        .filter((channel) => channel.ownedByNorthstar === owned)
-        .flatMap((channel) =>
-          videosOfFormat(channel.videos, format).map((video) => video.views),
-        ),
-    );
-
-  return { ourViews: viewsOf(true), competitorViews: viewsOf(false) };
+/** Is this niche still waiting for its first delta? */
+export function isStillMeasuring(measured: MeasuredChannels): boolean {
+  if (measured === null) return true;
+  return measured.totalChannels > 0 && measured.measuredChannels === 0;
 }
 
 /** One niche, as the panel is handed it. */
@@ -170,16 +122,18 @@ export interface NicheEarningsInput {
    * That is what lets the disclosure test below be a single check.
    */
   readonly rpm: NicheRpmResolution | null;
+  /** Views gained over the measured span by channels Northstar owns. */
+  readonly ourViewsGained: number;
+  /** The same figure for every other tracked channel in this niche. */
+  readonly competitorViewsGained: number;
   /**
-   * ALL views held for channels Northstar owns in this niche, of this niche's
-   * format. Every video the tracker has for them, regardless of upload date —
-   * see the header. The caller sums it with `videosOfFormat`.
+   * How many of the niche's channels the gains above cover. `null` when the
+   * endpoint could measure nothing — no history reaching the period at all —
+   * which is the same "measuring" state said harder.
    */
-  readonly ourViews: number;
-  /** The same total for every other tracked channel in this niche. */
-  readonly competitorViews: number;
+  readonly measured: MeasuredChannels;
   /**
-   * The own channels behind `ourViews`.
+   * The own channels behind `ourViewsGained`.
    *
    * Carried solely to detect the double-count above. Ids rather than a count,
    * because the question is whether the SAME channel appears twice across
@@ -190,11 +144,13 @@ export interface NicheEarningsInput {
 
 /** Why a niche has no figure on this panel. */
 export type NicheEarningsState =
-  /** A rate applies and the tracked channels have views. There is money to show. */
+  /** A rate applies and views were gained and measured. There is money to show. */
   | "priced"
-  /** A rate applies and nothing tracked here has any views of this format.
-   * Words, not "$0". */
+  /** A rate applies and nothing tracked here gained views. Words, not "$0". */
   | "no_views"
+  /** A rate applies and no channel holds two readings yet. Words, and a
+   * promise of when: the next refresh. */
+  | "measuring"
   /** No rate applies at all. The resolver's own reason travels on the row. */
   | "unpriced";
 
@@ -208,8 +164,15 @@ export interface NicheEarningsRow {
   readonly state: NicheEarningsState;
   /** The resolution, so the row can name its rate, its basis and its reasons. */
   readonly rpm: NicheRpmResolution;
-  /** Always computed — the view figures are real even where the money is not. */
+  /** Always computed — the view figures are real even where the money is not.
+   * On a `measuring` row the money inside MUST NOT render: nothing was
+   * measured, which is why the state exists. */
   readonly value: NicheValue;
+  /** The coverage behind the row, so a partial figure can say how partial. */
+  readonly measured: MeasuredChannels;
+  /** "3 of 5 channels measured" under a partial figure; null when the figure
+   * covers the whole niche or is not a figure at all. */
+  readonly measuredCaption: string | null;
 }
 
 /** Why there is no single portfolio figure. `null` when there is one. */
@@ -217,14 +180,21 @@ export type NoTotalReason =
   /** Not one niche has a rate. */
   | "nothing_priced"
   /**
-   * Every niche that HAS a rate holds no views at all.
+   * Every niche that HAS a rate — and was measured — gained nothing over the
+   * measured days.
    *
    * Split out from `nothing_priced` because the two states are opposite
    * instructions to the owner — one is waiting for a decision, the other for
-   * channels or a refresh — and collapsing them made the panel tell an owner
-   * who had just entered his first RPM that he had entered none.
+   * a wider period or the next refresh — and collapsing them made the panel
+   * tell an owner who had just entered his first RPM that he had entered none.
    */
   | "no_views"
+  /**
+   * Every rate-bearing niche is still waiting for its second reading, so no
+   * money figure exists to add. The instruction is a third one again: wait
+   * for the next refresh.
+   */
+  | "still_measuring"
   /**
    * A channel is filed under two priced niches, so its views would be counted
    * twice — and at two different rates, which is not a figure that exists.
@@ -248,8 +218,8 @@ export interface NicheEarningsPanel {
   /** How many rows actually carry money. */
   readonly pricedCount: number;
   /**
-   * Northstar's own views, priced, summed over DISTINCT channels — or `null`,
-   * with `noTotalReason` saying why.
+   * Northstar's own gained views, priced, summed over DISTINCT channels — or
+   * `null`, with `noTotalReason` saying why.
    *
    * NEVER A PARTIAL SUM PRESENTED AS A TOTAL, and the second half of that
    * sentence is the half that was missing. The sum genuinely covers only the
@@ -314,29 +284,47 @@ export function buildNicheEarnings(
     const format = niche.format ?? DEFAULT_NICHE_FORMAT;
     const bounds = rpmBounds(niche.rpm, format);
     const value = calculateNicheValue({
-      ourViews: niche.ourViews,
-      competitorViews: niche.competitorViews,
+      // `calculateNicheValue` clamps a negative input to 0, which is exactly
+      // right here: a purge-driven negative sum is a real view movement and
+      // an impossible amount of money, so the view figure survives raw in the
+      // DTO while the pricing floor stops at nothing.
+      ourViews: niche.ourViewsGained,
+      competitorViews: niche.competitorViewsGained,
       bounds,
       // Off the resolution, where it travels welded to the rate it scales.
       engagedViewShareBasisPoints: niche.rpm.engagedViewShareBasisPoints,
     });
+
+    const state: NicheEarningsState =
+      bounds === null
+        ? "unpriced"
+        : // Measurement first, gains second: a niche nothing has measured has
+          // an UNKNOWN gain, and "no views gained" would be a claim the
+          // measurement never made.
+          isStillMeasuring(niche.measured)
+          ? "measuring"
+          : // `capturePercent` is null exactly when the measured niche gained
+            // nothing, which is the one case where a correct "$0" would be
+            // read as a claim about the niche.
+            value.capturePercent === null
+            ? "no_views"
+            : "priced";
 
     rows.push({
       id: niche.id,
       name: niche.name,
       colorIndex: niche.colorIndex,
       format,
-      state:
-        bounds === null
-          ? "unpriced"
-          : // `capturePercent` is null exactly when the tracked channels hold
-            // no views at all, which is the one case where a correct "$0"
-            // would be read as a claim about the niche.
-            value.capturePercent === null
-            ? "no_views"
-            : "priced",
+      state,
       rpm: niche.rpm,
       value,
+      measured: niche.measured,
+      // Only under a figure. A caption saying "0 of 4 channels measured" under
+      // the measuring sentence would say the same thing twice, worse.
+      measuredCaption:
+        state === "priced" && niche.measured !== null
+          ? measuredChannelsCaption(niche.measured)
+          : null,
     });
   }
 
@@ -344,12 +332,13 @@ export function buildNicheEarnings(
 
   if (priced.length === 0) {
     /*
-     * TWO DIFFERENT NOTHINGS, and telling them apart is the whole point.
+     * THREE DIFFERENT NOTHINGS, and telling them apart is the whole point.
      *
-     * "No niche has a rate" and "the rated niches have no views" are two
-     * different instructions to the owner — enter a rate; add the channels, or
-     * wait for the next refresh to bring their videos in. The rows are right
-     * either way; what changes is which sentence sits above them.
+     * "No niche has a rate", "the rated niches gained nothing", and "the
+     * rated niches are still on their first reading" are three different
+     * instructions to the owner — enter a rate; widen the period or wait for
+     * the next refresh; wait for the next refresh. The rows are right either
+     * way; what changes is which sentence sits above them.
      */
     const rated = rows.filter((row) => row.state !== "unpriced");
     return {
@@ -357,7 +346,12 @@ export function buildNicheEarnings(
       rows,
       pricedCount: 0,
       total: null,
-      noTotalReason: rated.length === 0 ? "nothing_priced" : "no_views",
+      noTotalReason:
+        rated.length === 0
+          ? "nothing_priced"
+          : rated.every((row) => row.state === "measuring")
+            ? "still_measuring"
+            : "no_views",
       totalLabel: "",
       totalIsPartial: false,
     };
@@ -471,45 +465,39 @@ export function nicheEarningsTotalLabel(
  *
  * PAST TENSE, NOT PRESENT PROGRESSIVE. "is generating" is a rate, and a rate
  * with no time unit beside it is read as one — per month, most often. The
- * figure beneath is a cumulative total of every view on record, so a reader
- * doing that gets a number wrong by however many months the window holds.
+ * figure beneath is what the period produced, and the span note under the
+ * heading says which days that was.
  */
 export const NICHE_EARNINGS_LABEL = "What each tracked niche has generated";
 
 /**
- * The definition.
+ * The definition, as a template.
  *
- * FOUR FACTS, IN THE ORDER A READER NEEDS THEM: what is multiplied by what;
- * how far back "every view" actually reaches; that the period selector does
- * not change it; and that the view total only contains channels somebody
- * added, so it moves when the tracker does.
+ * FIVE FACTS, IN THE ORDER A READER NEEDS THEM: what is multiplied by what;
+ * that every video counts however old it is; that the Shorts/long-form split
+ * is an estimate, because YouTube reports one count per channel; when the
+ * history began, so a period reaching further back is understood to be
+ * measured over the recorded days; and that the figure only counts channels
+ * somebody added, so it moves when the tracker does.
  *
- * THE WINDOW IS NAMED RATHER THAN DENIED. An earlier draft of this sentence
- * said "however long ago it was posted", which is false: `buildDataset` fetches
- * `videos: { where: { publishedAt: { gte: since } } }` with `since` derived
- * from the org's `lookbackDays`, and `channel-sync` never ingests older uploads
- * in the first place. At the 400-day default the difference is invisible, but a
- * team that narrows the window would see the money shrink under a sentence
- * promising nothing was missing. A stated bound can be argued with; a silent
- * one reads as a bug.
- *
- * There is deliberately nothing here about view history, recorded days or
- * measured spans — none of that is involved in this figure any more, and a
- * caveat about machinery a number does not use is just a reason to distrust
- * the number.
+ * `{date}` is filled by `nicheEarningsDefinition` from the response's own
+ * `historyBeganMs`; nothing renders the constant raw. Written for the owner,
+ * who is not technical: no "snapshot", no "delta", no "coverage".
  */
-export const NICHE_EARNINGS_DEFINITION =
-  "For each niche, every Shorts view the channels tracked in it have — all of them, across every Short the tracker has on record, back as far as the history window set under Settings — priced at that niche's RPM. Changing the period at the top of the page does not change these figures; the period decides which uploads the other stats count, not how many views a channel has. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
+export const NICHE_EARNINGS_DEFINITION = `For each niche, the views its tracked channels gained during the selected period — across every video they have, however long ago it was posted — priced at the niche's RPM. Each channel's total is split between Shorts and long-form by the mix seen in its uploads, so the Shorts figure is an estimate. View history began on ${HISTORY_DATE_PLACEHOLDER}; when the period reaches further back, the figure covers the recorded days and the label says so. Only channels in your tracker count, so it moves when you add or remove a competitor. A hand-entered rate is applied to engaged views only — the paid subset of the view count, set under Settings.`;
 
-/** The Long Form panel's copy of the definition — the views are not Shorts there. */
-export const NICHE_EARNINGS_DEFINITION_LONGFORM =
-  "For each niche, every long-form view the channels tracked in it have — all of them, across every video the tracker has on record, back as far as the history window set under Settings — priced at that niche's RPM. Changing the period at the top of the page does not change these figures; the period decides which uploads the other stats count, not how many views a channel has. Every figure only counts channels in your tracker, so it moves when you add or remove a competitor.";
+/** The Long Form panel's copy of the definition — the views are not Shorts there, and no engaged-view share applies. */
+export const NICHE_EARNINGS_DEFINITION_LONGFORM = `For each niche, the long-form views its tracked channels gained during the selected period — across every video they have, however long ago it was posted — priced at the niche's RPM. Each channel's total is split between Shorts and long-form by the mix seen in its uploads, so the long-form figure is an estimate. View history began on ${HISTORY_DATE_PLACEHOLDER}; when the period reaches further back, the figure covers the recorded days and the label says so. Only channels in your tracker count, so it moves when you add or remove a competitor. Every rate here is applied to the full view count: long-form RPM is quoted per 1,000 views, and no engaged-view share applies.`;
 
-/** The definition for the panel a page of the given format mounts. */
-export function nicheEarningsDefinition(format: NicheFormat): string {
-  return format === "shorts"
-    ? NICHE_EARNINGS_DEFINITION
-    : NICHE_EARNINGS_DEFINITION_LONGFORM;
+/** The definition for the panel a page of the given format mounts, with the history date in. */
+export function nicheEarningsDefinition(
+  format: NicheFormat,
+  historyBeganMs: number | null = null,
+): string {
+  return fillHistoryDate(
+    format === "shorts" ? NICHE_EARNINGS_DEFINITION : NICHE_EARNINGS_DEFINITION_LONGFORM,
+    historyBeganMs,
+  );
 }
 
 /** Why no niche has a figure — the missing-decision state. */
@@ -525,23 +513,16 @@ export const NICHE_EARNINGS_NOTHING_PRICED =
  * rather than zero, so the true number is higher by an amount nobody can bound.
  */
 export const NICHE_EARNINGS_PARTIAL_TOTAL =
-  "This total covers only the niches that have a rate. The rest are not zero — they are unpriced, so nothing here estimates them, and the real figure is higher by however much they are worth. Give them an RPM range to bring them in.";
+  "This total covers only the niches that have a rate and a figure. The rest are not zero — they are unpriced or still measuring, so nothing here estimates them, and the real figure is higher by however much they are worth.";
 
 /** One sentence per reason a portfolio total is withheld. */
 export const NO_TOTAL_EXPLANATION: Readonly<Record<NoTotalReason, string>> = {
   nothing_priced:
     "No niche has a rate, so there is no total to add up.",
-  /*
-   * NO CAUSE ASSERTED, because the state cannot tell them apart. It fires on
-   * zero VIEWS, and the ways to reach that include an empty niche, a niche
-   * whose channels only post the other format, and — under a narrow history
-   * window — channels with a full back catalogue, all of it older than the
-   * window. An earlier draft said "no channel tracked in it has a single video
-   * of this format yet", which tells an owner looking at three channels on the
-   * card to go and add the channels that are already there.
-   */
   no_views:
-    "Every niche with a rate has no views to price — nothing tracked in them has any views of this format on record. Either no channel is filed under those niches, or nothing those channels posted falls inside the history window set under Settings.",
+    "Every niche with a rate gained no views over the measured days — nothing tracked in them moved, or no channel is filed under them yet — so there is nothing to add up. Try a wider period, or check back after the next refresh.",
+  still_measuring:
+    "Every niche with a rate is on its first reading. Views gained is the difference between two readings, so the first total appears once the next refresh has taken the second one.",
   channel_in_two_priced_niches:
     "One of Northstar's channels is filed under two priced niches, so adding the niches together would count its views twice — at two different rates. The per-niche figures below are each correct on their own; no single total is.",
   mixed_currency:

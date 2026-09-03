@@ -58,10 +58,9 @@ beforeEach(() => {
     requestedStartMs: START_MS,
     endMs: END_MS,
     measuredFromMs: START_MS,
-    earliestSnapshotMs: START_MS,
     // The stub carries the real shape, or the route test drifts from what the
     // service actually returns and stops proving the pass-through.
-    maxBaselineLagMs: 0,
+    historyBeganMs: START_MS,
     maxEndLagMs: 0,
     niches: [],
   });

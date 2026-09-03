@@ -11,18 +11,15 @@ export const dynamic = "force-dynamic";
  * GET /api/niches/views-gained?format=…&startMs=…&endMs=…
  *
  * Views gained per visible niche of one format over the covered part of the
- * requested period, from the snapshot series. Reports `measuredFromMs` so a
+ * requested period, from the CHANNEL counter series (`ChannelViewSnapshot`)
+ * — see `niche-views-gained-service.ts`. Reports `measuredFromMs` so a
  * caller can label a span the history only partly covers rather than
  * presenting it as the whole period.
  *
- * RETAINED, AND NOT WHAT THE MONEY SURFACES READ. No rendered figure calls
- * this route: the niche earnings panel and the niche cards price every view
- * the tracked channels have, computed in the browser from the dataset payload
- * — see `niche-earnings.ts`. This endpoint is kept for a future "earned in
- * this period" figure, once the recorded view history is deep enough to
- * answer that question without refusing on most periods. `views-gained-labels`
- * holds the vocabulary such a figure needs. The derived-RPM path is a separate
- * live feature and does not go through here.
+ * THIS IS WHAT THE MONEY SURFACES READ: the niche earnings panel on Overview
+ * and the value strip on every niche card price these gains at the niche's
+ * rate. The derived-RPM path is a separate live feature and does not go
+ * through here.
  */
 export function GET(request: Request) {
   return handle(async () => {

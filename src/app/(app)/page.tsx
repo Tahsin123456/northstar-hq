@@ -443,9 +443,10 @@ export default function OverviewPage() {
 
             Still ungated on `isLoading` and `scopeIsEmpty`: it renders its own
             honest empty state, and on a deployment where no niche has a rate
-            that empty state is the whole of what it has to say.
+            that empty state is the whole of what it has to say. It reads the
+            page's own `range`, because it prices what the period GAINED.
           */}
-          <NicheEarningsPanel niches={niches} rows={rows} />
+          <NicheEarningsPanel niches={niches} range={range} />
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION}
