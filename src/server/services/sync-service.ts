@@ -23,6 +23,7 @@ import {
   syncRevenueForOrganization,
   type RevenueSyncSummary,
 } from "./youtube-revenue-service";
+import { SWEEP_TIME_BUDGET_MS, shouldDeferForTime } from "@/lib/sync/sweep-budget";
 import { resolveHitRule, HOUR_MS, type HitRule } from "@/lib/analytics/hit-rate";
 import { toNicheFormat, type NicheFormat } from "@/lib/niches/niche-format";
 import { isInsideWindow } from "@/lib/sync/snapshot-cadence";
@@ -105,6 +106,13 @@ export interface ScheduledSyncOptions {
    * scheduler never sets it.
    */
   readonly ignoreAutoRefreshSetting?: boolean;
+  /**
+   * How long the loop may keep STARTING channels before it stops cleanly and
+   * defers the rest to the next run. Defaults to `SWEEP_TIME_BUDGET_MS`; tests
+   * pass a small value. See `src/lib/sync/sweep-budget.ts` for why a clean stop
+   * beats the platform's kill.
+   */
+  readonly timeBudgetMs?: number;
   /** The originating Request, for audit context. Absent for a true cron run. */
   readonly request?: Request | null;
 }
@@ -143,6 +151,16 @@ export interface ScheduledSyncSummary {
    * null. `"QUOTA_EXCEEDED"` here is the normal, expected way a busy day ends.
    */
   readonly stoppedEarly: AppErrorCode | null;
+  /**
+   * Channels that were due and never started because the time budget ran out.
+   *
+   * Not an error and not in `stoppedEarly`, which names an UPSTREAM reason the
+   * run ended; running out of time is this run's own decision to stop before
+   * the platform stopped it. Counted inside `skipped` as well, so the four
+   * reconciling numbers still reconcile — this field only says how many of the
+   * skipped were skipped for time rather than for the per-run cap.
+   */
+  readonly deferredForTime: number;
   /**
    * The organization's stored "Automatic background refresh" setting, as read
    * at run time — not whether this particular run was allowed to proceed. See
@@ -609,6 +627,7 @@ export async function runScheduledSync(
     quotaUnitsUsed: 0,
     durationMs: Date.now() - startedAt,
     stoppedEarly: null,
+    deferredForTime: 0,
     autoRefreshEnabled: settings.autoRefreshEnabled,
     housekeeping,
     revenue,
@@ -703,12 +722,24 @@ export async function runScheduledSync(
   let failed = 0;
   let quotaUnitsUsed = 0;
   let stoppedEarly: AppErrorCode | null = null;
+  let deferredForTime = 0;
+  const timeBudgetMs = options.timeBudgetMs ?? SWEEP_TIME_BUDGET_MS;
 
   // Sequential, not parallel. A burst of concurrent refreshes is precisely the
   // traffic shape that earns a rate limit, and it also defeats the early stop
   // below: by the time the first QUOTA_EXCEEDED came back, the other requests
   // would already be in flight.
-  for (const channel of batch) {
+  for (const [index, channel] of batch.entries()) {
+    // Stop STARTING channels once the budget is spent, rather than letting the
+    // platform kill the run mid-channel — which also skips the hit-evaluation
+    // and revenue steps below and loses the summary. Everything not started
+    // here is simply the stalest next hour, so it goes first then. See
+    // `src/lib/sync/sweep-budget.ts`.
+    if (shouldDeferForTime(index, Date.now() - startedAt, timeBudgetMs)) {
+      deferredForTime = batch.length - index;
+      break;
+    }
+
     let result: SyncResult;
     try {
       // The window rides along per channel: everything else in these options is
@@ -767,6 +798,16 @@ export async function runScheduledSync(
     channelsSynced += 1;
   }
 
+  if (deferredForTime > 0) {
+    // Informational, not an error: the run did what a run is for and stopped
+    // on its own terms. Logged so "why is that channel an hour behind?" has an
+    // answer in the platform logs, where the 504 used to be.
+    console.warn(
+      `[sync] time budget reached after ${channelsSynced + failed} of ${batch.length} channels; ` +
+        `${deferredForTime} deferred to the next run`,
+    );
+  }
+
   // Last, and deliberately after the loop rather than inside it: the snapshots
   // this reads are the ones the sweep has just written, and a Short that was
   // pending at the top of the run may have had its window shut and its
@@ -783,6 +824,7 @@ export async function runScheduledSync(
     quotaUnitsUsed,
     durationMs: Date.now() - startedAt,
     stoppedEarly,
+    deferredForTime,
     autoRefreshEnabled: settings.autoRefreshEnabled,
     housekeeping,
     revenue,
