@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  BASELINE_LAG_FLOOR_MS,
   NICHE_EARNINGS_DEFINITION,
   NICHE_EARNINGS_DEFINITION_LONGFORM,
+  approxDurationCeil,
   buildNicheEarnings,
   hasUsableGainsHistory,
   measuredSpanNote,
@@ -488,6 +490,7 @@ describe("the measured-span label", () => {
   });
 
   const DAY_MS = 86_400_000;
+  const HOUR_MS = 3_600_000;
   const END = Date.UTC(2026, 7, 31);
 
   it("derives the note from the server's own echo of the request", () => {
@@ -496,16 +499,18 @@ describe("the measured-span label", () => {
         requestedStartMs: END - 30 * DAY_MS,
         measuredFromMs: END - 9 * DAY_MS,
         endMs: END,
+        maxBaselineLagMs: 0,
       }),
     ).toBe("Measured over the last 9 of 30 days — view history begins there.");
   });
 
-  it("says nothing when the whole period was measured", () => {
+  it("says nothing when the whole period was measured, for every video", () => {
     expect(
       measuredSpanNoteFrom({
         requestedStartMs: END - 30 * DAY_MS,
         measuredFromMs: END - 30 * DAY_MS,
         endMs: END,
+        maxBaselineLagMs: 0,
       }),
     ).toBeNull();
     expect(
@@ -513,8 +518,68 @@ describe("the measured-span label", () => {
         requestedStartMs: END - 30 * DAY_MS,
         measuredFromMs: null,
         endMs: END,
+        maxBaselineLagMs: null,
       }),
     ).toBeNull();
+  });
+
+  /**
+   * The half the label used to assert away. Videos are baselined on their own
+   * first reading when the sweep reached them late, so the span is no longer
+   * uniform across every video — and a note that went silent whenever the
+   * clamp had not fired would hide the caveat exactly where it is the only
+   * thing left to say.
+   */
+  it("speaks about ragged baselines even when the clamp never fired", () => {
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 30 * DAY_MS,
+        endMs: END,
+        maxBaselineLagMs: 2 * 3_600_000,
+      }),
+    ).toBe(
+      "Measured over the full 30 days. The app started recording some of these " +
+        "videos up to 2 hours into that span, so their first views are missing " +
+        "and this figure is a little low.",
+    );
+  });
+
+  it("states both caveats when the span is short AND the baselines are ragged", () => {
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 9 * DAY_MS,
+        endMs: END,
+        maxBaselineLagMs: 49 * 60_000,
+      }),
+    ).toBe(
+      "Measured over the last 9 of 30 days — view history begins there. " +
+        "The app started recording some of these videos up to 49 minutes into " +
+        "that span, so their first views are missing and this figure is a little low.",
+    );
+  });
+
+  /** A bound is only a bound if it rounds the safe way. */
+  it("rounds the stated gap UP, so 'up to' is never a claim the data cannot support", () => {
+    expect(approxDurationCeil(61 * 60_000)).toBe("2 hours");
+    expect(approxDurationCeil(90 * 1_000)).toBe("2 minutes");
+    expect(approxDurationCeil(3_600_000)).toBe("1 hour");
+    expect(approxDurationCeil(49 * HOUR_MS)).toBe("3 days");
+  });
+
+  it("stays quiet below the smallest unit it can express", () => {
+    // Half a minute of raggedness would render as "up to 0 minutes" or force a
+    // false round-up; a caveat under every figure forever is noise, not honesty.
+    expect(
+      measuredSpanNoteFrom({
+        requestedStartMs: END - 30 * DAY_MS,
+        measuredFromMs: END - 30 * DAY_MS,
+        endMs: END,
+        maxBaselineLagMs: 30_000,
+      }),
+    ).toBeNull();
+    expect(BASELINE_LAG_FLOOR_MS).toBe(60_000);
   });
 });
 

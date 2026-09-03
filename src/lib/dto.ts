@@ -231,6 +231,22 @@ export interface NicheViewsGainedDTO {
   readonly endMs: number;
   readonly measuredFromMs: number | null;
   readonly earliestSnapshotMs: number | null;
+  /**
+   * How far into the measured span the raggedest video's own history starts,
+   * in milliseconds. 0 means every counted video was measured over the whole
+   * span; `null` means nothing was measured at all.
+   *
+   * First-ever snapshots are written channel by channel over minutes to hours,
+   * so `measuredFromMs` — the org-wide earliest capture — is the instant at
+   * which the FEWEST videos have a reading. Videos that start a little later
+   * are measured from their own first reading rather than dropped (which is
+   * what previously took coverage to a few percent and printed "Not enough
+   * view history yet" under every niche); this is the exact size of the head of
+   * the span the worst of them is missing. The figure can only be understated
+   * by it, never overstated, and `measuredSpanNoteFrom` turns it into the
+   * sentence the owner reads.
+   */
+  readonly maxBaselineLagMs: number | null;
   /** One entry per visible niche of the requested format. A niche outside the
    * reader's scope is OMITTED — same absence-not-empty rule as `NicheDTO.rpm`. */
   readonly niches: readonly NicheViewsGainedEntryDTO[];

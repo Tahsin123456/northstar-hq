@@ -466,25 +466,97 @@ export function measuredSpanNote(measuredDays: number, periodDays: number): stri
   } — view history begins there.`;
 }
 
+/** The lead sentence when the history did cover the whole period. */
+export function fullSpanNote(periodDays: number): string {
+  return `Measured over the full ${periodDays} ${periodDays === 1 ? "day" : "days"}.`;
+}
+
 /**
- * The note for one response, or `null` when the whole period was measured.
+ * The smallest lag worth a sentence: one minute, the smallest unit the note
+ * can express. Below it "up to 0 minutes" is not a caveat, it is noise under
+ * every figure forever.
+ */
+export const BASELINE_LAG_FLOOR_MS = 60_000;
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * A duration for a non-technical reader, ROUNDED UP.
+ *
+ * Up, always, because the number lands in a sentence that says "up to": round
+ * 100 minutes down to an hour and the label states a bound the arithmetic does
+ * not support, which is the one way this caveat could become a lie.
+ */
+export function approxDurationCeil(ms: number): string {
+  if (ms < HOUR_MS) {
+    const minutes = Math.max(1, Math.ceil(ms / 60_000));
+    return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  if (ms < 48 * HOUR_MS) {
+    const hours = Math.ceil(ms / HOUR_MS);
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  const days = Math.ceil(ms / DAY_MS);
+  return `${days} ${days === 1 ? "day" : "days"}`;
+}
+
+/**
+ * The caveat for a span some videos only join part way through.
+ *
+ * WHY THIS SENTENCE HAS TO EXIST. The measurement now baselines a video whose
+ * own history starts a little inside the window on its own first reading,
+ * instead of dropping it — see `BASELINE_GRACE_FRACTION`. That fixes a figure
+ * that was refusing to appear at all, and it gives up the claim that every
+ * video was measured over the identical span. The label may not keep making
+ * that claim silently: it names the gap, and it names the DIRECTION of the
+ * error, which is the half an owner planning against the number needs.
+ *
+ * The gap is stated in TIME, not as a percentage of the money. A video's views
+ * do not arrive evenly — a Short can take most of its lifetime views in its
+ * first hours — so "understated by at most 0.6%" would be a bound nobody can
+ * support. "Their first two hours are missing, so this is a little low" is
+ * exactly what is known.
+ */
+export function baselineLagNote(lagMs: number): string {
+  return `The app started recording some of these videos up to ${approxDurationCeil(
+    lagMs,
+  )} into that span, so their first views are missing and this figure is a little low.`;
+}
+
+/**
+ * The note for one response, or `null` when the whole period was measured from
+ * end to end for every video.
  *
  * Derived from the server's own `requestedStartMs`/`measuredFromMs` echo
  * rather than from the client's copy of the range, so the label describes the
  * span that was actually measured even if the two ever disagree. Day counts
  * are rounded and floored at 1: a partial day of history is still history,
  * and "0 of 30 days" under a real figure would be self-contradictory.
+ *
+ * THIS NOW SPEAKS WHERE IT USED TO GO SILENT. A response whose clamp never
+ * fired — `measuredFromMs === requestedStartMs` — can still carry videos whose
+ * own history starts later, and that is exactly the case the ragged-baseline
+ * caveat exists for. Returning `null` on the strength of the span alone would
+ * hide it precisely when it is the only thing left to say.
  */
 export function measuredSpanNoteFrom(response: {
   readonly requestedStartMs: number;
   readonly measuredFromMs: number | null;
   readonly endMs: number;
+  readonly maxBaselineLagMs: number | null;
 }): string | null {
-  const { requestedStartMs, measuredFromMs, endMs } = response;
-  if (measuredFromMs === null || measuredFromMs <= requestedStartMs) return null;
-  const measuredDays = Math.max(1, Math.round((endMs - measuredFromMs) / DAY_MS));
+  const { requestedStartMs, measuredFromMs, endMs, maxBaselineLagMs } = response;
+  if (measuredFromMs === null) return null;
+
   const periodDays = Math.max(1, Math.round((endMs - requestedStartMs) / DAY_MS));
-  return measuredSpanNote(measuredDays, periodDays);
+  const clamped = measuredFromMs > requestedStartMs;
+  const ragged = maxBaselineLagMs !== null && maxBaselineLagMs >= BASELINE_LAG_FLOOR_MS;
+
+  if (!clamped && !ragged) return null;
+
+  const measuredDays = Math.max(1, Math.round((endMs - measuredFromMs) / DAY_MS));
+  const span = clamped ? measuredSpanNote(measuredDays, periodDays) : fullSpanNote(periodDays);
+  return ragged ? `${span} ${baselineLagNote(maxBaselineLagMs)}` : span;
 }
 
 // ---------------------------------------------------------------------------

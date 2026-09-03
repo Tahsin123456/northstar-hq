@@ -57,6 +57,11 @@ vi.mock("../user-service", () => ({
 }));
 
 const { getNicheViewsGained } = await import("../niche-views-gained-service");
+const { hasUsableGainsHistory, measuredSpanNoteFrom } = await import(
+  "@/lib/analytics/niche-earnings"
+);
+
+const HOUR_MS = 3_600_000;
 
 function snapshot(capturedAtMs: number, viewCount: number) {
   return { capturedAt: new Date(capturedAtMs), viewCount: BigInt(viewCount) };
@@ -201,6 +206,9 @@ describe("the measured span", () => {
       endMs: END_MS,
       measuredFromMs: null,
       earliestSnapshotMs: null,
+      // Nothing was measured, so there is no raggedness to report — `null`,
+      // never a 0 that would read as "measured, and perfectly uniform".
+      maxBaselineLagMs: null,
       niches: [],
     });
     // Said, not computed: no measurement ran, so nothing could be dressed as
@@ -218,6 +226,120 @@ describe("the measured span", () => {
     expect(result.earliestSnapshotMs).toBe(END_MS + DAY_MS);
     expect(result.niches).toEqual([]);
     expect(mocks.videoFindMany).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * =========================================================================
+ * THE 1 SEPTEMBER BLACKOUT — THE REGRESSION ITSELF, PINNED BOTH WAYS
+ * =========================================================================
+ *
+ * Automatic refresh takes at most 25 channels an hour and sweeps them
+ * sequentially, so an organization's first-ever snapshots are staggered across
+ * channels by minutes to hours. `measuredFromMs` is the org-wide MINIMUM
+ * `capturedAt`, which makes it the single instant at which the fewest videos
+ * hold a reading — and a video with no reading at-or-before the window's start
+ * was dropped from the sum AND from `coveredVideos`.
+ *
+ * The result was not cosmetic and did not self-heal: coverage sat far below the
+ * 0.9 dollar floor, every niche rendered "Not enough view history yet" while
+ * the owner had rates entered, and a 30-day period would have stayed that way
+ * until October — re-firing for a month every time a channel was added.
+ */
+describe("staggered first snapshots across channels", () => {
+  /** The sweep's first capture. The window reaches back well before it. */
+  const SWEEP_MS = START_MS + 21 * DAY_MS;
+
+  /** A video whose own history starts at `firstMs` and gains `gained` after. */
+  function stagger(id: string, channelId: string, firstMs: number, gained: number) {
+    return {
+      id,
+      channelId,
+      publishedAt: new Date(START_MS - 90 * DAY_MS),
+      isShort: true,
+      classification: "short",
+      snapshots: [
+        snapshot(firstMs, 1_000_000),
+        snapshot(END_MS - DAY_MS, 1_000_000 + gained),
+      ],
+    };
+  }
+
+  beforeEach(() => {
+    mocks.snapshotFindFirst.mockResolvedValue({ capturedAt: new Date(SWEEP_MS) });
+    mocks.trackedFindMany.mockResolvedValue([
+      tracked("chan_ours", "own", ["niche_gta"]),
+      tracked("chan_rival", "competitor", ["niche_gta"]),
+    ]);
+    mocks.videoFindMany.mockResolvedValue([
+      // Swept first — the only video the old rule could bracket.
+      stagger("vid_first", "chan_ours", SWEEP_MS, 50_000),
+      // Same channel, next page of the sweep: ninety minutes later.
+      stagger("vid_later", "chan_ours", SWEEP_MS + 90 * 60_000, 20_000),
+      // A different channel entirely, three hours into the run.
+      stagger("vid_rival", "chan_rival", SWEEP_MS + 3 * HOUR_MS, 30_000),
+    ]);
+  });
+
+  it("prices the niche instead of blacking it out, and reports what it measured", async () => {
+    const result = await request();
+    const entry = result.niches[0]!;
+
+    // WHAT THE OLD RULE PRODUCED: one of three videos bracketed, because only
+    // the first-swept one held a reading at the org-wide minimum. 33% against
+    // a 0.9 floor is words, not money — for every niche, permanently.
+    expect(hasUsableGainsHistory({ coveredVideos: 1, totalVideos: 3 })).toBe(false);
+
+    // WHAT IT PRODUCES NOW: every video measured from its own first reading,
+    // the split intact, and a figure that can actually be priced.
+    expect(entry).toEqual({
+      nicheId: "niche_gta",
+      ourViewsGained: 70_000,
+      competitorViewsGained: 30_000,
+      coveredVideos: 3,
+      totalVideos: 3,
+      ownChannelIds: ["chan_ours"],
+    });
+    expect(hasUsableGainsHistory(entry)).toBe(true);
+
+    // The span stays honest: the clamp is unmoved, and the three hours the
+    // raggedest video is missing are reported rather than assumed away.
+    expect(result.measuredFromMs).toBe(SWEEP_MS);
+    expect(result.maxBaselineLagMs).toBe(3 * HOUR_MS);
+    expect(measuredSpanNoteFrom(result)).toBe(
+      "Measured over the last 9 of 30 days — view history begins there. " +
+        "The app started recording some of these videos up to 3 hours into that " +
+        "span, so their first views are missing and this figure is a little low.",
+    );
+  });
+
+  it("still refuses a niche whose videos genuinely have no usable readings", async () => {
+    mocks.videoFindMany.mockResolvedValue([
+      stagger("vid_first", "chan_ours", SWEEP_MS, 50_000),
+      // Onboarded five days into a nine-day span — far outside the grace.
+      // Measuring its last four days and calling that the period would be a
+      // distortion, so it is dropped and it depresses coverage, which is
+      // exactly what the floor exists to catch.
+      stagger("vid_new_channel", "chan_rival", SWEEP_MS + 5 * DAY_MS, 900_000),
+      {
+        id: "vid_dark",
+        channelId: "chan_rival",
+        publishedAt: new Date(START_MS - 90 * DAY_MS),
+        isShort: true,
+        classification: "short",
+        // Not one reading. Genuinely unmeasurable, in every rule.
+        snapshots: [],
+      },
+    ]);
+
+    const result = await request();
+    const entry = result.niches[0]!;
+
+    expect(entry.coveredVideos).toBe(1);
+    expect(entry.totalVideos).toBe(3);
+    expect(hasUsableGainsHistory(entry)).toBe(false);
+    // Nothing was baselined late, so the label makes no claim about raggedness.
+    expect(result.maxBaselineLagMs).toBe(0);
   });
 });
 

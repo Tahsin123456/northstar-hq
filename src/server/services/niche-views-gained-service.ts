@@ -6,7 +6,11 @@ import type { NicheViewsGainedDTO, NicheViewsGainedEntryDTO } from "@/lib/dto";
 import type { NicheFormat } from "@/lib/niches/niche-format";
 import { getCurrentOrgId } from "./user-service";
 import { nicheFormatWhere } from "./niche-service";
-import { viewsGainedByChannel, type ChannelViewsGained } from "./views-gained-service";
+import {
+  baselineGraceMsFor,
+  viewsGainedByChannel,
+  type ChannelViewsGained,
+} from "./views-gained-service";
 
 /**
  * =========================================================================
@@ -22,11 +26,29 @@ import { viewsGainedByChannel, type ChannelViewsGained } from "./views-gained-se
  * THE MEASURED SPAN IS THE COVERED SPAN, NEVER THE REQUESTED ONE. The app can
  * only measure from the day it started recording view history. When the
  * period reaches further back than the history does, the whole answer is
- * measured over `[max(startMs, earliest snapshot), endMs)` — applied
- * UNIFORMLY, because clamping per channel would sum deltas measured over
- * different spans into one figure no span describes. The clamp travels back
- * as `measuredFromMs` so every surface can say "measured over the last 9 of
- * 30 days" instead of presenting a partial span as the period.
+ * measured over `[max(startMs, earliest snapshot), endMs)`. The clamp travels
+ * back as `measuredFromMs` so every surface can say "measured over the last 9
+ * of 30 days" instead of presenting a partial span as the period.
+ *
+ * THAT SPAN IS SHARED BUT NOT PERFECTLY UNIFORM, AND THE LABEL SAYS SO. This
+ * file used to claim the span was uniform — one start for every video — and
+ * that claim is what broke the money figures on 1 September. First-ever
+ * snapshots are written channel by channel over minutes to hours, so the
+ * org-wide MINIMUM `capturedAt` is precisely the instant at which the fewest
+ * videos have a reading: every video first captured a few minutes later held
+ * nothing at-or-before it, was dropped from the sum AND from `coveredVideos`,
+ * and coverage landed at a few percent against a 0.9 floor. Every niche said
+ * "Not enough view history yet" while the owner had rates entered, and a
+ * 30-day period would have stayed that way until October.
+ *
+ * So the videos that start a little late are now measured from their own first
+ * reading, within `BASELINE_GRACE_FRACTION` of the span — the raggedness is
+ * bounded, reported as `maxBaselineLagMs`, and stated in the owner's label
+ * instead of being asserted away. The alternative that keeps a perfectly
+ * uniform start — moving `measuredFromMs` forward to a percentile of
+ * first-snapshot times — was rejected: one newly-added channel holding a tenth
+ * of the library would drag the whole organization's span from thirty days to
+ * hours under a label that stayed technically true.
  *
  * VIEW COUNTS ONLY. The rate stays on `NicheDTO.rpm` behind `finance.view`;
  * what this returns is the same class of numbers `analytics.view` already
@@ -164,6 +186,9 @@ export async function getNicheViewsGained(options: {
       endMs,
       measuredFromMs: null,
       earliestSnapshotMs,
+      // No measurement ran, so there is no raggedness to report. `null` rather
+      // than 0, which would read as "measured, and perfectly uniform".
+      maxBaselineLagMs: null,
       niches: [],
     };
   }
@@ -206,7 +231,29 @@ export async function getNicheViewsGained(options: {
           // measured — and an uncertain video is in neither format, per
           // `isVideoOfFormat`.
           format,
+          /*
+           * THE GRACE, AND THIS CALLER IS THE ONLY ONE THAT ASKS FOR IT.
+           *
+           * Sized off the span actually being measured, not off the requested
+           * period: the clamp above is exactly when the sweep-order dropout
+           * bites, so the allowance has to be a fraction of what is really on
+           * screen. Understating this niche's money is the safe direction;
+           * understating the RPM denominator is not, which is why
+           * `niche-rpm-service` passes nothing here.
+           */
+          baselineGraceMs: baselineGraceMsFor(measuredFromMs, endMs),
         });
+
+  /*
+   * The raggedest baseline anywhere in the answer, so the label can state a
+   * TRUE bound rather than quoting the cap. Maximum, not average: the sentence
+   * an owner reads says "up to", and an average would make it false for the
+   * worst video.
+   */
+  let maxBaselineLagMs = 0;
+  for (const gains of gainsByChannel.values()) {
+    if (gains.maxBaselineLagMs > maxBaselineLagMs) maxBaselineLagMs = gains.maxBaselineLagMs;
+  }
 
   const inScope = new Set(nicheIds);
   const membersByNiche = new Map<string, MemberChannel[]>();
@@ -231,6 +278,7 @@ export async function getNicheViewsGained(options: {
     endMs,
     measuredFromMs,
     earliestSnapshotMs,
+    maxBaselineLagMs,
     niches: groupNicheViewsGained(nicheIds, membersByNiche, gainsByChannel),
   };
 }

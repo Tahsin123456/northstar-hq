@@ -270,3 +270,71 @@ describe("the derived rate survives the views-gained extraction unchanged", () =
     expect(args.where.publishedAt).toEqual({ lt: new Date(WINDOW_END_MS) });
   });
 });
+
+/**
+ * =========================================================================
+ * THE TRIPWIRE: THIS DENOMINATOR DOES NOT TAKE THE BASELINE GRACE
+ * =========================================================================
+ *
+ * The niche money figures now measure a video whose own history starts a
+ * little inside the window from its own first reading, instead of dropping it
+ * — `BASELINE_GRACE_FRACTION` in `views-gained-service.ts`, which exists
+ * because the org-wide minimum `capturedAt` blacked out every niche on 1
+ * September. That allowance is OPT-IN and this caller must never take it.
+ *
+ * THE ASYMMETRY, and it is the whole reason: in the niche figures a baseline
+ * that starts late UNDERSTATES money, which is the safe direction. Here the
+ * rate is `revenue / viewsGained`, so a denominator short by a tenth raises
+ * the rate by a ninth — and that rate then multiplies EVERY niche's views into
+ * money. Refusing until the history genuinely brackets the window, and falling
+ * through to the owner's hand-entered range, is the honest answer.
+ *
+ * The four cases above would not catch a slip: `vid_b_uncovered`'s only reading
+ * sits 28 days into the window, outside any grace, so it would stay dropped by
+ * luck. This case puts a video's first reading ONE DAY in — comfortably inside
+ * a 5%-of-span allowance on a 28-day window — and pins that it is still
+ * refused.
+ */
+describe("the derived denominator refuses the niche caller's baseline grace", () => {
+  it("still rejects a channel whose second video is first seen a day into the window", async () => {
+    mocks.videoFindMany.mockResolvedValue([
+      {
+        // Properly bracketed: +300,000, on its own past `RPM_MIN_VIEWS`.
+        id: "vid_a_covered",
+        channelId: "chan_a",
+        publishedAt: new Date(WINDOW_START_MS - 90 * DAY_MS),
+        snapshots: [
+          snapshot(WINDOW_START_MS - DAY_MS, 100_000),
+          snapshot(WINDOW_END_MS - 3_600_000, 400_000),
+        ],
+      },
+      {
+        // First ever seen a day in — inside a 5% grace, and irrelevant: this
+        // caller does not ask for one, so the video is dropped and coverage
+        // falls to 0.5, under the 0.9 floor.
+        id: "vid_a_late",
+        channelId: "chan_a",
+        publishedAt: new Date(WINDOW_START_MS - 90 * DAY_MS),
+        snapshots: [
+          snapshot(WINDOW_START_MS + DAY_MS, 1_000_000),
+          snapshot(WINDOW_END_MS - 3_600_000, 1_050_000),
+        ],
+      },
+    ]);
+
+    const resolved = await resolveNicheRpmByNiche({ niches: NICHES, nowMs: NOW_MS });
+    const rpm = resolved!.get("niche_gta");
+
+    // No channel clears the floor, so nothing is derived at all — the rate
+    // falls through to whatever the owner entered by hand, which here is
+    // nothing. Opt the grace in here and chan_a becomes fully covered, is
+    // ACCEPTED, and prices every niche off a denominator missing a day.
+    expect(rpm?.source).not.toBe("derived");
+    expect(rpm?.rejectedChannels).toContainEqual({
+      channelId: "chan_a",
+      channelName: "chan_a",
+      accepted: false,
+      reason: "thin_view_coverage",
+    });
+  });
+});
