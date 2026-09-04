@@ -43,7 +43,6 @@ const mocks = vi.hoisted(() => ({
     }),
   ),
   snapshotUpsert: vi.fn((args: unknown) => args),
-  channelReadingUpsert: vi.fn(async (args: unknown) => args),
   videoUpsert: vi.fn((args: unknown) => args),
   transaction: vi.fn(async (operations: unknown[]) => operations),
   channelUpdate: vi.fn(async () => ({ id: CHANNEL_ROW_ID })),
@@ -105,7 +104,6 @@ vi.mock("@/server/db", () => ({
       })),
       update: mocks.channelUpdate,
     },
-    channelViewSnapshot: { upsert: mocks.channelReadingUpsert },
     channelRefreshRun: {
       create: vi.fn(async () => ({ id: "run_1" })),
       update: vi.fn(async () => ({ id: "run_1" })),
@@ -277,81 +275,6 @@ describe("snapshots are idempotent by construction, not by timing", () => {
     // key rather than two rows a few milliseconds apart.
     expect(capturedAt % SNAPSHOT_GRID_MS).toBe(0);
     expect(Date.now() - capturedAt).toBeLessThan(SNAPSHOT_GRID_MS);
-  });
-});
-
-/**
- * =========================================================================
- * THE CHANNEL READING — ONE ROW PER SYNC, WHATEVER THE CREDENTIAL
- * =========================================================================
- *
- * The niche money figure is the delta between two readings of a channel's
- * lifetime view counter, so a sync that fetched the counter and did not file
- * it has thrown away the one number the figure is made of. Pinned on both
- * credential paths, because the reading has nothing to do with whose grant
- * did the reading — and pinned WITHOUT a changed-only guard, because an
- * unchanged reading is what proves a count stood still.
- */
-describe("every sync files the channel's counter as a reading", () => {
-  it.each([
-    ["the shared key", { source: "public" as const }],
-    ["a connection", throughConnection],
-  ])("writes one reading on the grid when read with %s", async (_label, credential) => {
-    await sync.syncChannel(CHANNEL_ROW_ID, { credential });
-
-    expect(mocks.channelReadingUpsert).toHaveBeenCalledTimes(1);
-    const call = mocks.channelReadingUpsert.mock.calls[0][0] as {
-      where: { channelId_capturedAt: { channelId: string; capturedAt: Date } };
-      create: {
-        channelId: string;
-        viewCount: bigint;
-        subscriberCount: bigint | null;
-        videoCount: bigint | null;
-        capturedAt: Date;
-      };
-      update: Record<string, unknown>;
-    };
-
-    expect(call.where.channelId_capturedAt.channelId).toBe(CHANNEL_ROW_ID);
-    expect(call.create.channelId).toBe(CHANNEL_ROW_ID);
-    // The counters YouTube returned on this very call — nothing derived.
-    expect(call.create.viewCount).toBe(BigInt(freshChannel.viewCount));
-    expect(call.create.subscriberCount).toBe(BigInt(freshChannel.subscriberCount));
-    expect(call.create.videoCount).toBe(BigInt(freshChannel.videoCount));
-    // Idempotent by the same construction as the video snapshots: first
-    // reading of a bucket wins, a second writer is a no-op.
-    expect(call.update).toEqual({});
-    const capturedAt = call.create.capturedAt.getTime();
-    expect(capturedAt).toBe(call.where.channelId_capturedAt.capturedAt.getTime());
-    expect(capturedAt % SNAPSHOT_GRID_MS).toBe(0);
-    expect(Date.now() - capturedAt).toBeLessThan(SNAPSHOT_GRID_MS);
-  });
-
-  it("files nothing when YouTube no longer returns the channel — there is no reading to file", async () => {
-    mocks.getChannelsByIds.mockResolvedValue([]);
-
-    await sync.syncChannel(CHANNEL_ROW_ID, { credential: { source: "public" } });
-
-    expect(mocks.channelReadingUpsert).not.toHaveBeenCalled();
-  });
-
-  it("files nothing for a channel whose counter YouTube withheld — a zero here would read as a purge", async () => {
-    await sync.recordChannelReading(
-      { id: CHANNEL_ROW_ID, viewCount: null, subscriberCount: null, videoCount: null },
-      new Date(),
-    );
-
-    expect(mocks.channelReadingUpsert).not.toHaveBeenCalled();
-  });
-
-  it("files an UNCHANGED reading too — standing still is information for a delta", async () => {
-    // Two syncs, same counter. The video snapshot path would skip the second;
-    // the channel path must not, or the series cannot tell "nothing moved"
-    // from "nobody looked".
-    await sync.syncChannel(CHANNEL_ROW_ID, { credential: { source: "public" } });
-    await sync.syncChannel(CHANNEL_ROW_ID, { credential: { source: "public" } });
-
-    expect(mocks.channelReadingUpsert).toHaveBeenCalledTimes(2);
   });
 });
 

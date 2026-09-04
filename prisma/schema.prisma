@@ -250,78 +250,6 @@ model OrganizationSettings {
   shortsProbeEnabled      Boolean @default(true)
   autoRefreshEnabled      Boolean @default(false)
 
-  /// What share of raw views YouTube actually pays a Short against, in BASIS
-  /// POINTS (hundredths of one percent). 5000 = 50.00%.
-  ///
-  /// WHY THIS EXISTS AT ALL. YouTube does not pay Shorts on the view count the
-  /// public sees. It pays on ENGAGED views, a strictly smaller number that no
-  /// API on this deployment reports: the Analytics data we can read gives money
-  /// (`ChannelRevenueDay.estimatedRevenueMinor`) and raw public counters
-  /// (`VideoSnapshot.viewCount`), and engaged views appear in neither. So the
-  /// ratio cannot be measured here — it can only be assumed, and the owner's
-  /// working assumption is "usually around 50%". Without this column, a rate
-  /// quoted per 1,000 engaged views and then multiplied by raw views overstates
-  /// earnings by roughly 2x. That is not a rounding error in a money figure
-  /// somebody plans against; it is the difference between a niche paying for
-  /// itself and not.
-  ///
-  /// UNITS, because getting the scale wrong here is silent and costs a factor
-  /// of 100. Basis points, not percent and not a fraction. 50% is 5000, 47.5%
-  /// is 4750, 100% is 10000. Whole percent was the obvious choice and is wrong:
-  /// it cannot express 47.5%, and the granularity somebody wants from an
-  /// assumption they are deliberately tuning is finer than the integer. Basis
-  /// points also keep every downstream step integral and float-free, which the
-  /// money rule in this schema requires:
-  ///   engagedViews  = rawViews * shareBasisPoints / 10000
-  ///   revenueMinor  = engagedViews * rpmMinorPerMillion / 1000000
-  /// Both are exact divisions by a power of ten. A float share would have put a
-  /// binary fraction directly upstream of every currency amount in the app.
-  ///
-  /// SCOPE: organization-wide, not per niche. This is a rule of thumb about how
-  /// YouTube pays, not a property of the GTA niche versus the finance niche,
-  /// and nothing in this system can ever measure it per niche. A per-niche
-  /// column could only be filled with guesses while implying a precision no
-  /// data source supports, and would land as twenty empty boxes on day one. It
-  /// sits beside `defaultThreshold` and `defaultPeriodDays` because it is the
-  /// same class of value: one shared analysis assumption the team argues about
-  /// once. A per-niche override remains available later as a strictly additive
-  /// nullable column on `Niche` where null means "inherit this".
-  ///
-  /// NOT NULL, DEFAULT 5000 — and this is the one place in this file where a
-  /// default is the honest choice rather than the lazy one. Everywhere else
-  /// (`hitThreshold`, `hitPaymentMinor`, the RPM range) null means "nobody has
-  /// told us", and defaulting would launder a guess into a claim. Here the
-  /// owner supplied the number himself, so 50% is a CONFIGURED value on his
-  /// authority, not one the code invented. A nullable share would additionally
-  /// make every manual money figure unrenderable on deploy until somebody
-  /// visited Settings — switching off a working feature to honour a convention
-  /// that does not apply. The honesty obligation is discharged in the UI
-  /// instead, by naming the assumption next to the money ("at 50% engaged
-  /// views"): a reader can dispute a stated assumption, but not a blank.
-  ///
-  /// RANGE: 1..10000, enforced in Zod at the boundary rather than by a CHECK,
-  /// per this file's portability contract. Zero is REFUSED — it asserts that no
-  /// view is ever engaged, which collapses every priced niche to $0, and a
-  /// fabricated zero is precisely what the RPM module exists to keep off a
-  /// screen. 10000 (100%) is ALLOWED: it is the identity, it is a coherent
-  /// statement about the world rather than a fabrication, and it is the value
-  /// that reproduces the pre-engaged-views arithmetic exactly, which makes it
-  /// the honest way to opt out. Above 10000 is incoherent — engaged views are a
-  /// subset of views. The consequence, worth stating plainly: 100% and "never
-  /// configured" are indistinguishable in this column. That is acceptable here
-  /// only because both produce identical, correct arithmetic, unlike the RPM
-  /// case where unset and zero produce opposite sentences.
-  ///
-  /// APPLIES TO THE MANUAL RATE ONLY. `Niche.rpmLowMinorPerMillion` is entered
-  /// per 1,000 ENGAGED views, so it needs this share. A rate DERIVED from an
-  /// own channel's reported revenue is already money-over-RAW-views by
-  /// construction — its numerator is what YouTube actually paid, net of its own
-  /// engaged-view accounting, and its denominator is raw `VideoSnapshot`
-  /// deltas. Applying this share to a derived rate would HALVE a measured
-  /// figure. The two rates carry different bases and the resolver must say
-  /// which; this column is not a licence to scale every rate it meets.
-  engagedViewShareBasisPoints Int @default(5000)
-
   /// ISO 4217 code that consolidated financial totals are reported in.
   /// Individual entries always keep their own currency; see FinanceEntry.
   baseCurrency String @default("USD")
@@ -393,8 +321,8 @@ model Niche {
   /// THE RULE COLUMNS NEED NO DUPLICATION, and that is the payoff of separate
   /// rows rather than a format column on some shared rule table. A Long Form
   /// "GTA" niche is simply another Niche row: it gets its own `hitThreshold`,
-  /// its own `hitWindowHours`, its own `hitPaymentMinor` and its own RPM range
-  /// for free, because they are columns on the row that carries the format.
+  /// its own `hitWindowHours` and its own `hitPaymentMinor` for free, because
+  /// they are columns on the row that carries the format.
   /// Nothing about how a hit is defined, priced or paid had to learn the word
   /// "format" for this to work.
   ///
@@ -448,78 +376,6 @@ model Niche {
   /// Null means unconfigured, exactly as `hitThreshold` does — and a niche needs
   /// BOTH before it can score anything. Half a rule is not a rule.
   hitWindowHours Int?
-
-  /// What 1,000 views in this niche are worth, entered by hand as a LOW–HIGH
-  /// range.
-  ///
-  /// The question these answer is not "what did we earn" — `ChannelRevenueDay`
-  /// already answers that, and only for channels we own. It is "how big is this
-  /// niche, and how much of it are we capturing", which needs a rate that can be
-  /// applied to competitors whose earnings nobody will ever show us.
-  ///
-  /// UNITS: minor units per 1,000,000 VIEWS, not per 1,000. A Shorts RPM sits
-  /// well under $0.10, so whole cents per 1,000 views cannot express one at all —
-  /// $0.045 would have to round to 4 or 5, an 11% error in the rate, and that
-  /// error is then multiplied by the niche's entire view count. Carrying a
-  /// further factor of 1,000 makes the granularity $0.00001 per 1,000 views and
-  /// keeps every step integral: revenueMinor = views * rpm / 1000000, an exact
-  /// division by a power of ten with no float anywhere. $1.00 per 1,000 views is
-  /// stored as 100000; $0.045 is stored as 4500.
-  ///
-  /// A RANGE rather than a point because a guess IS a range. Whoever fills this
-  /// in has no measurement to enter — they have a band they believe the niche
-  /// pays in — and demanding a single number would launder that belief into a
-  /// figure the screen then presents with more confidence than it was given.
-  /// Both columns or neither, the same rule `hitThreshold` and `hitWindowHours`
-  /// follow above: half a range is not a range. `low <= high`, with equality
-  /// allowed for somebody who genuinely does mean one number.
-  ///
-  /// Null is unconfigured and is NOT zero, which is the distinction the whole
-  /// nullability exists for. Zero is a claim that this niche pays nothing; null
-  /// is the absence of a claim. They render as opposite sentences and must never
-  /// collapse into each other — the same reason `hitPaymentMinor` above is
-  /// nullable rather than defaulted.
-  ///
-  /// This range is the FALLBACK in the owner's ordering, behind a rate derived
-  /// from a monetized channel the studio operates in the niche. It stays the
-  /// common path in practice: a derived rate needs the `VideoSnapshot` history
-  /// automatic refresh records to reach across its whole 28-day window, which a
-  /// channel grows into rather than starts with. See the note below the
-  /// currency column.
-  rpmLowMinorPerMillion  Int?
-  rpmHighMinorPerMillion Int?
-
-  /// ISO 4217 code the range above was entered in. Null exactly when the range
-  /// is null.
-  ///
-  /// Stored rather than inherited from `OrganizationSettings.baseCurrency`, for
-  /// the reason stated on that column: individual entries always keep their own
-  /// currency. A range typed as 0.03–0.06 USD must not silently become 0.03–0.06
-  /// EUR on the day an admin switches the base — that is a number nobody entered,
-  /// sitting in a figure somebody plans against. Conversion into the base happens
-  /// on read, in `resolveNicheRpm`, using the organization's own ExchangeRate
-  /// rows in the one direction they were entered — never inverted, matching the
-  /// ledger's `resolveConversion`. With no rate configured it REFUSES: the niche
-  /// resolves to `{ source: "none", reason: "manual_range_unconvertible" }` and
-  /// the card names the stored range and the missing rate, rather than inventing
-  /// a conversion or printing the digits under the base currency's symbol. The
-  /// range as typed still travels to the browser, as `enteredRange`, so the
-  /// dialog seeds the boxes with what somebody actually entered.
-  rpmCurrency String?
-
-  // NOTHING IS STORED FOR THE *DERIVED* RATE, deliberately.
-  //
-  // Where the studio owns a monetized channel in this niche, that channel's own
-  // RPM overrides the range above. It is reported revenue over views gained in
-  // the same window, and both halves of that fraction keep moving after the
-  // fact: YouTube revises daily revenue for weeks (see ChannelRevenueDay's
-  // revision columns), and snapshots keep landing. A stored derived rate would
-  // therefore be a number that was true once, going quietly stale while still
-  // being presented as measured rather than estimated — strictly worse than not
-  // having it, because it looks authoritative. It is computed on read instead,
-  // and carried with the window, channel count and view count it came from so
-  // the reader can judge it. Storing it would also duplicate own-channel revenue
-  // into a table read under a weaker permission than the finance one.
 
   /// Manual ordering in the filter menu; ties break alphabetically.
   sortOrder Int @default(0)
@@ -616,55 +472,9 @@ model Channel {
   notes          Note[]
   financeEntries FinanceEntry[]
   revenueDays    ChannelRevenueDay[]
-  viewSnapshots  ChannelViewSnapshot[]
 
   @@index([lastFetchedAt])
   @@map("channels")
-}
-
-/// Append-only history of a CHANNEL's public counters — one row per sync.
-///
-/// WHY CHANNEL-LEVEL, WHEN `VideoSnapshot` ALREADY EXISTS. The niche money
-/// figure is "the views a channel gained in the period, however old the video
-/// that earned them", and YouTube reports exactly that number once per
-/// channel: `statistics.viewCount` is the lifetime total over EVERY upload,
-/// including the ones older than the lookback the video walk stops at. A sum
-/// of per-video deltas can only ever cover the videos the app holds rows for,
-/// needs a reading on both sides of the period for each of them, and is
-/// therefore thinned by every video swept late or never seen. One reading of
-/// the channel counter, subtracted from an earlier one, is the whole answer
-/// with none of those holes — and it costs nothing extra, because
-/// `getChannelsByIds` is already spent on every sync.
-///
-/// NO CHANGED-ONLY GUARD, unlike `VideoSnapshot`. A video row that has not
-/// moved is skipped there to keep a stalled Short from costing 24 identical
-/// rows a day. A channel reading that has not moved is INFORMATION for a
-/// delta: it proves the count stood still across that interval, and a series
-/// with the unchanged readings left out cannot distinguish "nothing happened"
-/// from "nobody looked". One row per channel per sync is a few rows a day.
-///
-/// `capturedAt` is the five-minute bucket of the sync, exactly as
-/// `VideoSnapshot.capturedAt` is, and the unique below makes an overlapping
-/// pair of syncs collide rather than double-write — see the upsert in
-/// `channel-sync`.
-///
-/// Portability contract as everywhere in this file: no enums, no scalar
-/// lists, no `@db.*`. Counters are BigInt because channel lifetime views
-/// routinely exceed 2^31.
-model ChannelViewSnapshot {
-  id        String  @id @default(cuid())
-  channelId String
-  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
-
-  viewCount       BigInt
-  subscriberCount BigInt?
-  videoCount      BigInt?
-
-  capturedAt DateTime @default(now())
-
-  @@unique([channelId, capturedAt])
-  @@index([capturedAt])
-  @@map("channel_view_snapshots")
 }
 
 /// Join between a user and a channel they track. Removing a channel from the

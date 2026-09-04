@@ -70,14 +70,8 @@ vi.mock("@/server/auth/dal", () => ({
   requireActor: async () => ({
     userId: "user_1",
     organizationId: ORG_ID,
-    /*
-     * The ROLE, not only its permissions, because the RPM resolver narrows on
-     * the caller's visible niches too. `resolveVisibleNicheIds` fails closed on
-     * a role it does not recognise, so an actor with no role would be treated
-     * as the least privileged niche-scoped one and answered for nothing —
-     * which would quietly make every DTO assertion below about a withheld
-     * figure rather than the permission under test.
-     */
+    // The ROLE, not only its permissions: `requireFormat` reads it on every
+    // niche write, and refuses an actor whose role it cannot place.
     role: mocks.role,
     permissions: mocks.permissions,
   }),
@@ -101,13 +95,6 @@ vi.mock("../user-service", () => ({
     actor: { userId: "user_1" },
   }),
   getCurrentOrgId: async () => ORG_ID,
-  /*
-   * Read by the RPM resolver, which `updateNiche` calls to build the DTO it
-   * returns. It needs the base currency to convert an own channel's revenue
-   * into before any rate is divided out of it — an admin in this file holds
-   * `finance.view`, so the resolver really does run.
-   */
-  getCurrentOrgSettings: async () => ({ baseCurrency: "USD", defaultPeriodDays: 30 }),
 }));
 
 const { createNiche, updateNiche } = await import("../niche-service");
@@ -307,16 +294,11 @@ describe("re-evaluation after a rule change", () => {
   /**
    * How many times the RE-EVALUATION walked the tracker.
    *
-   * Two different readers of `trackedChannel` now run inside one `updateNiche`:
-   * the re-evaluation, which walks every tracked channel in the niche, and the
-   * RPM resolver, which reads only the channels the studio OWNS to see whether
-   * one of them can supply a measured rate. An admin holds `finance.view`, so
-   * both really do run, and a bare call count would pass whichever of the two
-   * happened to fire.
-   *
-   * They are told apart by the one clause that differs — the resolver narrows
-   * on `ownershipType` and the re-evaluation cannot, because a competitor's
-   * Shorts are judged by the niche's rule exactly as an own channel's are.
+   * Filtered on the ABSENCE of an `ownershipType` clause rather than a bare
+   * call count: the re-evaluation walks every tracked channel in the niche and
+   * cannot narrow on ownership, because a competitor's Shorts are judged by
+   * the niche's rule exactly as an own channel's are. Any other reader of
+   * `trackedChannel` that narrows on ownership stays out of this count.
    */
   function reevaluationCalls(): number {
     return mocks.trackedFindMany.mock.calls.filter(

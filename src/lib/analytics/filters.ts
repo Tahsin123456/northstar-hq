@@ -67,37 +67,6 @@ export function getShorts(
 }
 
 /**
- * One format's videos, ALL of them — no date window at all.
- *
- * THE MONEY BASIS, and the reason it is a separate function rather than a flag
- * on `videosInDateRange`. What a niche generates is every view the channels
- * tracked in it have, priced at the niche's rate: a channel's back catalogue
- * keeps earning long after its upload date scrolls out of any window somebody
- * might select, so filtering the money by upload date answered a question
- * nobody asked and printed nothing for a niche whose uploads all predate the
- * period. `getShorts` above is the same idea for the one format that had it
- * first; this is that generalised, so a Long Form niche is not stuck reading a
- * Shorts-only selector.
- *
- * THE FORMAT FILTER IS NOT OPTIONAL. `isVideoOfFormat` stays the one home of
- * the shorts/longform rule — shorts is `isShort === true`, longform is
- * `classification === "not_short"`, and a video the classifier could not
- * resolve belongs to NEITHER — so an uncertain video never has its views
- * priced into a format that never claimed it.
- *
- * DELIBERATELY BESIDE `videosInDateRange` RATHER THAN REPLACING IT. Hit rate,
- * Upload views, market share and every report keep the upload-date basis:
- * "how did what we published recently do?" is a real question and it is not
- * this one. Two bases, two functions, both named for what they select.
- */
-export function videosOfFormat<T extends AnalyticsVideo>(
-  videos: readonly T[],
-  format: NicheFormat,
-): T[] {
-  return videos.filter((video) => isVideoOfFormat(video, format));
-}
-
-/**
  * Long-form videos inside the window — the STRICT selector.
  *
  * `classification === "not_short"`, via `isVideoOfFormat`, and no longer

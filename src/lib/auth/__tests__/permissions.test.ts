@@ -118,7 +118,7 @@ describe("role catalogue", () => {
  * DEFAULT carries it, which is the half that could regress silently.
  */
 describe("money is an Admin capability by default", () => {
-  /** Every permission that puts a currency amount, or a rate, on a screen. */
+  /** Every permission that puts a currency amount on a screen. */
   const MONEY_PERMISSIONS = [
     "finance.view",
     "finance.manage",
@@ -140,13 +140,12 @@ describe("money is an Admin capability by default", () => {
   });
 
   /**
-   * The niche RPM read is gated on `finance.view` and the WRITE additionally on
-   * `settings.manage` — so a role holding `settings.manage` without
-   * `finance.view` would be a writer who cannot read what is there, which is
-   * how the hit payment was once destroyed by a form seeded from a withheld
-   * null. No shipped role is in that position, and this says so.
+   * `settings.manage` is what sets what a hit PAYS (`hitPaymentMinor`), so a
+   * role holding it by default would be pricing the studio's bonuses without
+   * ever having been granted a money permission. No shipped role is in that
+   * position, and this says so.
    */
-  it("gives no shipped role but Admin the settings key that prices a niche", () => {
+  it("gives no shipped role but Admin the settings key that sets what a hit pays", () => {
     for (const role of ROLES) {
       if (role === "admin") continue;
       expect(
@@ -154,13 +153,6 @@ describe("money is an Admin capability by default", () => {
         `${role} must not hold settings.manage by default`,
       ).toBe(false);
     }
-  });
-
-  /** Admin holds both halves, or nothing above could be configured at all. */
-  it("gives Admin both halves of the RPM decision", () => {
-    const admin = new Set(roleDefinition("admin").permissions);
-    expect(admin.has("finance.view")).toBe(true);
-    expect(admin.has("settings.manage")).toBe(true);
   });
 });
 

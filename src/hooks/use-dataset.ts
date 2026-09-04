@@ -6,7 +6,6 @@ import { api } from "@/lib/api-client";
 import type { DatasetDTO, OwnershipType } from "@/lib/dto";
 import type { NicheFormat } from "@/lib/niches/niche-format";
 import { useDatasetFormat } from "./dataset-format-context";
-import { VIEWS_GAINED_KEY } from "./use-views-gained";
 
 /**
  * The dataset query key PREFIX.
@@ -39,15 +38,7 @@ export function useDataset(format?: NicheFormat) {
 export function useInvalidateDataset() {
   const queryClient = useQueryClient();
   return React.useCallback(
-    () =>
-      Promise.all([
-        queryClient.invalidateQueries({ queryKey: DATASET_KEY }),
-        // The views-gained read is measured from the same snapshots a refresh
-        // writes and the same tracker a channel edit changes, so everything
-        // that stales the dataset stales it too. One invalidation point, so no
-        // mutation hook has to know the second payload exists.
-        queryClient.invalidateQueries({ queryKey: VIEWS_GAINED_KEY }),
-      ]),
+    () => queryClient.invalidateQueries({ queryKey: DATASET_KEY }),
     [queryClient],
   );
 }

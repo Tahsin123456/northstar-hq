@@ -16,9 +16,8 @@
  * cannot say what happened. The channels that were reached keep their work —
  * every write is per channel and there is no outer transaction — and the
  * stalest-first ordering means the unreached tail goes first next hour, so
- * nothing starves. But the tail's readings arrive an hour late, and on the day
- * the channel-view readings started that is the difference between a niche
- * showing money and showing "Measuring".
+ * nothing starves. But the tail's snapshots arrive an hour late, and every
+ * verdict the hit evaluation reads from them is an hour late with them.
  *
  * So the loop checks, before starting each channel, whether enough of the
  * budget remains to plausibly finish one more and still run the steps after

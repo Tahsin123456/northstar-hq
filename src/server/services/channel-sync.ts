@@ -224,57 +224,6 @@ export async function upsertChannel(source: YouTubeChannel): Promise<Channel> {
 }
 
 /**
- * File the channel's lifetime counters as one reading in the channel series.
- *
- * WHY THIS EXISTS. `Channel.viewCount` is overwritten on every sync, so it can
- * say what a channel has but never what it GAINED between two instants — and
- * "views gained in the period, across every video however old" is the niche
- * money figure. YouTube reports that quantity once per channel, on the same
- * `getChannelsByIds` call every sync already spends, so recording it costs no
- * quota and one small row. The delta between two of these rows is the whole
- * figure; see `channel-views-gained.ts`.
- *
- * ON EVERY SYNC, WITH NO CHANGED-ONLY GUARD — deliberately unlike the video
- * snapshots a few hundred lines down. A video reading that has not moved is
- * skipped there to stop a stalled Short costing 24 identical rows a day. A
- * CHANNEL reading that has not moved is evidence: it says the count stood
- * still across that interval, which is exactly what a delta needs to know, and
- * a series with the unchanged readings left out cannot tell "nothing happened"
- * from "nobody looked". At one row per channel per sync the cost is a handful
- * of rows a day.
- *
- * IDEMPOTENT BY THE SAME CONSTRUCTION AS THE VIDEO SNAPSHOTS: `capturedAt` is
- * the five-minute bucket, the unique is (channelId, capturedAt), and
- * `update: {}` makes the second of two overlapping syncs a no-op instead of a
- * duplicate reading or an error. The first reading of a bucket wins, because
- * it is the one whose figure was actually fetched then.
- *
- * Called from `syncChannel` and from every own-channel connect path that
- * upserts a channel directly, so a channel's series starts the moment the app
- * first sees it rather than at its first scheduled sweep. A channel YouTube
- * returned without a view count has nothing to record and records nothing —
- * a fabricated zero here would read as a purge on the next delta.
- */
-export async function recordChannelReading(
-  channel: Pick<Channel, "id" | "viewCount" | "subscriberCount" | "videoCount">,
-  now: Date,
-): Promise<void> {
-  if (channel.viewCount === null) return;
-  const capturedAt = snapshotBucket(now);
-  await prisma.channelViewSnapshot.upsert({
-    where: { channelId_capturedAt: { channelId: channel.id, capturedAt } },
-    create: {
-      channelId: channel.id,
-      viewCount: channel.viewCount,
-      subscriberCount: channel.subscriberCount,
-      videoCount: channel.videoCount,
-      capturedAt,
-    },
-    update: {},
-  });
-}
-
-/**
  * Fetch, classify and persist a channel's recent uploads.
  *
  * Never throws for upstream failures: the outcome is recorded on the channel
@@ -368,10 +317,6 @@ export async function syncChannel(
       );
     }
     const updatedChannel = await upsertChannel(fresh);
-    // The channel-level reading, before anything below can fail: a run that
-    // dies walking the playlist has still fetched the counter, and the delta
-    // series is worth more complete than the video walk is.
-    await recordChannelReading(updatedChannel, new Date());
 
     const uploadsPlaylistId = updatedChannel.uploadsPlaylistId ?? fresh.uploadsPlaylistId;
     if (!uploadsPlaylistId) {

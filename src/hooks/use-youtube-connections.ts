@@ -5,7 +5,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { ADMIN_KEY } from "./use-admin";
 import { DATASET_KEY } from "./use-dataset";
-import { VIEWS_GAINED_KEY } from "./use-views-gained";
 import { FINANCE_KEY } from "./use-finance";
 
 /**
@@ -102,9 +101,6 @@ export function useAddOwnYouTubeChannel() {
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: DATASET_KEY }),
-        // Adopting a channel as "own" moves its gains from the competitor sum
-        // to Northstar's on every niche money figure.
-        queryClient.invalidateQueries({ queryKey: VIEWS_GAINED_KEY }),
         queryClient.invalidateQueries({ queryKey: OWN_YOUTUBE_CHANNELS_KEY }),
         queryClient.invalidateQueries({ queryKey: YOUTUBE_CONNECTIONS_KEY }),
       ]);

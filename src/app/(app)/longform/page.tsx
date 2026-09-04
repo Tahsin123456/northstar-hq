@@ -24,7 +24,6 @@ import {
   useScopedRows,
   useVisibleRows,
 } from "@/hooks/use-channel-analytics";
-import { NicheEarningsPanel } from "@/components/dashboard/niche-earnings-panel";
 import {
   NicheFilterControl,
   OwnershipFilterControl,
@@ -58,8 +57,8 @@ import { asksAboutOneNiche } from "@/lib/niches/niche-kind";
  * WHAT IS DELIBERATELY NOT HERE (vs the Shorts overview): the content-type
  * performance table and the content-type filter. Content types are shared,
  * but every configuration surface for them lives on the Shorts side today;
- * this page ships the owner's approved scope — the summary, the ranking and
- * the niche economics — rather than a speculative copy of everything.
+ * this page ships the owner's approved scope — the summary and the ranking —
+ * rather than a speculative copy of everything.
  *
  * A SHORTS-ROLE USER WHO TYPES THIS URL gets the ErrorState below, because
  * the dataset request itself is refused with a 403 — the API is the boundary,
@@ -270,15 +269,6 @@ export default function LongformOverviewPage() {
               labels={LONGFORM_TABLE_LABELS}
             />
           )}
-
-          {/* The economics, priced on the Long Form basis: every niche in this
-              payload is a longform niche, so `NicheEarningsPanel` reads each
-              row's own format and quotes a hand-entered rate per 1,000 plain
-              views with no engaged-view share — see `manualRpmBasis`. The
-              panel fetches the long-form share of what each tracked channel
-              GAINED over the period; the table rows above stay on the upload
-              basis by design. */}
-          <NicheEarningsPanel niches={niches} range={range} />
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION_LONGFORM}

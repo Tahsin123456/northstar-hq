@@ -4,7 +4,6 @@ import * as React from "react";
 import Link from "next/link";
 import {
   ArrowRight,
-  DollarSign,
   Layers,
   MoreHorizontal,
   Pencil,
@@ -51,24 +50,15 @@ import {
   needsRuleConfiguration,
   unconfiguredFirst,
 } from "@/components/niches/niche-threshold-status";
-import {
-  NicheRpmDialog,
-  RPM_MENU_ITEM_LABEL,
-  useCanConfigureRpm,
-  useCanReadNicheEconomics,
-} from "@/components/niches/niche-rpm-dialog";
-import { NicheValueStrip } from "@/components/niches/niche-value-strip";
 import { NotesPanel } from "@/components/notes/notes-panel";
 import { HitRateBounds } from "@/components/metrics/hit-rate-value";
 import { useChannelRows, type ChannelRow } from "@/hooks/use-channel-analytics";
 import { useDataset } from "@/hooks/use-dataset";
 import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { useCreateNiche, useDeleteNiche, useRenameNiche } from "@/hooks/use-niches";
-import { nicheGainedById, useNicheViewsGained } from "@/hooks/use-views-gained";
 import { useFilters } from "@/components/providers/filters-provider";
 import { calculateChannelMetrics, calculatePortfolioSummary } from "@/lib/analytics";
-import { measuredSpanNoteFrom } from "@/lib/analytics/views-gained-labels";
-import type { NicheDTO, NicheViewsGainedEntryDTO } from "@/lib/dto";
+import type { NicheDTO } from "@/lib/dto";
 import {
   NICHE_KIND_DESCRIPTION,
   NICHE_KIND_LABEL,
@@ -100,41 +90,6 @@ export default function NichesPage() {
   const [createOpen, setCreateOpen] = React.useState(false);
 
   const rows = useChannelRows(data);
-
-  /*
-   * ONE views-gained read for the whole grid, at page level.
-   *
-   * Every card's money strip prices views GAINED in the period, which is a
-   * server-side delta between two readings of each channel's counter rather
-   * than a re-slice of the dataset — see `use-views-gained.ts`. Fetching per
-   * card would be one request per niche for slices of the same response;
-   * fetching here, with the same key the Overview panel uses, means the two
-   * surfaces share one cached measurement and cannot price the same period
-   * differently. Disabled for a reader without finance access: their `rpm`
-   * is null on every niche, no strip renders, and the read would be waste.
-   */
-  const { range } = useFilters();
-  const pageFormat = useDatasetFormat();
-  const canReadEconomics = useCanReadNicheEconomics();
-  const gainsQuery = useNicheViewsGained(pageFormat, range, canReadEconomics);
-  const gains: NicheGainsView = React.useMemo(() => {
-    const data = gainsQuery.data;
-    return {
-      byId: data === undefined ? null : nicheGainedById(data),
-      loading: canReadEconomics && gainsQuery.isPending,
-      error: gainsQuery.isError,
-      /*
-       * ONE NOTE FOR THE PAGE. The span is a fact about the history — it
-       * begins where it begins, for every channel at once, because the
-       * measurement starts where every channel holds a reading — so the same
-       * sentence is true under every card. What differs per card is how many
-       * of ITS channels the figure covers, and the strip derives that from
-       * its own entry.
-       */
-      note: data === undefined ? null : measuredSpanNoteFrom(data),
-      historyBeganMs: data?.historyBeganMs ?? null,
-    };
-  }, [canReadEconomics, gainsQuery.data, gainsQuery.isPending, gainsQuery.isError]);
 
   /*
    * Unconfigured niches float to the top.
@@ -234,12 +189,12 @@ export default function NichesPage() {
           {/*
             THE CHANNELS NO FIGURE ON THIS PAGE INCLUDES, said at the top.
 
-            Every money figure here is a sum over the channels FILED UNDER a
-            niche, so a tracked channel in no niche is in none of them — and
-            the "Uncategorised" list at the foot of the page is three screens
-            away from the figure a reader is doubting. Same count the Overview
-            filter shows as "Unassigned"; one sentence, above the grid, gone
-            the moment the last channel is filed.
+            Every figure on a card — channels, Shorts, hit rate — is a sum over
+            the channels FILED UNDER that niche, so a tracked channel in no
+            niche is in none of them — and the "Uncategorised" list at the foot
+            of the page is three screens away from the figure a reader is
+            doubting. Same count the Overview filter shows as "Unassigned"; one
+            sentence, above the grid, gone the moment the last channel is filed.
           */}
           {!isLoading && unassigned.length > 0 ? (
             <p className="text-[12px] leading-relaxed text-muted-foreground">
@@ -275,8 +230,8 @@ export default function NichesPage() {
                 <UnconfiguredSummary count={unconfiguredCount} />
               ) : null}
 
-              <NicheKindGroup kind="production" niches={production} rows={rows} gains={gains} />
-              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} gains={gains} />
+              <NicheKindGroup kind="production" niches={production} rows={rows} />
+              <NicheKindGroup kind="watchlist" niches={watchlist} rows={rows} />
             </>
           )}
 
@@ -303,31 +258,14 @@ export default function NichesPage() {
  * Renders nothing when the group is empty. An account with no watchlist niches
  * should not carry a heading explaining a concept it is not using.
  */
-/** The page-level views-gained read, as every card consumes it. */
-interface NicheGainsView {
-  readonly byId: ReadonlyMap<string, NicheViewsGainedEntryDTO> | null;
-  readonly loading: boolean;
-  readonly error: boolean;
-  /**
-   * "Measured over the last N of M days…" when the history falls short, and
-   * how old the newest reading is when that is worth saying. One sentence
-   * for the page: the span is the same under every card.
-   */
-  readonly note: string | null;
-  /** When the view history began, for each strip's definition sentence. */
-  readonly historyBeganMs: number | null;
-}
-
 function NicheKindGroup({
   kind,
   niches,
   rows,
-  gains,
 }: {
   kind: NicheKind;
   niches: readonly NicheDTO[];
   rows: readonly ChannelRow[];
-  gains: NicheGainsView;
 }) {
   if (niches.length === 0) return null;
 
@@ -347,7 +285,7 @@ function NicheKindGroup({
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {niches.map((niche) => (
-          <NicheCard key={niche.id} niche={niche} rows={rows} gains={gains} />
+          <NicheCard key={niche.id} niche={niche} rows={rows} />
         ))}
       </div>
     </section>
@@ -357,11 +295,9 @@ function NicheKindGroup({
 function NicheCard({
   niche,
   rows,
-  gains,
 }: {
   niche: NicheDTO;
   rows: readonly ChannelRow[];
-  gains: NicheGainsView;
 }) {
   const { range } = useFilters();
   /*
@@ -390,8 +326,6 @@ function NicheCard({
   const [deleteOpen, setDeleteOpen] = React.useState(false);
   const [notesOpen, setNotesOpen] = React.useState(false);
   const [thresholdOpen, setThresholdOpen] = React.useState(false);
-  const [rpmOpen, setRpmOpen] = React.useState(false);
-  const canConfigureRpm = useCanConfigureRpm();
 
   const members = React.useMemo(
     () => rows.filter((row) => row.channel.niches.some((n) => n.id === niche.id)),
@@ -433,19 +367,6 @@ function NicheCard({
 
   const summary = React.useMemo(() => calculatePortfolioSummary(entries), [entries]);
 
-  /*
-   * The money strip's view totals no longer come from this card.
-   *
-   * They used to be `calculateMarketShare` over the members' videos — lifetime
-   * views of what was PUBLISHED in the period. The money now prices views
-   * GAINED in the period, which is a snapshot delta the browser cannot
-   * compute from the dataset, so the page fetches it once (see `NichesPage`)
-   * and each card receives its own niche's slice through `gains`. The upload
-   * measure keeps every job it still has — the hit rate, the Shorts count,
-   * the market-share percentages elsewhere — because "how did recent output
-   * do?" and "what did the period pay?" are different questions, and only the
-   * second one is money.
-   */
   const best = summary.topChannel;
   /*
    * The top channel's OWN verdicts, so the range printed beside its rate is its
@@ -500,11 +421,6 @@ function NicheCard({
                   the whole group goes and the Button's own variant styling is
                   what shows. There is nothing left to reveal, which is why no
                   focus or open handling has to be re-added.
-
-                  This menu is now also the ONLY way into the RPM dialog — the
-                  inline "Set RPM range" links were removed from the money strip
-                  — so a control that only appeared under a pointer would have
-                  made pricing a niche unreachable on a touch screen.
                 */}
                 <Button
                   variant="ghost"
@@ -523,21 +439,6 @@ function NicheCard({
                   <DropdownMenuItem onSelect={() => setThresholdOpen(true)}>
                     <Target />
                     Hit rule
-                  </DropdownMenuItem>
-                ) : null}
-                {/* A separate item for a separate decision behind a separate
-                    pair of permissions. The hit rule says what counts as a win
-                    here; the RPM says what the market pays for views, which is
-                    a fact about the outside world. */}
-                {/* THE ONLY ENTRY POINT NOW. The money strip below used to
-                    carry its own inline "Set RPM range" links; they are gone,
-                    so this item is what the strip's sentence points at. Its
-                    label is imported rather than typed, so the two cannot
-                    drift. */}
-                {canConfigureRpm ? (
-                  <DropdownMenuItem onSelect={() => setRpmOpen(true)}>
-                    <DollarSign />
-                    {RPM_MENU_ITEM_LABEL}
                   </DropdownMenuItem>
                 ) : null}
                 {/* There was a "Niche settings" item here, and a second link to
@@ -609,19 +510,6 @@ function NicheCard({
           />
         </div>
 
-        {/* Between the volume stats and the top-channel footer: what the
-            tracked niche is worth follows what it did, and precedes who in it
-            did best. Renders nothing at all for a reader without finance
-            access — see the note on `NicheDTO.rpm`. */}
-        <NicheValueStrip
-          niche={niche}
-          gained={gains.byId?.get(niche.id) ?? null}
-          loading={gains.loading}
-          error={gains.error}
-          measuredNote={gains.note}
-          historyBeganMs={gains.historyBeganMs}
-        />
-
         <div className="mt-3 flex min-h-[32px] items-center justify-between gap-2 border-t border-border pt-3">
           {nicheThreshold === null ? (
             <span className="text-[12px] text-subtle-foreground">
@@ -666,7 +554,6 @@ function NicheCard({
         open={thresholdOpen}
         onOpenChange={setThresholdOpen}
       />
-      <NicheRpmDialog niche={niche} open={rpmOpen} onOpenChange={setRpmOpen} />
       <NicheNotesDialog niche={niche} open={notesOpen} onOpenChange={setNotesOpen} />
       <RenameNicheDialog niche={niche} open={renameOpen} onOpenChange={setRenameOpen} />
       <DeleteNicheDialog

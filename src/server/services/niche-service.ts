@@ -27,16 +27,6 @@
  * would let somebody redefine what a hit pays by editing the third nobody
  * thought to protect.
  *
- * THE RPM RANGE IS A THIRD PERMISSION AND NOT THE SECOND ONE. What a niche PAYS
- * PER 1,000 VIEWS needs `settings.manage` AND `finance.view` together, because
- * it is read behind `finance.view`: where the studio owns a monetized channel
- * in a niche, the rate shown is that channel's reported revenue divided by its
- * views, and anybody who can see it beside the view count can multiply back to
- * what the channel earned. Gating the READ on `settings.manage` would have made
- * the only way to show a Head of Shorts what a niche is worth also handing them
- * the sync cadence and the org's currency; gating the WRITE on it alone would
- * have let somebody who cannot see a stored range save an empty box over it.
- *
  * `kind` IS DIFFERENT AND STAYS ON `niches.manage`. Calling a niche production
  * or watchlist is a statement about what the studio is doing, not about how a
  * number is computed — it is the same class of act as naming the niche in the
@@ -62,11 +52,7 @@ import {
   MIN_HIT_WINDOW_HOURS,
   MIN_THRESHOLD,
 } from "@/lib/analytics/constants";
-import { CURRENCY_CODES, MAX_MONEY_MINOR, isSupportedCurrency } from "@/lib/finance/money";
-import {
-  MAX_RPM_MAJOR_PER_THOUSAND,
-  maxRpmMinorPerMillion,
-} from "@/lib/analytics/niche-rpm";
+import { MAX_MONEY_MINOR } from "@/lib/finance/money";
 import { NICHE_KINDS, type NicheKind } from "@/lib/niches/niche-kind";
 import {
   DEFAULT_NICHE_FORMAT,
@@ -78,10 +64,6 @@ import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
 import { reevaluateHitsForNiche } from "./hit-evaluation-service";
-// Only the resolver. `mayReadNicheEconomics` is not imported here on purpose:
-// the resolver asks it itself and returns `null` before touching the database,
-// so a second check in this file would be a second place the gate could drift.
-import { resolveNicheRpmByNiche } from "./niche-rpm-service";
 
 /**
  * The columns needed to name a niche's author.
@@ -112,31 +94,6 @@ async function assertMayConfigureRule(): Promise<void> {
   if (!actor.permissions.has("settings.manage")) {
     throw errors.forbidden(
       "set a hit rate threshold. Hit rate thresholds, windows and payments are configured by an Admin",
-    );
-  }
-}
-
-/**
- * Refuses an RPM write from somebody who cannot see what they are overwriting.
- *
- * TWO PERMISSIONS, BOTH REQUIRED, and the second one is the point. Setting a
- * rate is organization-wide analysis configuration, which is `settings.manage`
- * — the same reasoning as the hit rule above. But an RPM range is READ behind
- * `finance.view`, because a derived rate is company revenue divided by a view
- * count, and both keys are individually grantable.
- *
- * So `settings.manage` alone is a real combination somebody could be granted,
- * and it would produce the worst kind of writer: the dialog would open with
- * empty boxes over a stored range — because the DTO withheld it — and saving
- * would write that emptiness over a number an admin chose. Requiring the read
- * permission to write makes that state unreachable rather than merely unlikely,
- * which is a stronger guarantee than the patch builder can give on its own.
- */
-async function assertMayConfigureRpm(): Promise<void> {
-  const actor = await requireActor();
-  if (!actor.permissions.has("settings.manage") || !actor.permissions.has("finance.view")) {
-    throw errors.forbidden(
-      "set an RPM range. Niche RPM is revenue configuration and needs both system settings and finance access",
     );
   }
 }
@@ -192,133 +149,6 @@ const hitPaymentMinorSchema = z
   .optional();
 
 /**
- * One end of a hand-entered RPM range, in minor units per 1,000,000 views.
- *
- * `min(1)` for the same reason the hit payment uses it: zero is not a rate. A
- * niche priced at nothing would multiply its whole tracked view count by zero
- * and print "$0" as a considered estimate, which is the fabricated figure this
- * entire feature is written around avoiding. Clearing is done by sending both
- * ends as `null`.
- *
- * The ceiling here is the widest any supported currency allows; the real,
- * currency-correct bound is applied in the refinement below, where the code
- * being entered is actually known.
- */
-const rpmEndpointSchema = z
-  .number()
-  .int("An RPM is a whole number of minor units per million views, never a fraction.")
-  .min(1, "An RPM of nothing is not a rate. Clear both ends to leave it unset.")
-  .max(maxRpmMinorPerMillion("USD") * 100, "That RPM is too large to record.")
-  .nullable()
-  .optional();
-
-/**
- * The currency the range was typed in.
- *
- * Stored rather than inherited from `OrganizationSettings.baseCurrency`,
- * because that column's own comment says individual entries keep their own
- * currency: a range typed as $0.03–$0.06 must not silently become €0.03–€0.06
- * on the day an admin switches the base. That would be a number nobody entered,
- * sitting inside a figure somebody plans against.
- *
- * VALIDATED AGAINST THE CURRENCY TABLE, not merely as three letters, and for
- * the reason `finance-service` gives on its own currency field: `minorUnitsFor`
- * is what turns the stored integer back into an amount, and it silently answers
- * 2 for a code it has never heard of. A stored range of 3,000 accepted as "ZZZ"
- * would be re-read at a scale nobody chose. The dialog can only ever send the
- * organization's base, so this is unreachable through the app — which is
- * precisely why it belongs on the server, where every other caller arrives.
- */
-const rpmCurrencySchema = z
-  .string()
-  .trim()
-  .toUpperCase()
-  .length(3, "A currency is a three-letter code like USD.")
-  .refine(isSupportedCurrency, {
-    message: `Currency must be one of ${CURRENCY_CODES.join(", ")}.`,
-  })
-  .nullable()
-  .optional();
-
-/**
- * The three RPM columns move together or not at all.
- *
- * BOTH ENDS OR NEITHER, the same rule `hitThreshold` and `hitWindowHours`
- * follow: half a range is not a range, it is an unfinished thought that would
- * render as a bound with no other end. Equality is allowed, because an admin
- * who genuinely believes one number should not be made to invent a spread.
- *
- * Checked here rather than in the database because the portability contract
- * rules out check constraints — they are outside the intersection of SQLite and
- * PostgreSQL this schema targets — so the invariant lives in the one place
- * every write passes through.
- */
-function refineRpmRange(
-  value: {
-    rpmLowMinorPerMillion?: number | null;
-    rpmHighMinorPerMillion?: number | null;
-    rpmCurrency?: string | null;
-  },
-  ctx: z.RefinementCtx,
-): void {
-  const low = value.rpmLowMinorPerMillion ?? null;
-  const high = value.rpmHighMinorPerMillion ?? null;
-  const currency = value.rpmCurrency ?? null;
-
-  const sentAny =
-    value.rpmLowMinorPerMillion !== undefined ||
-    value.rpmHighMinorPerMillion !== undefined ||
-    value.rpmCurrency !== undefined;
-  if (!sentAny) return;
-
-  if ((low === null) !== (high === null)) {
-    ctx.addIssue({
-      code: "custom",
-      message:
-        "An RPM needs both ends. Enter a low and a high, or clear both to leave the niche unpriced.",
-    });
-    return;
-  }
-
-  if (low === null) {
-    // Clearing. The currency goes with it — a code with no range attached is a
-    // fact about nothing, and leaving one behind would make the next reader
-    // wonder what it was the currency of.
-    if (currency !== null) {
-      ctx.addIssue({
-        code: "custom",
-        message: "Clear the currency along with the range.",
-      });
-    }
-    return;
-  }
-
-  if (currency === null) {
-    ctx.addIssue({
-      code: "custom",
-      message: "Say which currency the RPM range is in.",
-    });
-    return;
-  }
-
-  if (high !== null && high < low) {
-    ctx.addIssue({
-      code: "custom",
-      message: "The low end of the RPM range has to be at or below the high end.",
-    });
-    return;
-  }
-
-  const ceiling = maxRpmMinorPerMillion(currency);
-  if ((high ?? low) > ceiling) {
-    ctx.addIssue({
-      code: "custom",
-      message: `An RPM above ${MAX_RPM_MAJOR_PER_THOUSAND} ${currency} per 1,000 views is higher than any format has ever paid, so it is almost certainly a decimal place in the wrong place.`,
-    });
-  }
-}
-
-/**
  * "production" | "watchlist".
  *
  * A Zod enum over the shared union rather than a free string, because this
@@ -358,8 +188,7 @@ export const createNicheSchema = z.object({
   hitPaymentMinor: hitPaymentMinorSchema,
 });
 
-export const updateNicheSchema = z
-  .object({
+export const updateNicheSchema = z.object({
   name: nicheNameSchema.optional(),
   colorIndex: z.number().int().min(0).max(NICHE_COLOR_COUNT - 1).optional(),
   sortOrder: z.number().int().min(0).max(9999).optional(),
@@ -402,23 +231,7 @@ export const updateNicheSchema = z
     .max(MAX_HIT_WINDOW_HOURS)
     .nullable()
     .optional(),
-  /**
-   * What 1,000 views in this niche are worth, as a hand-entered low–high band.
-   *
-   * A RANGE RATHER THAN A POINT because a guess IS a range. Whoever fills this
-   * in has no measurement to enter — they have a band they believe the niche
-   * pays in — and demanding one number would launder that belief into a figure
-   * the screen then presents with more confidence than it was given.
-   *
-   * `null` on both ends clears it, exactly as an empty threshold clears the
-   * bar: the niche keeps working and simply reports no money figure until
-   * somebody prices it again.
-   */
-  rpmLowMinorPerMillion: rpmEndpointSchema,
-  rpmHighMinorPerMillion: rpmEndpointSchema,
-  rpmCurrency: rpmCurrencySchema,
-  })
-  .superRefine(refineRpmRange);
+});
 
 /**
  * Case- and whitespace-insensitive key.
@@ -461,40 +274,9 @@ export async function listNiches(
 
   const niches = await listNicheRows(organizationId, options.formats);
 
-  /*
-   * Resolved once for the whole catalogue, AFTER the rows are in hand.
-   *
-   * `listNiches` is on the two reads every signed-in person makes — the niche
-   * endpoint and the dataset — so a per-niche resolution would turn one page
-   * load into dozens of queries against the revenue and snapshot tables. It is
-   * also skipped entirely for a reader who may not see niche economics: the
-   * resolver returns `null` before it touches the database, so withholding the
-   * figure costs nothing rather than computing it and throwing it away.
-   */
-  const rpm = await resolveNicheRpmByNiche({ niches });
-
   return niches.map((niche) =>
-    toNicheDTO(niche, niche._count.channels, niche.createdBy, {
-      includePay,
-      rpm: rpm?.get(niche.id) ?? null,
-    }),
+    toNicheDTO(niche, niche._count.channels, niche.createdBy, { includePay }),
   );
-}
-
-/**
- * One niche's resolution, for the two write paths that return a single DTO.
- *
- * Goes through the same resolver as the list rather than shortcutting, so a
- * niche that has just been repriced comes back with the rate a reader will
- * actually see — including the case where an own channel's measurement is
- * overriding the range that was just typed. A save that echoed back the typed
- * range while the card showed something else would look like a bug in the save.
- */
-async function resolveOneNicheRpm(
-  niche: { id: string } & Parameters<typeof resolveNicheRpmByNiche>[0]["niches"][number],
-) {
-  const resolved = await resolveNicheRpmByNiche({ niches: [niche] });
-  return resolved?.get(niche.id) ?? null;
 }
 
 /** The catalogue read, split out so `listNiches` can name its own row type. */
@@ -636,12 +418,6 @@ export async function createNiche(input: {
 
   return toNicheDTO(niche, 0, niche.createdBy, {
     includePay: await mayReadHitPayment(),
-    // A niche that has existed for one millisecond has no channels, so nothing
-    // can be derived and nothing has been entered. Resolved rather than
-    // hardcoded to "none" all the same: the reason travels with it, and a
-    // hardcoded answer here would be a second place that decides what an
-    // unpriced niche is.
-    rpm: await resolveOneNicheRpm(niche),
   });
 }
 
@@ -655,9 +431,6 @@ export async function updateNiche(
     hitThreshold?: number | null;
     hitWindowHours?: number | null;
     hitPaymentMinor?: number | null;
-    rpmLowMinorPerMillion?: number | null;
-    rpmHighMinorPerMillion?: number | null;
-    rpmCurrency?: string | null;
   },
 ): Promise<NicheDTO> {
   // Same rule as on create, and checked before the row is even looked up: a
@@ -670,23 +443,6 @@ export async function updateNiche(
     sent(update, "hitPaymentMinor")
   ) {
     await assertMayConfigureRule();
-  }
-
-  /*
-   * The RPM range is its own act with its own gate, checked separately.
-   *
-   * It rides in the same PATCH as the hit rule only because it is the same
-   * table; it is a different decision, needs `finance.view` on top of
-   * `settings.manage`, and is refused rather than stripped for the same reason
-   * the rule is — silently dropping it would save the request and leave
-   * somebody believing they had priced a niche they had not.
-   */
-  if (
-    sent(update, "rpmLowMinorPerMillion") ||
-    sent(update, "rpmHighMinorPerMillion") ||
-    sent(update, "rpmCurrency")
-  ) {
-    await assertMayConfigureRpm();
   }
 
   const organizationId = await getCurrentOrgId();
@@ -722,9 +478,6 @@ export async function updateNiche(
     hitThreshold?: number | null;
     hitWindowHours?: number | null;
     hitPaymentMinor?: number | null;
-    rpmLowMinorPerMillion?: number | null;
-    rpmHighMinorPerMillion?: number | null;
-    rpmCurrency?: string | null;
   } = {};
 
   if (update.name !== undefined) {
@@ -770,29 +523,6 @@ export async function updateNiche(
    * at all — so keeping it costs nothing and losing it costs a decision.
    */
   if (update.hitPaymentMinor !== undefined) data.hitPaymentMinor = update.hitPaymentMinor;
-  /*
-   * The three RPM columns are written together, and only when they arrive.
-   *
-   * An absent key is not a write — the same rule the rest of this function
-   * follows — and it is what lets the dialog save a niche whose stored range
-   * was withheld from it without destroying that range. The schema has already
-   * refused a partial trio, so writing them one `if` at a time here cannot
-   * leave a low end without a high one.
-   *
-   * NOTHING IS CLEARED WHEN AN OWN CHANNEL STARTS OVERRIDING THE RANGE, which
-   * is the same reasoning that keeps the hit payment through a reclassification.
-   * A derived rate can stop being derivable — a connection lapses, monetization
-   * changes, a snapshot run breaks — and the entered range is what the niche
-   * falls back to. Deleting it the day a measurement arrived would make that
-   * fallback silently disappear.
-   */
-  if (update.rpmLowMinorPerMillion !== undefined) {
-    data.rpmLowMinorPerMillion = update.rpmLowMinorPerMillion;
-  }
-  if (update.rpmHighMinorPerMillion !== undefined) {
-    data.rpmHighMinorPerMillion = update.rpmHighMinorPerMillion;
-  }
-  if (update.rpmCurrency !== undefined) data.rpmCurrency = update.rpmCurrency;
 
   const updated = await prisma.niche.update({
     where: { id: niche.id },
@@ -819,7 +549,6 @@ export async function updateNiche(
 
   return toNicheDTO(updated, updated._count.channels, updated.createdBy, {
     includePay: await mayReadHitPayment(),
-    rpm: await resolveOneNicheRpm(updated),
   });
 }
 

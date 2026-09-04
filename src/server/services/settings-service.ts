@@ -8,10 +8,6 @@ import { requirePermission } from "@/server/auth/dal";
 import { recordAudit } from "@/server/audit/audit-service";
 import { toOrganizationSettingsDTO, toPersonalSettingsDTO } from "@/server/mappers";
 import { MAX_THRESHOLD, MIN_THRESHOLD } from "@/lib/analytics/constants";
-import {
-  MAX_ENGAGED_VIEW_SHARE_BASIS_POINTS,
-  MIN_ENGAGED_VIEW_SHARE_BASIS_POINTS,
-} from "@/lib/analytics/niche-rpm";
 import type {
   OrganizationSettingsDTO,
   PersonalSettingsDTO,
@@ -141,30 +137,6 @@ export const organizationSettingsUpdateSchema = z
     snapshotIntervalMinutes: z.number().int().min(0).max(20160).optional(),
     shortsProbeEnabled: z.boolean().optional(),
     autoRefreshEnabled: z.boolean().optional(),
-    /*
-     * THE ENGAGED-VIEW SHARE, AND WHERE ITS BOUND ACTUALLY LIVES.
-     *
-     * There is no CHECK constraint behind this column — the schema stays
-     * portable between SQLite in development and Postgres in production, so no
-     * `@db.*`, no enum, and no constraint the two providers spell differently.
-     * That makes this line the real bound rather than a convenience.
-     *
-     * The floor is 1, not 0, and the difference is a whole feature. Zero
-     * asserts that no view is ever engaged, which prices every niche in the
-     * organization at nothing — the fabricated zero the RPM module exists to
-     * keep off a screen, arrived at through a settings field instead of a rate.
-     * The ceiling is 10,000, which is 100%: engaged views are a subset of
-     * views, so anything above it claims a Short was paid for views nobody
-     * made. 100% itself is allowed on purpose — it is the identity, and it is
-     * how somebody who disagrees with the assumption turns it off honestly
-     * rather than by leaving a column blank.
-     */
-    engagedViewShareBasisPoints: z
-      .number()
-      .int()
-      .min(MIN_ENGAGED_VIEW_SHARE_BASIS_POINTS)
-      .max(MAX_ENGAGED_VIEW_SHARE_BASIS_POINTS)
-      .optional(),
     companyName: z.string().trim().min(1).max(120).optional(),
   })
   .strict();

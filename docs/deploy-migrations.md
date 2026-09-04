@@ -51,3 +51,22 @@ PREVIOUS release for the length of a deploy:
 `20260830_niche_pay_kind_and_channel_rules/migration.sql` is worth reading as an
 example: its generated form dropped a table and recreated it, and it was
 hand-edited into CREATE-then-COPY-then-DROP precisely so live rows survived.
+
+## The niche-money removal, in two deploys
+
+The niche earnings / RPM feature (the `rpmLowMinorPerMillion` column named
+above was part of it) was removed on 2026-09-05 following exactly this rule.
+The first deploy stopped every reader and writer and took the fields out of
+`schema.prisma` with NO migration, so these objects stay in production until
+the second deploy drops them:
+
+- `niches.rpmLowMinorPerMillion`, `niches.rpmHighMinorPerMillion`,
+  `niches.rpmCurrency` (created by `20260831_niche_rpm_range`)
+- `organization_settings.engagedViewShareBasisPoints`
+  (`20260831_organization_engaged_view_share`)
+- table `channel_view_snapshots` (`20260903_channel_view_snapshots`)
+
+Until that second migration lands, `prisma migrate dev` against a Postgres
+database will offer to fold those drops into whatever migration is being
+written. Do not accept that: the drop ships on its own, as
+`<date>_drop_niche_rpm_and_channel_readings`, once the first deploy is live.

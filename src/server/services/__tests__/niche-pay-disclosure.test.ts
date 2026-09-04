@@ -23,31 +23,18 @@ const ORG_ID = "org_northstar";
 const mocks = vi.hoisted(() => ({
   findMany: vi.fn(),
   can: vi.fn<(permission: string) => Promise<boolean>>(),
-  trackedFindMany: vi.fn(),
 }));
 
 vi.mock("@/server/db", () => ({
   prisma: {
     niche: { findMany: mocks.findMany },
-    // The RPM resolver reads the organization's own channels before it can say
-    // anything about a niche's rate. No own channels means it has nothing to
-    // derive from and stops there, which keeps this file about pay disclosure.
-    trackedChannel: { findMany: mocks.trackedFindMany },
   },
 }));
 
 vi.mock("@/server/auth/dal", () => ({
   actorCan: mocks.can,
-  /*
-   * `role` is part of the actor for a reason, not filler.
-   *
-   * The RPM resolver `listNiches` now calls narrows on the caller's VISIBLE
-   * niches, and `resolveVisibleNicheIds` fails CLOSED on a role it does not
-   * recognise — an actor with no role is treated as the least privileged,
-   * niche-scoped one and would be answered for no niches at all. An admin is
-   * not niche-scoped, so the whole taxonomy is resolved, which is the case
-   * every assertion in this file is about.
-   */
+  // An admin is not niche-scoped, so the whole taxonomy is listed — the case
+  // every assertion in this file is about.
   requireActor: async () => ({ userId: "user_1", organizationId: ORG_ID, role: "admin" }),
 }));
 
@@ -74,9 +61,6 @@ function nicheRow() {
     hitThreshold: 1_000_000,
     hitWindowHours: 168,
     hitPaymentMinor: 500,
-    rpmLowMinorPerMillion: null,
-    rpmHighMinorPerMillion: null,
-    rpmCurrency: null,
     sortOrder: 0,
     createdById: null,
     createdBy: null,
@@ -89,7 +73,6 @@ function nicheRow() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.findMany.mockResolvedValue([nicheRow()]);
-  mocks.trackedFindMany.mockResolvedValue([]);
 });
 
 describe("the per-hit rate on the niche catalogue", () => {
@@ -123,12 +106,10 @@ describe("the per-hit rate on the niche catalogue", () => {
    * while quietly binding pay disclosure to something that can be granted for
    * an unrelated reason.
    *
-   * THE SET OF PERMISSIONS THIS READ CONSULTS IS ITSELF THE ASSERTION. It used
-   * to be exactly one; it is two since the catalogue grew a niche RPM, which is
-   * withheld on `finance.view` because a derived rate is company revenue rather
-   * than configuration. Pinning the whole set is what would catch a third gate
+   * THE SET OF PERMISSIONS THIS READ CONSULTS IS ITSELF THE ASSERTION. It is
+   * exactly one. Pinning the whole set is what would catch a second gate
    * appearing without anybody deciding what it guards — or, worse, pay
-   * disclosure quietly moving onto the finance key because it happened to be
+   * disclosure quietly moving onto some other key because it happened to be
    * nearby.
    */
   it("asks for the permission that sets the rate, and no wider one", async () => {
@@ -137,7 +118,6 @@ describe("the per-hit rate on the niche catalogue", () => {
     await listNiches();
 
     expect(mocks.can.mock.calls.map(([permission]) => permission).sort()).toEqual([
-      "finance.view",
       "settings.manage",
     ]);
   });

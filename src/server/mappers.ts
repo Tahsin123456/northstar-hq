@@ -27,10 +27,6 @@ import { isOwnershipType } from "@/lib/dto";
 import { toNicheKind } from "@/lib/niches/niche-kind";
 import { toNicheFormat } from "@/lib/niches/niche-format";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
-import {
-  normalizeEngagedViewShare,
-  type NicheRpmResolution,
-} from "@/lib/analytics/niche-rpm";
 import { youtubeChannelUrl } from "@/lib/format";
 
 /**
@@ -103,19 +99,6 @@ export function toNicheDTO(
    */
   options?: {
     readonly includePay?: boolean;
-    /**
-     * This niche's resolved RPM, or `undefined` to disclose nothing.
-     *
-     * A VALUE RATHER THAN A FLAG, unlike `includePay` above, and the difference
-     * is not stylistic. A hit payment is a column on the row this mapper
-     * already has; an RPM resolution is the answer to a question involving the
-     * niche's own channels, their connections, twenty-eight days of revenue and
-     * the exchange-rate table — none of which a mapper may reach for. The
-     * caller resolves it (see `niche-rpm-service`) and hands it over, which
-     * also means a caller who has not thought about disclosure passes nothing
-     * and discloses nothing, exactly as with the flag.
-     */
-    readonly rpm?: NicheRpmResolution | null;
   },
 ): NicheDTO {
   return {
@@ -147,11 +130,6 @@ export function toNicheDTO(
         : niche.hitPaymentMinor,
     hitThreshold: niche.hitThreshold,
     hitWindowHours: niche.hitWindowHours,
-    // `?? null` rather than carried through, so "the caller passed nothing"
-    // and "the caller passed an explicit null" land on the same wire value.
-    // Both mean the same thing to a reader — this payload discloses no niche
-    // economics — and there is no third state for a screen to mishandle.
-    rpm: options?.rpm ?? null,
     sortOrder: niche.sortOrder,
     channelCount,
     createdById: niche.createdById,
@@ -542,13 +520,6 @@ export function toOrganizationSettingsDTO(
     snapshotIntervalMinutes: orgSettings.snapshotIntervalMinutes,
     shortsProbeEnabled: orgSettings.shortsProbeEnabled,
     autoRefreshEnabled: orgSettings.autoRefreshEnabled,
-    // Normalised on the way out, so the settings form is seeded from a value it
-    // could legally send back. A row written before this column existed, or one
-    // hand-edited to something incoherent, would otherwise put an unsubmittable
-    // number in the box and make saving anything else impossible.
-    engagedViewShareBasisPoints: normalizeEngagedViewShare(
-      orgSettings.engagedViewShareBasisPoints,
-    ),
     baseCurrency: orgSettings.baseCurrency,
     companyName: orgSettings.companyName,
   };

@@ -14,7 +14,6 @@
 
 import type { AnalyticsVideo } from "@/lib/analytics/types";
 import type { HitOutcome } from "@/lib/analytics/hit-rate";
-import type { NicheRpmResolution } from "@/lib/analytics/niche-rpm";
 import type { NicheKind } from "@/lib/niches/niche-kind";
 
 /**
@@ -144,29 +143,6 @@ export interface NicheDTO extends NicheRefDTO {
    * replaced, and it reported the publishing calendar as if it were quality.
    */
   readonly hitWindowHours: number | null;
-  /**
-   * What 1,000 views in this niche are worth, and on what basis.
-   *
-   * `null` MEANS WITHHELD, and only that. "Nobody has said" is a value of the
-   * union itself — `{ source: "none" }` — carrying the reason why, so the two
-   * can never be confused the way an unqualified null would let them be. A
-   * reader who may see niche economics always gets an object; a reader who may
-   * not always gets `null` and no surface for them renders the strip at all.
-   *
-   * WITHHELD BEHIND `finance.view`, not behind `settings.manage`. A derived
-   * rate is `ChannelRevenueDay.estimatedRevenueMinor` divided by a view count —
-   * it is company revenue, and multiplying it back by the view count printed
-   * beside it reconstructs what an own channel earned. `GET /api/niches` and
-   * `GET /api/dataset` are both gated on `analytics.view`, which every employee
-   * role holds, so anything on this DTO that is not deliberately withheld is
-   * published to the entire team. See `niche-rpm-disclosure.test.ts`.
-   *
-   * The hand-entered range is withheld on the same gate rather than a weaker
-   * one: it is the studio's own commercial estimate of what a market pays, and
-   * splitting the two would put a "$0.03–$0.06" beside a blank on the same card
-   * and invite somebody to work out which niches earn.
-   */
-  readonly rpm: NicheRpmResolution | null;
   readonly sortOrder: number;
   /** Active tracked channels currently assigned to this niche. */
   readonly channelCount: number;
@@ -182,82 +158,6 @@ export interface NicheDTO extends NicheRefDTO {
   readonly createdById: string | null;
   readonly createdByName: string | null;
   readonly createdAt: number;
-}
-
-/**
- * One niche's views gained over the measured span, split ours/competitors.
- *
- * VIEW COUNTS ONLY — no rate and no money. The pricing happens in the browser
- * against `NicheDTO.rpm`, which stays behind `finance.view`; these are the
- * same class of figures the dataset already publishes to every
- * `analytics.view` holder, read from the CHANNEL counter series
- * (`ChannelViewSnapshot`) rather than from the lifetime counters.
- */
-export interface NicheViewsGainedEntryDTO {
-  readonly nicheId: string;
-  /**
-   * Views gained by channels Northstar owns — each channel's counter delta
-   * over the span, scaled by its estimated share of this niche's format.
-   * Clamped nowhere: a purge-driven negative sum is real and the pricing
-   * layer clamps for display.
-   */
-  readonly ourViewsGained: number;
-  /** The same figure for every other tracked channel in the niche. */
-  readonly competitorViewsGained: number;
-  /**
-   * How many of the niche's member channels the figure actually covers. A
-   * channel with fewer than two readings across the span, or with no
-   * classified video to estimate a format share from, is in `totalChannels`
-   * and in nothing else — its missing views are unknown, not zero, and the
-   * surfaces caption a partial figure with these two counts.
-   */
-  readonly measuredChannels: number;
-  readonly totalChannels: number;
-  /** Own channels that actually measured something — the double-count check's
-   * input, mirroring `NicheEarningsInput.ownChannelIds`. */
-  readonly ownChannelIds: readonly string[];
-  /**
-   * How the channel-wide counter was split between Shorts and long-form:
-   * always by the mix seen in the channel's stored uploads, never measured —
-   * YouTube reports one lifetime count per channel. Carried on the wire so
-   * no surface can forget to say the figure is an estimate.
-   */
-  readonly shareBasis: "estimated";
-}
-
-/**
- * Views gained per niche over a requested period, measured where the view
- * history actually reaches.
- *
- * `measuredFromMs` is the honest start: the requested start, or the first
- * instant EVERY measurable channel holds a reading, whichever is later — see
- * `channel-views-gained.ts` for why the max of first readings rather than
- * the min. `null` means NOTHING could be measured — no readings at all, or a
- * history beginning at or after the period's close — and the client renders
- * words for that state rather than a fabricated zero. `requestedStartMs`
- * travels back so the label "measured over the last N of M days" can be
- * derived without trusting the client's own copy of the range.
- */
-export interface NicheViewsGainedDTO {
-  readonly requestedStartMs: number;
-  readonly endMs: number;
-  readonly measuredFromMs: number | null;
-  /**
-   * The instant from which every measurable member channel holds a reading —
-   * the unclamped span start — so a tooltip can say when the view history
-   * began. `null` when no channel holds a usable reading.
-   */
-  readonly historyBeganMs: number | null;
-  /**
-   * How far BEFORE the period's close (or before now, when the period has not
-   * closed yet) the oldest end reading actually used sits — the page-wide
-   * maximum. Readings arrive every sweep, so this is normally hours; the label
-   * states it when it passes an hour. `null` when nothing was measured.
-   */
-  readonly maxEndLagMs: number | null;
-  /** One entry per visible niche of the requested format. A niche outside the
-   * reader's scope is OMITTED — same absence-not-empty rule as `NicheDTO.rpm`. */
-  readonly niches: readonly NicheViewsGainedEntryDTO[];
 }
 
 /**
@@ -670,18 +570,6 @@ export interface OrganizationSettingsDTO {
   readonly snapshotIntervalMinutes: number;
   readonly shortsProbeEnabled: boolean;
   readonly autoRefreshEnabled: boolean;
-  /**
-   * What share of raw views YouTube pays a Short against, in basis points.
-   * 5,000 is 50.00%. See `OrganizationSettings.engagedViewShareBasisPoints`.
-   *
-   * HERE FOR THE EDITOR, NOT FOR THE READER. This payload is `settings.manage`,
-   * which is where the value is CHANGED. Every surface that PRICES views reads
-   * the same share off `NicheDTO.rpm` instead, where it is gated on
-   * `finance.view` and travels welded to the rate it scales — so a card can
-   * never project money with a share that arrived from somewhere else, or not
-   * at all.
-   */
-  readonly engagedViewShareBasisPoints: number;
   readonly baseCurrency: string;
   readonly companyName: string;
 }

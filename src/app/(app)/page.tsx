@@ -24,7 +24,6 @@ import {
   useVisibleRows,
 } from "@/hooks/use-channel-analytics";
 import { ContentTypePerformanceTable } from "@/components/dashboard/content-type-performance-table";
-import { NicheEarningsPanel } from "@/components/dashboard/niche-earnings-panel";
 import {
   ContentTypeFilterControl,
   NicheFilterControl,
@@ -429,24 +428,6 @@ export default function OverviewPage() {
           {!isLoading && contentTypes.length > 0 ? (
             <ContentTypePerformanceTable performance={contentTypePerformance} />
           ) : null}
-
-          {/*
-            LAST, below the content-type table.
-
-            It sat directly under the summary cards, which put a money figure —
-            visible only to an admin — above the channel table every role opens
-            for. Moving it here also groups it with the other two panels that
-            summarise ACROSS the table rather than listing it, so the page now
-            reads top to bottom as: the headline figures, the channels
-            themselves, then what those channels amount to by content type and
-            by niche.
-
-            Still ungated on `isLoading` and `scopeIsEmpty`: it renders its own
-            honest empty state, and on a deployment where no niche has a rate
-            that empty state is the whole of what it has to say. It reads the
-            page's own `range`, because it prices what the period GAINED.
-          */}
-          <NicheEarningsPanel niches={niches} range={range} />
 
           <p className="px-1 text-[11px] leading-relaxed text-subtle-foreground">
             {HIT_RATE_DEFINITION}

@@ -121,9 +121,6 @@ function dataset(channels: DatasetDTO["channels"]): DatasetDTO {
         hitPaymentMinor: null,
         hitThreshold: null,
         hitWindowHours: null,
-        // Withheld, which is what a report built for a reader without
-        // `finance.view` genuinely carries.
-        rpm: null,
         sortOrder: 0,
         channelCount: channels.length,
         createdById: "u1",
