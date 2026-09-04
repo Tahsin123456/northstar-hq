@@ -57,8 +57,8 @@ hand-edited into CREATE-then-COPY-then-DROP precisely so live rows survived.
 The niche earnings / RPM feature (the `rpmLowMinorPerMillion` column named
 above was part of it) was removed on 2026-09-05 following exactly this rule.
 The first deploy stopped every reader and writer and took the fields out of
-`schema.prisma` with NO migration, so these objects stay in production until
-the second deploy drops them:
+`schema.prisma` with NO migration, so these objects stayed in production until
+the second deploy dropped them:
 
 - `niches.rpmLowMinorPerMillion`, `niches.rpmHighMinorPerMillion`,
   `niches.rpmCurrency` (created by `20260831_niche_rpm_range`)
@@ -66,7 +66,8 @@ the second deploy drops them:
   (`20260831_organization_engaged_view_share`)
 - table `channel_view_snapshots` (`20260903_channel_view_snapshots`)
 
-Until that second migration lands, `prisma migrate dev` against a Postgres
-database will offer to fold those drops into whatever migration is being
-written. Do not accept that: the drop ships on its own, as
-`<date>_drop_niche_rpm_and_channel_readings`, once the first deploy is live.
+The second deploy is `20260905_drop_niche_rpm_and_channel_readings`, shipped
+on its own once the first was live on www.northstarstudios.cc and checked.
+Had anybody run `prisma migrate dev` in between, it would have offered to fold
+those drops into whatever migration they were writing — which is exactly the
+destructive-in-one-deploy shape this document exists to forbid.
