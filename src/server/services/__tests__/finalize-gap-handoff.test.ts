@@ -83,6 +83,18 @@ vi.mock("../user-service", () => ({
   getCurrentOrgSettings: async () => ({ baseCurrency: "USD" }),
 }));
 
+/*
+ * Finalization settles the hit verdicts before it reads the inputs, so that a
+ * window which closed since the last sweep is judged from its readings rather
+ * than frozen as unresolved. This file supplies the inputs directly, so the
+ * pass has nothing to do here and is stubbed to keep it away from the mocked
+ * database. Its own ordering and failure behaviour are pinned next door, in
+ * `finalize-settles-verdicts.test.ts`.
+ */
+vi.mock("../hit-evaluation-service", () => ({
+  evaluateHitsForOrganization: async () => ({ created: 0, updated: 0, unchanged: 0 }),
+}));
+
 vi.mock("../payroll-data", () => ({
   loadPayrollInputs: mocks.loadPayrollInputs,
   loadAssignedNiches: mocks.loadAssignedNiches,

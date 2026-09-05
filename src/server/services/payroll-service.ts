@@ -32,6 +32,7 @@ import {
   settledGapSentence,
   type EarningsNicheGapSource,
 } from "@/lib/payroll/earnings-copy";
+import { evaluateHitsForOrganization } from "./hit-evaluation-service";
 import { loadAssignedNiches, loadPayrollInputs } from "./payroll-data";
 import { getOrgSettings, getScope } from "./user-service";
 
@@ -2256,6 +2257,50 @@ export async function finalizePeriodForOrganization(options: {
       `${label} has not ended yet. Finalizing now would freeze a figure that is still moving as Shorts gain views. Send force to do it anyway.`,
     );
   }
+
+  /*
+   * ─────────────────────────────────────────────────────────────────────────
+   * SETTLE THE VERDICTS BEFORE FREEZING THEM
+   * ─────────────────────────────────────────────────────────────────────────
+   * The evaluator writes `pending` while a Short's window is still open, and it
+   * runs at the END of the hourly sweep. This runs at 00:00 on the 1st. So
+   * every Short whose window closed between the last completed sweep and this
+   * instant still carries a `pending` row — and a pending row carries no
+   * reading, because a verdict that has not been reached has nothing to record.
+   *
+   * The engine then cannot use that row twice over. `storedVerdictFor` rejects
+   * a non-final outcome, `observationsFor` finds no reading on it, and
+   * `evaluateHit` is left looking at a closed window with no in-window evidence
+   * — which is `unknown`. The Short counts as unresolved, earns nothing, and
+   * the period is frozen a few lines below. The bonus cannot arrive afterwards:
+   * a hit is paid in the period its window CLOSES in, and that period is now a
+   * document. The snapshots proving the hit sit in `video_snapshots` throughout;
+   * nothing reads them again. The editor's own earnings page meanwhile explains
+   * that nobody was recording view counts during their window, which is false.
+   *
+   * One sweep's worth of Shorts is the ordinary loss. It is not bounded, because
+   * `runHitEvaluationStep` deliberately swallows its own failures — correct for
+   * a sweep, where the next hour re-decides everything it missed — so a run of
+   * failures before month end silently un-pays every hit that resolved in them.
+   *
+   * A SHORT CAN STILL FINISH `unknown` AFTER THIS, and that is the honest case
+   * this does not touch: a window nobody sampled inside genuinely has no
+   * evidence either way. What changes is that the answer now comes from the
+   * readings rather than from the clock the sweep happened to keep.
+   *
+   * IT THROWS RATHER THAN CONTINUING — the opposite of the sweep's choice, for
+   * the opposite reason. A finalization that cannot settle its verdicts is the
+   * one case where doing nothing beats doing the work: a refused run is retried
+   * and costs a delay, a completed run freezes wrong figures and costs somebody
+   * their bonus with no way back. The scheduled job already contains this per
+   * organization — it logs, writes `payroll.run_failed` where an admin can see
+   * it, and carries on to the next tenant.
+   *
+   * AFTER the two guards above, deliberately. An already-frozen period is
+   * returned untouched and a period that has not ended is refused, and neither
+   * outcome is worth an organization-wide evaluation pass to reach.
+   */
+  await evaluateHitsForOrganization(organizationId);
 
   const inputs = await loadPayrollInputs(organizationId, period);
   const run = calculatePayrollRun({
