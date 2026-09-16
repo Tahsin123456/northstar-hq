@@ -20,7 +20,21 @@ import { useDatasetFormat } from "./dataset-format-context";
  */
 export const DATASET_KEY = ["dataset"] as const;
 
-export function useDataset(format?: NicheFormat) {
+export function useDataset(
+  format?: NicheFormat,
+  options: {
+    /**
+     * Whether to fetch at all. Defaults to on. The sidebar mounts a closed
+     * Add Channel dialog on every page, one per format, and a dialog that
+     * read its niches eagerly would pull the OTHER format's whole dataset
+     * onto every screen an admin opens; passing `open` here keeps the read
+     * to the moment somebody actually needs the picker. Cached data is still
+     * returned while disabled, so a page already holding the dataset loses
+     * nothing.
+     */
+    readonly enabled?: boolean;
+  } = {},
+) {
   // The subtree's format when the caller states none — which is every
   // existing call site. Under a Shorts page (or outside any provider) the
   // context answers "shorts", so bare calls mean exactly what they always
@@ -31,6 +45,7 @@ export function useDataset(format?: NicheFormat) {
   return useQuery<DatasetDTO>({
     queryKey: [...DATASET_KEY, effective] as const,
     queryFn: () => api.getDataset(effective),
+    enabled: options.enabled ?? true,
   });
 }
 

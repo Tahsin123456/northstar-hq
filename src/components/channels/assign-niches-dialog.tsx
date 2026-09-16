@@ -4,6 +4,7 @@ import * as React from "react";
 import { toast } from "sonner";
 import type { ChannelDTO } from "@/lib/dto";
 import { useDataset } from "@/hooks/use-dataset";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import { useSetChannelNiches } from "@/hooks/use-niches";
 import { Avatar } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -50,6 +51,9 @@ function AssignForm({
   onOpenChange: (open: boolean) => void;
 }) {
   const { data } = useDataset();
+  // The same context `useDataset()` resolved through, handed to the picker so
+  // an inline "New niche" on a Long Form roster lands in the Long Form list.
+  const format = useDatasetFormat();
   const [selectedIds, setSelectedIds] = React.useState<string[]>(() =>
     channel.niches.map((niche) => niche.id),
   );
@@ -99,6 +103,7 @@ function AssignForm({
         </div>
 
         <NichePicker
+          format={format}
           niches={data?.niches ?? []}
           selectedIds={selectedIds}
           onChange={setSelectedIds}

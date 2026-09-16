@@ -21,6 +21,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  *   • the result says `alreadyTracked` with a null `sync`;
  *   • a tracked channel sent with NO niches is still refused, exactly as
  *     before — that request has nothing to do.
+ *
+ * And the RESTORE path, which the review caught one branch over: a
+ * soft-removed channel keeps its join rows, and the dialog restoring it from
+ * the Long Form side offers only Long Form niches — so a wholesale set there
+ * would have wiped every Shorts filing the moment an admin restored it. The
+ * restore files additively too, and keeps the row's own ownership when the
+ * request names none.
  */
 
 process.env.SESSION_SECRET = Buffer.alloc(32, 13).toString("base64");
@@ -37,6 +44,7 @@ const mocks = vi.hoisted(() => ({
   trackedFindUniqueOrThrow: vi.fn(),
   trackedUpdate: vi.fn(),
   trackedCreate: vi.fn(),
+  channelFindUniqueOrThrow: vi.fn(),
   channelDataSources: vi.fn(),
 }));
 
@@ -48,7 +56,7 @@ vi.mock("@/server/db", () => ({
       update: mocks.trackedUpdate,
       create: mocks.trackedCreate,
     },
-    channel: { findUniqueOrThrow: vi.fn() },
+    channel: { findUniqueOrThrow: mocks.channelFindUniqueOrThrow },
   },
 }));
 
@@ -119,6 +127,65 @@ beforeEach(() => {
     contentTypeRules: [],
   });
   mocks.channelDataSources.mockResolvedValue(new Map([["UC1", "connection"]]));
+  mocks.channelFindUniqueOrThrow.mockResolvedValue(CHANNEL_ROW);
+  mocks.trackedUpdate.mockResolvedValue({ id: "tc_1" });
+  mocks.syncChannel.mockResolvedValue({
+    dataSource: "public",
+    status: "success",
+    videosUpdated: 3,
+    quotaUnitsUsed: 5,
+  });
+});
+
+describe("restoring a channel that was removed", () => {
+  beforeEach(() => {
+    // Soft-removed: the row and its join rows are still there, isActive off.
+    mocks.trackedFindUnique.mockResolvedValue({
+      id: "tc_1",
+      isActive: false,
+      label: null,
+      ownershipType: "own",
+    });
+  });
+
+  it("files additively, so the filings the other side cannot see survive", async () => {
+    const result = await addChannel("@dawnstarz", { nicheIds: ["niche_docs"] });
+
+    expect(mocks.addChannelNiches).toHaveBeenCalledTimes(1);
+    expect(mocks.addChannelNiches.mock.calls[0]).toEqual(["ch_1", ["niche_docs"]]);
+    // The blocker: a set from the Long Form dialog would have run
+    // deleteMany across BOTH formats for an admin and wiped GTA.
+    expect(mocks.setChannelNiches).not.toHaveBeenCalled();
+    expect(result.restored).toBe(true);
+    expect(result.alreadyTracked).toBe(false);
+    expect(result.sync).not.toBeNull();
+  });
+
+  it("keeps the row's own ownership when the request names none", async () => {
+    await addChannel("@dawnstarz", { nicheIds: ["niche_docs"] });
+
+    expect(mocks.trackedUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.trackedUpdate.mock.calls[0][0]).toMatchObject({
+      where: { id: "tc_1" },
+      data: { isActive: true, removedAt: null, ownershipType: "own" },
+    });
+  });
+
+  it("applies the ownership the request does name", async () => {
+    await addChannel("@dawnstarz", { ownershipType: "competitor", nicheIds: ["niche_docs"] });
+
+    expect(mocks.trackedUpdate.mock.calls[0][0]).toMatchObject({
+      data: { ownershipType: "competitor" },
+    });
+  });
+
+  it("does not touch the filings at all when no niches are sent", async () => {
+    await addChannel("@dawnstarz", {});
+
+    expect(mocks.addChannelNiches).not.toHaveBeenCalled();
+    expect(mocks.setChannelNiches).not.toHaveBeenCalled();
+    expect(mocks.trackedUpdate).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("adding a channel that is already tracked", () => {

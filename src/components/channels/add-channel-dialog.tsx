@@ -10,6 +10,7 @@ import { formatCompactNumber } from "@/lib/format";
 import { useAddChannel, useDataset } from "@/hooks/use-dataset";
 import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import type { NicheFormat } from "@/lib/niches/niche-format";
+import { addChannelRequest } from "@/lib/channels/add-channel-request";
 import { NichePicker, TypeOption } from "@/components/niches/niche-picker";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -59,7 +60,10 @@ export function AddChannelDialog({
 
   const contextFormat = useDatasetFormat();
   const format = explicitFormat ?? contextFormat;
-  const { data: dataset } = useDataset(format);
+  // Read only while open. This dialog is mounted closed on every page by the
+  // sidebar, once per format, and the Long Form row on a Shorts page would
+  // otherwise fetch the whole Long Form dataset for a picker nobody opened.
+  const { data: dataset } = useDataset(format, { enabled: open });
   const niches = dataset?.niches ?? [];
 
   const resolve = useMutation({
@@ -101,19 +105,30 @@ export function AddChannelDialog({
   const handleConfirm = () => {
     if (!preview) return;
     add.mutate(
-      // A channel the tracker already holds is FILED, not re-added, and no
-      // ownership travels with it: the dialog's "competitor" default must not
-      // demote an own channel just because it was added from the other side.
-      preview.alreadyTracked
-        ? { input: preview.youtubeChannelId, nicheIds }
-        : { input: preview.youtubeChannelId, ownershipType, nicheIds },
+      // Whether ownership travels is decided in one pinned place — see
+      // `addChannelRequest` for why a tracked channel sends none.
+      addChannelRequest({
+        youtubeChannelId: preview.youtubeChannelId,
+        alreadyTracked: preview.alreadyTracked,
+        ownershipType,
+        nicheIds,
+      }),
       {
         onSuccess: (result) => {
           if (result.alreadyTracked || result.sync === null) {
-            const names = niches
+            // Names from the RESULT, not the dataset: a niche created inline a
+            // moment ago is on the returned row before the catalogue refetch
+            // that would put it in `niches` has landed, and a toast reading
+            // "filed under" followed by nothing is the kind of gap that reads
+            // as a failed save.
+            const names = result.channel.niches
               .filter((niche) => nicheIds.includes(niche.id))
               .map((niche) => niche.name);
-            toast.success(`${result.channel.displayName} filed under ${names.join(", ")}`, {
+            const under =
+              names.length > 0
+                ? names.join(", ")
+                : `${nicheIds.length} ${nicheIds.length === 1 ? "niche" : "niches"}`;
+            toast.success(`${result.channel.displayName} filed under ${under}`, {
               description:
                 "It was already in your tracker, so its history and its other filings are untouched.",
             });
@@ -175,6 +190,12 @@ export function AddChannelDialog({
                 onChange={(event) => {
                   setInput(event.target.value);
                   setPreview(null);
+                  // The selection belongs to the channel that was previewed.
+                  // Typing a different one must not carry it over: a filing
+                  // chosen for channel A would otherwise be posted for B the
+                  // moment B resolves, with nothing on screen to say so.
+                  setNicheIds([]);
+                  setOwnershipType("competitor");
                   resolve.reset();
                 }}
               />
@@ -212,7 +233,7 @@ export function AddChannelDialog({
 
           {preview && !resolve.isPending ? (
             <>
-              <ChannelPreview preview={preview} />
+              <ChannelPreview preview={preview} format={format} />
 
               {/*
                 Categorisation appears only once a channel has actually
@@ -265,9 +286,9 @@ export function AddChannelDialog({
                     onChange={setNicheIds}
                     format={format}
                     label="File under"
-                    hint={`Already in your tracker. Pick the ${
+                    hint={`Pick the ${
                       format === "longform" ? "Long Form" : "Shorts"
-                    } niches to file it under — its history and its other filings stay as they are.`}
+                    } niches to ADD it to. Nothing here shows what it is already filed under, and none of that changes.`}
                   />
                 </div>
               )}
@@ -305,7 +326,13 @@ export function AddChannelDialog({
   );
 }
 
-function ChannelPreview({ preview }: { preview: ChannelPreviewDTO }) {
+function ChannelPreview({
+  preview,
+  format,
+}: {
+  preview: ChannelPreviewDTO;
+  format: NicheFormat;
+}) {
   return (
     <div className="animate-in-rise rounded-lg border border-border bg-surface-sunken p-3.5">
       <div className="flex items-start gap-3">
@@ -353,17 +380,34 @@ function ChannelPreview({ preview }: { preview: ChannelPreviewDTO }) {
         </div>
       </div>
 
-      {preview.previouslyRemoved ? (
+      {/*
+        What confirming will DO, which differs by state. A tracked channel is
+        filed and nothing is fetched — saying "adding will fetch" there would
+        promise quota the flow never spends. The Shorts sentence is
+        byte-for-byte what it always was.
+      */}
+      {preview.alreadyTracked ? (
+        <p className="mt-3 border-t border-border pt-2.5 text-[12px] leading-relaxed text-muted-foreground">
+          Already in your tracker. Nothing is fetched and nothing about the
+          channel changes &mdash; it only gains the filings you pick below.
+        </p>
+      ) : preview.previouslyRemoved ? (
         <p className="mt-3 border-t border-border pt-2.5 text-[12px] leading-relaxed text-muted-foreground">
           This channel was removed from your tracker earlier. Its previously
-          collected Shorts and view history are still stored and will come back
-          with it.
+          collected {format === "shorts" ? "Shorts" : "videos"} and view history
+          are still stored and will come back with it, filings included.
         </p>
-      ) : (
+      ) : format === "shorts" ? (
         <p className="mt-3 border-t border-border pt-2.5 text-[12px] leading-relaxed text-muted-foreground">
           Adding will fetch this channel&rsquo;s recent uploads and identify
           which are Shorts. Long-form videos are stored but excluded from every
           Shorts metric.
+        </p>
+      ) : (
+        <p className="mt-3 border-t border-border pt-2.5 text-[12px] leading-relaxed text-muted-foreground">
+          Adding will fetch this channel&rsquo;s recent uploads and identify
+          which are long-form videos. Shorts are stored but excluded from every
+          Long Form metric.
         </p>
       )}
     </div>

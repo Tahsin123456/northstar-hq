@@ -18,7 +18,7 @@ import type {
 } from "@/lib/dto";
 import { youtubeChannelUrl } from "@/lib/format";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
-import { addChannelNiches, setChannelNiches } from "./niche-service";
+import { addChannelNiches } from "./niche-service";
 import {
   syncChannel,
   upsertChannel,
@@ -236,7 +236,14 @@ export async function addChannel(
   }
 
   const restored = existingTracking !== null;
-  const ownershipType = options.ownershipType ?? "competitor";
+  /*
+   * Ownership is what was asked for. When nothing was, a RESTORED row keeps
+   * what it had — a channel the studio marked as its own does not become a
+   * competitor because the request that brought it back said nothing about
+   * it — and only a genuinely new row falls back to "competitor".
+   */
+  const ownershipType =
+    options.ownershipType ?? (existingTracking ? existingTracking.ownershipType : "competitor");
 
   const tracking = restored
     ? await prisma.trackedChannel.update({
@@ -255,11 +262,21 @@ export async function addChannel(
         },
       });
 
-  // Categorise before syncing, so the channel is filed correctly even if the
-  // sync then fails — the user's organisational intent should not depend on
-  // YouTube being reachable.
-  if (options.nicheIds) {
-    await setChannelNiches(channelRow.id, options.nicheIds);
+  /*
+   * Categorise before syncing, so the channel is filed correctly even if the
+   * sync then fails — the user's organisational intent should not depend on
+   * YouTube being reachable.
+   *
+   * ADDITIVE ON EVERY PATH, for the restore's sake. A soft-removed channel
+   * keeps its join rows, and the dialog restoring it shows only its own side's
+   * niches — so a wholesale set from the Long Form dialog would have quietly
+   * stripped every Shorts filing the moment an admin restored the channel
+   * there. "Comes back intact" is what the roster promises about a restore,
+   * and the filings are part of intact. On a brand-new row there is nothing
+   * to keep, so additive and set are the same write.
+   */
+  if (options.nicheIds && options.nicheIds.length > 0) {
+    await addChannelNiches(channelRow.id, options.nicheIds);
   }
 
   // Pull history immediately: a channel that appears in the tracker with no
