@@ -8,6 +8,8 @@ import { api, ApiError } from "@/lib/api-client";
 import type { ChannelPreviewDTO, OwnershipType } from "@/lib/dto";
 import { formatCompactNumber } from "@/lib/format";
 import { useAddChannel, useDataset } from "@/hooks/use-dataset";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { NichePicker, TypeOption } from "@/components/niches/niche-picker";
 import { Avatar } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -37,9 +39,17 @@ import { Skeleton } from "@/components/ui/skeleton";
 export function AddChannelDialog({
   trigger,
   onOpenChange,
+  format: explicitFormat,
 }: {
   trigger: React.ReactNode;
   onOpenChange?: (open: boolean) => void;
+  /**
+   * Which side's niches the picker offers. Absent means the surrounding
+   * layout's format — every page-mounted instance — and is what lets the
+   * Long Form roster and overview offer Long Form niches for free. The
+   * sidebar's rows render outside any format layout and say it explicitly.
+   */
+  format?: NicheFormat;
 }) {
   const [open, setOpen] = React.useState(false);
   const [input, setInput] = React.useState("");
@@ -47,7 +57,9 @@ export function AddChannelDialog({
   const [ownershipType, setOwnershipType] = React.useState<OwnershipType>("competitor");
   const [nicheIds, setNicheIds] = React.useState<string[]>([]);
 
-  const { data: dataset } = useDataset();
+  const contextFormat = useDatasetFormat();
+  const format = explicitFormat ?? contextFormat;
+  const { data: dataset } = useDataset(format);
   const niches = dataset?.niches ?? [];
 
   const resolve = useMutation({
@@ -89,23 +101,39 @@ export function AddChannelDialog({
   const handleConfirm = () => {
     if (!preview) return;
     add.mutate(
-      { input: preview.youtubeChannelId, ownershipType, nicheIds },
+      // A channel the tracker already holds is FILED, not re-added, and no
+      // ownership travels with it: the dialog's "competitor" default must not
+      // demote an own channel just because it was added from the other side.
+      preview.alreadyTracked
+        ? { input: preview.youtubeChannelId, nicheIds }
+        : { input: preview.youtubeChannelId, ownershipType, nicheIds },
       {
-      onSuccess: (result) => {
-        const shorts = result.sync.videosUpdated;
-        toast.success(
-          result.restored
-            ? `${result.channel.displayName} restored to your tracker`
-            : `${result.channel.displayName} added`,
-          {
-            description:
-              result.sync.status === "error"
-                ? `Added, but the first sync failed: ${result.sync.error}`
-                : `Synced ${shorts} ${shorts === 1 ? "video" : "videos"} · ${result.sync.quotaUnitsUsed} API units used`,
-          },
-        );
-        handleOpenChange(false);
-      },
+        onSuccess: (result) => {
+          if (result.alreadyTracked || result.sync === null) {
+            const names = niches
+              .filter((niche) => nicheIds.includes(niche.id))
+              .map((niche) => niche.name);
+            toast.success(`${result.channel.displayName} filed under ${names.join(", ")}`, {
+              description:
+                "It was already in your tracker, so its history and its other filings are untouched.",
+            });
+            handleOpenChange(false);
+            return;
+          }
+          const videos = result.sync.videosUpdated;
+          toast.success(
+            result.restored
+              ? `${result.channel.displayName} restored to your tracker`
+              : `${result.channel.displayName} added`,
+            {
+              description:
+                result.sync.status === "error"
+                  ? `Added, but the first sync failed: ${result.sync.error}`
+                  : `Synced ${videos} ${videos === 1 ? "video" : "videos"} · ${result.sync.quotaUnitsUsed} API units used`,
+            },
+          );
+          handleOpenChange(false);
+        },
         onError: (error) => {
           if (error instanceof ApiError && error.code === "CHANNEL_ALREADY_TRACKED") {
             toast.error(error.message);
@@ -216,9 +244,33 @@ export function AddChannelDialog({
                     niches={niches}
                     selectedIds={nicheIds}
                     onChange={setNicheIds}
+                    format={format}
                   />
                 </div>
-              ) : null}
+              ) : (
+                /*
+                  ALREADY TRACKED IS NOT A DEAD END. It used to be: the picker
+                  vanished and the button greyed out, so a channel the Shorts
+                  side tracked first could never be filed under a Long Form
+                  niche — the Long Form roster does not list it until it is
+                  filed, and this dialog was the only other door. Now the
+                  channel type stays hidden (nothing about the channel changes)
+                  and the picker stays, offering this side's niches to file it
+                  under.
+                */
+                <div className="flex flex-col gap-4 animate-in-rise">
+                  <NichePicker
+                    niches={niches}
+                    selectedIds={nicheIds}
+                    onChange={setNicheIds}
+                    format={format}
+                    label="File under"
+                    hint={`Already in your tracker. Pick the ${
+                      format === "longform" ? "Long Form" : "Shorts"
+                    } niches to file it under — its history and its other filings stay as they are.`}
+                  />
+                </div>
+              )}
             </>
           ) : null}
         </DialogBody>
@@ -231,13 +283,21 @@ export function AddChannelDialog({
             variant="primary"
             onClick={handleConfirm}
             loading={add.isPending}
-            disabled={!preview || preview.alreadyTracked}
+            disabled={!preview || (preview.alreadyTracked && nicheIds.length === 0)}
           >
             {add.isPending
-              ? "Fetching Shorts…"
-              : preview?.previouslyRemoved
-                ? "Restore to tracker"
-                : "Add to tracker"}
+              ? preview?.alreadyTracked
+                ? "Filing…"
+                : format === "shorts"
+                  ? "Fetching Shorts…"
+                  : "Fetching videos…"
+              : preview?.alreadyTracked
+                ? nicheIds.length > 1
+                  ? `File under ${nicheIds.length} niches`
+                  : "File under niche"
+                : preview?.previouslyRemoved
+                  ? "Restore to tracker"
+                  : "Add to tracker"}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -710,6 +710,66 @@ export async function setChannelNiches(
   ]);
 }
 
+/**
+ * File a tracked channel under more niches, touching nothing it is already
+ * filed under.
+ *
+ * ADDITIVE, NOT SET SEMANTICS, and the difference is the whole reason this
+ * exists beside `setChannelNiches`. That function replaces a channel's list
+ * within the caller's own side of the operation, so a caller who cannot SEE a
+ * channel's existing filings — and the Long Form side never ships the Shorts
+ * ones — cannot send them back, and would strip them. This one inserts the
+ * join rows that are missing and deletes none, so it carries no unfiling
+ * power at all: what it cannot file into, it cannot touch.
+ *
+ * The one caller is `addChannel` meeting a channel that is already tracked.
+ * "Add" on such a channel used to be refused outright, which left a channel
+ * tracked on the Shorts side with no route into a Long Form niche: the Long
+ * Form roster does not list it until it is filed, and the Shorts picker
+ * offers no Long Form niches to file it under.
+ *
+ * The same two checks as a set — every niche is this organization's, and
+ * every niche's format is one the caller may file into. The existing rows are
+ * read and diffed rather than deduplicated by the database: `skipDuplicates`
+ * is outside the SQLite half of the schema's portability contract.
+ */
+export async function addChannelNiches(
+  channelId: string,
+  nicheIds: readonly string[],
+): Promise<{ filed: number }> {
+  const organizationId = await getCurrentOrgId();
+  const actor = await requireActor();
+
+  const tracking = await prisma.trackedChannel.findFirst({
+    where: { organizationId, channelId },
+    select: { id: true, niches: { select: { nicheId: true } } },
+  });
+  if (!tracking) throw errors.notFound("channel");
+
+  const unique = [...new Set(nicheIds)];
+  if (unique.length === 0) return { filed: 0 };
+
+  const owned = await prisma.niche.findMany({
+    where: { id: { in: unique }, organizationId },
+    select: { id: true, format: true },
+  });
+  if (owned.length !== unique.length) {
+    throw errors.invalidInput("One or more of those niches no longer exists.");
+  }
+  for (const niche of owned) {
+    requireFormat(actor.role, toNicheFormat(niche.format));
+  }
+
+  const already = new Set(tracking.niches.map((row) => row.nicheId));
+  const missing = unique.filter((id) => !already.has(id));
+  if (missing.length === 0) return { filed: 0 };
+
+  await prisma.trackedChannelNiche.createMany({
+    data: missing.map((nicheId) => ({ trackedChannelId: tracking.id, nicheId })),
+  });
+  return { filed: missing.length };
+}
+
 /** Resolves niche names to ids, creating any that do not exist yet. */
 export async function resolveOrCreateNiches(
   names: readonly string[],

@@ -1,4 +1,5 @@
 import type { Permission } from "@/lib/auth/permissions";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
  * =========================================================================
@@ -51,6 +52,15 @@ interface SidebarItemBase {
    * sees no "Shorts" heading over nothing.
    */
   readonly shortsOnly?: boolean;
+  /**
+   * The mirror image: a Long Form surface, hidden from an actor whose
+   * `contentScope` is "shorts". The Long Form LINKS are gated on `longs.view`
+   * instead, because that is the permission the section was built around;
+   * this flag exists for the one row that needs the section's scope AND a
+   * permission of its own — `requires` is any-of, and "holds channels.manage"
+   * alone must not conjure a Long Form section with a single button in it.
+   */
+  readonly longsOnly?: boolean;
 }
 
 /** A row that navigates. */
@@ -64,14 +74,18 @@ export interface SidebarLinkSpec extends SidebarItemBase {
 /**
  * A row that opens something in place rather than navigating.
  *
- * Add Channel is the one of these. It is row-shaped and lives inside the
- * Shorts section because that is where the channels it adds appear, but it
- * has no URL, is never "active", and is gated on `channels.manage` rather
- * than on the section being visible — an editor sees the Shorts tracker and
- * still cannot add to it.
+ * Add Channel is the one of these, and it appears ONCE PER FORMAT SECTION:
+ * row-shaped, at the foot of the section whose Channels row it feeds, with no
+ * URL and never "active". It is gated on `channels.manage` rather than on the
+ * section being visible — an editor sees the tracker and still cannot add to
+ * it. `format` says which side's niches the dialog offers; the Long Form row
+ * has to say so explicitly, because the sidebar renders outside the /longform
+ * layout and the dialog would otherwise read the Shorts dataset.
  */
 export interface SidebarActionSpec extends SidebarItemBase {
   readonly action: "add-channel";
+  /** Which format's niches the dialog files under. Absent means shorts. */
+  readonly format?: NicheFormat;
   readonly href?: undefined;
   readonly matchPrefix?: undefined;
 }
@@ -92,15 +106,21 @@ export interface SidebarViewer {
   readonly canAny: (permissions: readonly Permission[]) => boolean;
 }
 
-/** A stable key for a row — links by URL, actions by name. */
+/**
+ * A stable key for a row — links by URL, actions by name AND format, since
+ * the same action sits in both format sections.
+ */
 export function sidebarItemKey(item: SidebarItemSpec): string {
-  return item.action !== undefined ? `action:${item.action}` : item.href;
+  return item.action !== undefined
+    ? `action:${item.action}:${item.format ?? "shorts"}`
+    : item.href;
 }
 
 export function isItemVisible(item: SidebarItemSpec, viewer: SidebarViewer): boolean {
-  // Shorts surfaces disappear for a longs-scoped role. "all" (admin) and
-  // "shorts" both keep them.
+  // Shorts surfaces disappear for a longs-scoped role, Long Form ones for a
+  // shorts-scoped role. "all" (admin) keeps both.
   if (item.shortsOnly && viewer.contentScope === "longs") return false;
+  if (item.longsOnly && viewer.contentScope === "shorts") return false;
   return !item.requires || viewer.canAny(item.requires);
 }
 

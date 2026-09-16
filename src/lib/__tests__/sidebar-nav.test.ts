@@ -122,16 +122,38 @@ describe("what each role sees", () => {
     }
   });
 
-  it("puts Add Channel in the Shorts section for the roles that may add one, and nowhere else", () => {
+  /**
+   * ONE ADD CHANNEL PER FORMAT SECTION, at its foot, for the roles that may
+   * add one. It used to be a Shorts-only row, which left a Head of Longs —
+   * who holds `channels.manage` — with no door at all, and an admin who had
+   * just created a Long Form niche with nothing to press. The Long Form row
+   * carries `format: "longform"` so the dialog offers that side's niches
+   * from a sidebar that renders outside the /longform layout.
+   */
+  it("puts Add Channel at the foot of each format section, for the roles that may add one", () => {
     expect(rowLabels(viewerFor("admin"), "Shorts").at(-1)).toBe("Add Channel");
+    expect(rowLabels(viewerFor("admin"), "Long Form").at(-1)).toBe("Add Channel");
     expect(rowLabels(viewerFor("head_of_shorts"), "Shorts").at(-1)).toBe("Add Channel");
+    expect(rowLabels(viewerFor("head_of_longs"), "Long Form").at(-1)).toBe("Add Channel");
     for (const role of ["short_form_editor", "short_form_clip_producer"] as const) {
       expect(rowLabels(viewerFor(role), "Shorts"), role).not.toContain("Add Channel");
     }
-    // A Head of Longs holds `channels.manage` too, and still does not see it:
-    // the row is a Shorts surface, and their Channels row is not in the nav.
-    const longs = visibleSections(NAV_SECTIONS, viewerFor("head_of_longs"));
-    expect(longs.flatMap((s) => s.items.map((i) => i.label))).not.toContain("Add Channel");
+    expect(rowLabels(viewerFor("long_form_editor"), "Long Form")).not.toContain("Add Channel");
+    // Each side's row files under its own niches, and neither leaks across:
+    // a Head of Shorts sees no Long Form section, so no Long Form row.
+    const longRow = section("longform").items.find((i) => i.action === "add-channel");
+    expect(longRow?.format).toBe("longform");
+    const shortsRow = section("shorts").items.find((i) => i.action === "add-channel");
+    expect(shortsRow?.format).toBeUndefined();
+    expect(sectionLabelsFor(viewerFor("head_of_shorts"))).not.toContain("Long Form");
+    expect(sectionLabelsFor(viewerFor("head_of_longs"))).not.toContain("Shorts");
+  });
+
+  it("mounts Add Channel on the Long Form overview, header and empty state alike", () => {
+    // The Shorts overview has always had both; the Long Form one had neither,
+    // and its empty state told the reader to "add one" with nothing to press.
+    const source = readFileSync(join(APP_DIR, "longform", "page.tsx"), "utf8");
+    expect(source.split("<AddChannelDialog").length - 1).toBe(2);
   });
 
   it("shows Admin to somebody granted only settings.manage — the hit-rule screen is theirs", () => {

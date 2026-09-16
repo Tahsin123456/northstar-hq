@@ -18,7 +18,7 @@ import type {
 } from "@/lib/dto";
 import { youtubeChannelUrl } from "@/lib/format";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
-import { setChannelNiches } from "./niche-service";
+import { addChannelNiches, setChannelNiches } from "./niche-service";
 import {
   syncChannel,
   upsertChannel,
@@ -115,7 +115,15 @@ export async function previewChannel(input: string): Promise<ChannelPreviewDTO> 
 export interface AddChannelResult {
   readonly channel: ChannelDTO;
   readonly restored: boolean;
-  readonly sync: RefreshResultDTO;
+  /**
+   * The third outcome beside created and restored: the channel was in the
+   * tracker already and this call FILED it under the requested niches instead
+   * of adding it. Nothing else about it changed — not its ownership, not its
+   * existing filings — and no sync ran, which is why `sync` is null exactly
+   * then. See the branch in `addChannel` for why "add" means this.
+   */
+  readonly alreadyTracked: boolean;
+  readonly sync: RefreshResultDTO | null;
 }
 
 export interface AddChannelOptions {
@@ -188,7 +196,43 @@ export async function addChannel(
   });
 
   if (existingTracking?.isActive) {
-    throw errors.alreadyTracked(existingTracking.label ?? channelRow.title);
+    /*
+     * ALREADY TRACKED. Asked only to add it, this is the refusal it always
+     * was: the channel is there, and a second row would be a duplicate. Asked
+     * to add it UNDER NICHES, it is filed under them instead — the whole of
+     * what "add" can still usefully mean for a channel the tracker holds, and
+     * the only route a Long Form niche has to a channel the Shorts side
+     * tracked first: the Long Form roster does not list such a channel until
+     * it is filed, and the Shorts picker offers no Long Form niches to file it
+     * under. Before this branch, that channel could not be filed anywhere.
+     *
+     * ADDITIVE, deliberately — `addChannelNiches`, never `setChannelNiches`.
+     * The caller sees only its own side's filings and must not be able to
+     * send them back short. Nothing else changes: `ownershipType` is ignored
+     * here rather than applied, because the dialog's default is "competitor"
+     * and re-adding an own channel from the other side must not demote it;
+     * and no sync runs, because the channel already has its history and the
+     * next sweep judges its videos under the new niche's rule.
+     */
+    if (!options.nicheIds || options.nicheIds.length === 0) {
+      throw errors.alreadyTracked(existingTracking.label ?? channelRow.title);
+    }
+    await addChannelNiches(channelRow.id, options.nicheIds);
+
+    const filed = await prisma.trackedChannel.findUniqueOrThrow({
+      where: { id: existingTracking.id },
+      include: TRACKED_WITH_NICHES,
+    });
+    return {
+      channel: toChannelDTO(
+        channelRow,
+        filed,
+        await dataSourceFor(organizationId, channelRow.youtubeChannelId),
+      ),
+      restored: false,
+      alreadyTracked: true,
+      sync: null,
+    };
   }
 
   const restored = existingTracking !== null;
@@ -240,6 +284,7 @@ export async function addChannel(
     // by a grant that expired between them.
     channel: toChannelDTO(refreshed, trackingWithNiches, sync.dataSource),
     restored,
+    alreadyTracked: false,
     sync: toRefreshResultDTO(sync),
   };
 }

@@ -3,6 +3,7 @@
 import * as React from "react";
 import { FilterX, SearchX } from "lucide-react";
 import { PageContainer, PageHeader } from "@/components/layout/app-shell";
+import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
 import {
   ChannelTable,
   type ChannelTableLabels,
@@ -173,7 +174,20 @@ export default function LongformOverviewPage() {
               : "Out of every 100 long-form videos these channels publish, how many reach their niche's view threshold inside its hit window?"
         }
         actions={
-          data ? <DataFreshness oldestFetchedAt={data.oldestFetchedAt} /> : undefined
+          <>
+            {data ? <DataFreshness oldestFetchedAt={data.oldestFetchedAt} /> : null}
+            {/* Under this layout the dialog reads the Long Form dataset, so
+                its picker offers Long Form niches — and a channel the Shorts
+                side already tracks is FILED here rather than refused. */}
+            <AddChannelDialog
+              trigger={
+                <Button variant="primary" size="sm">
+                  <span className="text-base leading-none">+</span>
+                  Add Channel
+                </Button>
+              }
+            />
+          </>
         }
       />
 
@@ -186,7 +200,17 @@ export default function LongformOverviewPage() {
           <EmptyState
             icon={<FilterX />}
             title="No channels on the Long Form side yet"
-            description="File a tracked channel under a Long Form niche — or add one — and it appears here. Unfiled channels show on both sides until somebody files them."
+            description="Add a channel and file it under a Long Form niche — a channel the Shorts side already tracks can be filed here too. Unfiled channels show on both sides until somebody files them."
+            action={
+              <AddChannelDialog
+                trigger={
+                  <Button variant="primary" size="lg">
+                    <span className="text-base leading-none">+</span>
+                    Add Your First Channel
+                  </Button>
+                }
+              />
+            }
           />
         </div>
       ) : (

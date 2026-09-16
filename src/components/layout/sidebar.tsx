@@ -149,6 +149,21 @@ export const NAV_SECTIONS: readonly NavSection[] = [
         requires: ["longs.view"],
       },
       { href: "/longform/niches", label: "Niches", icon: Layers, requires: ["longs.view"] },
+      // The Long Form side's own Add Channel, for the same reason the Shorts
+      // one is a row at the foot of its section. It was missing: the only
+      // Add Channel was `shortsOnly`, so a Head of Longs — who holds
+      // `channels.manage` — had no door at all, and an admin filing a channel
+      // under a brand-new Long Form niche found nothing to press. `format`
+      // is explicit because the sidebar renders outside the /longform layout
+      // and the dialog would otherwise offer the Shorts niches.
+      {
+        action: "add-channel",
+        format: "longform",
+        label: "Add Channel",
+        icon: Plus,
+        longsOnly: true,
+        requires: ["channels.manage"],
+      },
     ],
   },
   {
@@ -376,6 +391,9 @@ function NavRow({
   if (item.action === "add-channel") {
     return (
       <AddChannelDialog
+        // Which side's niches the picker offers. The sidebar sits outside
+        // the /longform layout, so the Long Form row cannot rely on context.
+        format={item.format}
         // In the mobile drawer, opening the dialog closes the drawer behind
         // it — the same courtesy a link gives by navigating away.
         onOpenChange={(open) => open && onNavigate?.()}

@@ -4,6 +4,7 @@ import * as React from "react";
 import { Check, Plus } from "lucide-react";
 import { toast } from "sonner";
 import type { NicheDTO } from "@/lib/dto";
+import type { NicheFormat } from "@/lib/niches/niche-format";
 import { useCreateNiche } from "@/hooks/use-niches";
 import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label } from "@/components/ui/input";
@@ -26,6 +27,7 @@ export function NichePicker({
   niches,
   selectedIds,
   onChange,
+  format,
   label = "Niche",
   hint,
   className,
@@ -33,6 +35,13 @@ export function NichePicker({
   niches: readonly NicheDTO[];
   selectedIds: readonly string[];
   onChange: (ids: string[]) => void;
+  /**
+   * Which format list an inline-created niche joins. Absent means the
+   * server's default for the caller's role — which for an admin is SHORTS,
+   * so a Long Form dialog must say "longform" or its "New niche" would land
+   * in the wrong list and file the channel under it.
+   */
+  format?: NicheFormat;
   label?: string;
   hint?: React.ReactNode;
   className?: string;
@@ -57,9 +66,11 @@ export function NichePicker({
     // Deliberately name-only. This is the inline "create one while assigning
     // channels" path, not the place to configure what a hit means — the niche
     // is created unconfigured and an Admin sets the threshold on the Niches
-    // screen, where the consequences of the number are visible.
+    // screen, where the consequences of the number are visible. The format
+    // travels only when it is Long Form, exactly as the Niches page sends it,
+    // so every Shorts surface keeps sending the request it always sent.
     createNiche.mutate(
-      { name },
+      { name, ...(format === "longform" ? { format } : {}) },
       {
         onSuccess: ({ niche }) => {
           onChange([...selectedIds, niche.id]);

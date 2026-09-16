@@ -335,11 +335,23 @@ export const api = {
       body: JSON.stringify({ input }),
     }),
 
+  /**
+   * `alreadyTracked` is the third outcome beside created and restored: the
+   * channel was in the tracker already and this call FILED it under
+   * `nicheIds` — nothing else about it changed and no sync ran, so `sync` is
+   * null exactly then. Sending a tracked channel with no niches is still
+   * refused with CHANNEL_ALREADY_TRACKED.
+   */
   addChannel: (payload: {
     input: string;
     ownershipType?: OwnershipType;
     nicheIds?: readonly string[];
-  }): Promise<{ channel: ChannelDTO; restored: boolean; sync: RefreshResultDTO }> =>
+  }): Promise<{
+    channel: ChannelDTO;
+    restored: boolean;
+    alreadyTracked: boolean;
+    sync: RefreshResultDTO | null;
+  }> =>
     request("/api/channels", {
       method: "POST",
       body: JSON.stringify(payload),
