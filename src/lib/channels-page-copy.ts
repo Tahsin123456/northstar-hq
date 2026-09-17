@@ -18,14 +18,6 @@ export interface ChannelsPageCopy {
   readonly uploadViewsTip: string;
   /** What the Removed channels block says survives a removal. */
   readonly removedHistory: string;
-  /**
-   * What this format calls the things the hit rate counts.
-   *
-   * The count itself is already narrowed to the format by
-   * `calculateChannelMetrics`; only the noun beside it was shared, so a Long
-   * Form card said "10 Shorts in period" over ten long-form videos.
-   */
-  readonly hitUnitPlural: string;
 }
 
 export function channelsPageCopy(format: NicheFormat): ChannelsPageCopy {
@@ -36,7 +28,6 @@ export function channelsPageCopy(format: NicheFormat): ChannelsPageCopy {
       uploadViewsTip: UPLOAD_VIEWS_TIP,
       removedHistory:
         "Hidden from your dashboard. Their Shorts history is still stored and comes back intact.",
-      hitUnitPlural: "Shorts",
     };
   }
   return {
@@ -45,6 +36,5 @@ export function channelsPageCopy(format: NicheFormat): ChannelsPageCopy {
     uploadViewsTip: UPLOAD_VIEWS_TIP_LONGFORM,
     removedHistory:
       "Hidden from your dashboard. Their video history is still stored and comes back intact.",
-    hitUnitPlural: "videos",
   };
 }

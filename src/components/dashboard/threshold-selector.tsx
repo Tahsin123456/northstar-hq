@@ -7,7 +7,7 @@ import {
   EMPLOYEE_HIT_RULE_NOTICE,
   MAX_THRESHOLD,
   MIN_THRESHOLD,
-  THRESHOLD_LENS_EXPLANATION,
+  thresholdLensExplanation,
   THRESHOLD_PRESETS,
   UNCONFIGURED_RULE_SHORT,
 } from "@/lib/analytics/constants";
@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { FieldHint, Input, Label } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 
 /**
  * The view-bar control.
@@ -179,7 +180,7 @@ export function ThresholdSelector({
             used to move the headline figure and silently stopped is worse than
             one that never existed, so the popover states what it does now. */}
         <p className="mb-2 px-1 text-[11px] leading-relaxed text-muted-foreground">
-          {THRESHOLD_LENS_EXPLANATION}
+          {thresholdLensExplanation(useDatasetFormat())}
         </p>
 
         <div className="mb-2 rounded-md border border-border bg-surface-sunken px-2 py-1.5">

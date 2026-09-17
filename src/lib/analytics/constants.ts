@@ -184,6 +184,109 @@ export const EVIDENCE_LIMITED_EXPLANATION =
   "No Short here was recorded clearing its niche's bar inside its hit window — but some of them did pass the bar at a time nobody was watching. A single percentage would have to guess whether those were fast or slow, so the range is shown instead: the low end counts every one of them as too slow, the high end counts every one as a hit. The range narrows as view history accumulates: turn on automatic refresh in Settings so it starts being recorded.";
 
 /**
+ * ==========================================================================
+ * THE SAME EXPLANATIONS IN THE LONG FORM PRODUCT'S OWN NOUN
+ * ==========================================================================
+ *
+ * Every sentence above is rendered by a component mounted on BOTH formats —
+ * the verdict badge, `HitRateValue`, the channel KPI cards, the overview
+ * summary strip. Each had "Short" written into it, so hovering a verdict on a
+ * Long Form channel page, under a heading reading "Videos in this period",
+ * produced "the Short has since passed the bar". The arithmetic was right and
+ * the sentence was false, which is the worse of the two failures: a reader can
+ * see a wrong number, and cannot see a wrong noun.
+ *
+ * WRITTEN OUT IN FULL RATHER THAN DERIVED BY STRING SURGERY, for the reason
+ * `TOTAL_VIEWS_DEFINITION_LONGFORM` gives above: a `.replace("Short", "video")`
+ * would make one product's pinned copy a function of the other's exact
+ * phrasing, so editing the Shorts wording would silently rewrite the Long Form
+ * wording too — and the byte-for-byte pins would stop meaning anything.
+ */
+
+/** Why a rate is missing when long-form videos exist but none has a verdict. */
+export const NOTHING_DECIDED_EXPLANATION_LONGFORM =
+  "These videos have no decided outcome yet — every one is either still inside its hit window or was published with no view history recorded during it. A rate over none of them would be a number about nothing.";
+
+export const HIT_RATE_UNKNOWN_EXPLANATION_LONGFORM =
+  "The window closed with no view count recorded inside it, and the video has since passed the bar. It cleared at some point and there is no honest way to say whether that took two days or two years, so it is excluded — and counted, because these are disproportionately the winners and dropping them silently biases every rate downward.";
+
+export const HIT_RATE_UNSCOREABLE_EXPLANATION_LONGFORM =
+  "No rule to judge these by. Either the video's channel sits in no niche with both a threshold and a hit window, or it has not been evaluated yet. Either way it is not a potential hit and does not count against anything.";
+
+export const HIT_RATE_BOUNDS_EXPLANATION_LONGFORM =
+  "Every unrecorded video did eventually pass the bar, so each one is a potential hit whose timing nobody captured. The low end counts them all as too slow; the high end counts them all as hits. The truth is somewhere between.";
+
+export const EVIDENCE_LIMITED_LABEL_LONGFORM =
+  "Hit rate: a range, not a single figure — no video was recorded clearing its bar inside its window";
+
+export const EVIDENCE_LIMITED_EXPLANATION_LONGFORM =
+  "No video here was recorded clearing its niche's bar inside its hit window — but some of them did pass the bar at a time nobody was watching. A single percentage would have to guess whether those were fast or slow, so the range is shown instead: the low end counts every one of them as too slow, the high end counts every one as a hit. The range narrows as view history accumulates: turn on automatic refresh in Settings so it starts being recorded.";
+
+export const HIT_RATE_FORMULA_LONGFORM = "hits ÷ decided videos × 100";
+
+/** What the verdict badge says before the evaluator has reached a video. */
+export const NO_VERDICT_YET =
+  "No verdict has been recorded for this Short yet. Evaluation runs with the scheduled sync.";
+
+export const NO_VERDICT_YET_LONGFORM =
+  "No verdict has been recorded for this video yet. Evaluation runs with the scheduled sync.";
+
+/** Everything a surface needs in order to explain a hit rate, in one product's words. */
+export interface HitRateCopy {
+  readonly definition: string;
+  readonly formula: string;
+  readonly nothingDecided: string;
+  readonly pending: string;
+  readonly unknown: string;
+  readonly unscoreable: string;
+  readonly bounds: string;
+  readonly evidenceLimitedLabel: string;
+  readonly evidenceLimited: string;
+  readonly noVerdictYet: string;
+}
+
+/**
+ * ONE ACCESSOR RATHER THAN TEN PAIRED IMPORTS.
+ *
+ * The components that render these already know their format — `KpiCards`
+ * computes its own unit noun from it — so what they were missing was somewhere
+ * to ask. Handing back the whole set at once is the part that matters: a
+ * component reading one object cannot mix a Shorts sentence into a Long Form
+ * tooltip by importing one constant of a pair and forgetting the other, which
+ * is exactly how a half-corrected tooltip would look on screen.
+ */
+export function hitRateCopy(format: "shorts" | "longform"): HitRateCopy {
+  if (format === "longform") {
+    return {
+      definition: HIT_RATE_DEFINITION_LONGFORM,
+      formula: HIT_RATE_FORMULA_LONGFORM,
+      nothingDecided: NOTHING_DECIDED_EXPLANATION_LONGFORM,
+      // Shared deliberately. This sentence names no unit, so a twin would be a
+      // second copy of the same words, waiting to drift from the first.
+      pending: HIT_RATE_PENDING_EXPLANATION,
+      unknown: HIT_RATE_UNKNOWN_EXPLANATION_LONGFORM,
+      unscoreable: HIT_RATE_UNSCOREABLE_EXPLANATION_LONGFORM,
+      bounds: HIT_RATE_BOUNDS_EXPLANATION_LONGFORM,
+      evidenceLimitedLabel: EVIDENCE_LIMITED_LABEL_LONGFORM,
+      evidenceLimited: EVIDENCE_LIMITED_EXPLANATION_LONGFORM,
+      noVerdictYet: NO_VERDICT_YET_LONGFORM,
+    };
+  }
+  return {
+    definition: HIT_RATE_DEFINITION,
+    formula: HIT_RATE_FORMULA,
+    nothingDecided: NOTHING_DECIDED_EXPLANATION,
+    pending: HIT_RATE_PENDING_EXPLANATION,
+    unknown: HIT_RATE_UNKNOWN_EXPLANATION,
+    unscoreable: HIT_RATE_UNSCOREABLE_EXPLANATION,
+    bounds: HIT_RATE_BOUNDS_EXPLANATION,
+    evidenceLimitedLabel: EVIDENCE_LIMITED_LABEL,
+    evidenceLimited: EVIDENCE_LIMITED_EXPLANATION,
+    noVerdictYet: NO_VERDICT_YET,
+  };
+}
+
+/**
  * How wide the range has to be before the rate stops being a real zero.
  *
  * Percentage points on the UPPER bound. This is what keeps a genuine,
@@ -233,7 +336,14 @@ export const STALE_DATA_TITLE = "These numbers are out of date";
 /** How stale is stale enough to interrupt the page. Two days. */
 export const STALE_DATA_THRESHOLD_MS = 48 * 60 * 60 * 1000;
 
-export function staleDataExplanation(relative: string): string {
+export function staleDataExplanation(
+  relative: string,
+  format: "shorts" | "longform" = "shorts",
+): string {
+  // Defaulted, so every existing Shorts caller keeps the sentence it had.
+  if (format === "longform") {
+    return `Channels were last refreshed ${relative}. Videos published since then are missing from every figure on this page, so the selected period really ends at the last refresh, not today. Refresh now, or turn on automatic refresh in Settings so this does not happen again.`;
+  }
   return `Channels were last refreshed ${relative}. Shorts published since then are missing from every figure on this page, so the selected period really ends at the last refresh, not today. Refresh now, or turn on automatic refresh in Settings so this does not happen again.`;
 }
 
@@ -247,6 +357,16 @@ export function staleDataExplanation(relative: string): string {
  */
 export const THRESHOLD_LENS_EXPLANATION =
   "This bar highlights Shorts at or above a view count. It does NOT define a hit: a hit is a niche's threshold reached within that niche's hit window, decided per Short and stored. Moving this changes what is highlighted and sorted, and changes no hit rate on the page.";
+
+export const THRESHOLD_LENS_EXPLANATION_LONGFORM =
+  "This bar highlights videos at or above a view count. It does NOT define a hit: a hit is a niche's threshold reached within that niche's hit window, decided per video and stored. Moving this changes what is highlighted and sorted, and changes no hit rate on the page.";
+
+/** The lens disclosure in the format's own noun. */
+export function thresholdLensExplanation(format: "shorts" | "longform"): string {
+  return format === "longform"
+    ? THRESHOLD_LENS_EXPLANATION_LONGFORM
+    : THRESHOLD_LENS_EXPLANATION;
+}
 
 /**
  * ==========================================================================
@@ -338,6 +458,16 @@ export const VIEWS_EARNED_NOT_AVAILABLE =
   "Views earned during the period — the figure Studio and VidIQ report — is not shown here. It needs a view count recorded for every Short at both ends of the window, and there is not enough view history yet to work one out.";
 
 /**
+ * The same disclosure in the Long Form unit.
+ *
+ * Its own constant rather than an in-place edit: the sentence above is still
+ * the Shorts one, and rewriting "Short" to "video" there would simply invert
+ * the bug onto the product that has always read correctly.
+ */
+export const VIEWS_EARNED_NOT_AVAILABLE_LONGFORM =
+  "Views earned during the period — the figure Studio and VidIQ report — is not shown here. It needs a view count recorded for every video at both ends of the window, and there is not enough view history yet to work one out.";
+
+/**
  * How much history exists, in a clause a non-technical reader can act on.
  *
  * Deliberately keyed off the raw day count rather than the readiness flag on
@@ -367,7 +497,7 @@ export function uploadViewsTip(snapshotDays: number | null): string {
 /** The Long Form surfaces' version of the tip above — same shape, its unit. */
 export function uploadViewsTipLongform(snapshotDays: number | null): string {
   if (snapshotDays === null) return UPLOAD_VIEWS_TIP_LONGFORM;
-  return `${UPLOAD_VIEWS_TIP_LONGFORM} ${VIEWS_EARNED_NOT_AVAILABLE}${viewHistoryNote(snapshotDays)}`;
+  return `${UPLOAD_VIEWS_TIP_LONGFORM} ${VIEWS_EARNED_NOT_AVAILABLE_LONGFORM}${viewHistoryNote(snapshotDays)}`;
 }
 
 /**

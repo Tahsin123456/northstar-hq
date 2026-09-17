@@ -7,6 +7,7 @@ import { formatTrendDelta, trendCaveatFor } from "@/lib/analytics/trends";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 
 /**
  * The movement indicator used everywhere a metric has a previous period.
@@ -33,6 +34,8 @@ export function TrendIndicator({
   valueFormat?: "percent" | "views" | "count" | "decimal";
   className?: string;
 }) {
+  // Above the early return below, which the rules of hooks require.
+  const format = useDatasetFormat();
   const textClass = { xs: "text-[10px]", sm: "text-[11px]", md: "text-[12px]" }[size];
   const iconClass = { xs: "size-2.5", sm: "size-3", md: "size-3.5" }[size];
 
@@ -98,7 +101,7 @@ export function TrendIndicator({
             rate trend is windowed and carries no age bias, and saying so is
             what stops a reader discounting a real improvement out of habit. */}
         <span className="mt-1 block text-subtle-foreground">
-          {trendCaveatFor(trend.unit)}
+          {trendCaveatFor(trend.unit, format)}
         </span>
       </TooltipContent>
     </Tooltip>

@@ -14,6 +14,7 @@ import { useNow } from "@/hooks/use-now";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 
 /**
  * Data-freshness indicator with a refresh action.
@@ -150,6 +151,9 @@ export function StaleDataNotice({
 }) {
   const { refresh, isPending } = useRefreshAllWithToasts();
   const now = useNow();
+  // Above the early returns: which product this notice speaks for cannot
+  // depend on whether it ends up rendering.
+  const format = useDatasetFormat();
 
   if (now === 0 || oldestFetchedAt === null) return null;
   if (now - oldestFetchedAt <= STALE_DATA_THRESHOLD_MS) return null;
@@ -166,7 +170,7 @@ export function StaleDataNotice({
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-medium text-foreground">{STALE_DATA_TITLE}</p>
         <p className="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
-          {staleDataExplanation(formatRelativeTime(oldestFetchedAt, now))}
+          {staleDataExplanation(formatRelativeTime(oldestFetchedAt, now), format)}
         </p>
       </div>
       <div className="shrink-0">

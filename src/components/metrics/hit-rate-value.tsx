@@ -1,16 +1,8 @@
 "use client";
 
 import * as React from "react";
-import {
-  EVIDENCE_LIMITED_EXPLANATION,
-  EVIDENCE_LIMITED_LABEL,
-  HIT_RATE_BOUNDS_EXPLANATION,
-  HIT_RATE_DEFINITION,
-  HIT_RATE_PENDING_EXPLANATION,
-  HIT_RATE_UNKNOWN_EXPLANATION,
-  HIT_RATE_UNSCOREABLE_EXPLANATION,
-  NOTHING_DECIDED_SHORT,
-} from "@/lib/analytics/constants";
+import { hitRateCopy, NOTHING_DECIDED_SHORT } from "@/lib/analytics/constants";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import type { HitRateSummary } from "@/lib/analytics/hit-rate";
 import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
@@ -76,7 +68,6 @@ import { cn } from "@/lib/utils";
 export function HitRateValue({
   summary,
   totalShorts,
-  unitPlural = "Shorts",
   size = "md",
   showBar = true,
   showFraction = true,
@@ -88,18 +79,6 @@ export function HitRateValue({
   summary: HitRateSummary;
   /** Videos of this format uploaded in the period, decided or not. */
   totalShorts: number;
-  /**
-   * What this format calls the thing being counted.
-   *
-   * THE COUNT WAS ALWAYS RIGHT AND THE NOUN WAS NOT. `calculateChannelMetrics`
-   * narrows to one format before it counts anything, so on a Long Form surface
-   * this number is long-form videos — but the two sentences below said
-   * "Shorts" regardless, so the Long Form overview reported "10 Shorts in
-   * period" over ten long-form videos and read as if the Shorts had been
-   * counted into it. Defaulted, so every Shorts surface says exactly what it
-   * always said.
-   */
-  unitPlural?: string;
   size?: "sm" | "md" | "lg" | "xl";
   showBar?: boolean;
   showFraction?: boolean;
@@ -117,6 +96,22 @@ export function HitRateValue({
   className?: string;
 }) {
   const { rate, hits, judged, tally } = summary;
+
+  /*
+   * WHICH PRODUCT'S WORDS THIS INSTANCE SPEAKS, read from the subtree rather
+   * than taken as a prop.
+   *
+   * The count was always narrowed to the format by `calculateChannelMetrics`;
+   * the words around it were not, so a Long Form card read "10 Shorts in
+   * period" over ten long-form videos and its tooltips said "the Short has
+   * since passed the bar". A prop carrying just the noun fixed the first and
+   * left the second, and gave the component a second source of truth that
+   * could disagree with the dataset it is describing. The provider that
+   * already decided which dataset this subtree shows decides the words too.
+   */
+  const format = useDatasetFormat();
+  const copy = hitRateCopy(format);
+  const unitPlural = format === "shorts" ? "Shorts" : "videos";
 
   /*
    * The five distinguishable things a hit rate can be saying, resolved once in
@@ -182,11 +177,11 @@ export function HitRateValue({
               "tnum font-semibold leading-none tracking-tight text-foreground",
               valueClass,
             )}
-            aria-label={EVIDENCE_LIMITED_LABEL}
+            aria-label={copy.evidenceLimitedLabel}
           >
             {formatPercent(summary.lowerBound, 0)}–{formatPercent(summary.upperBound, 0)}
           </span>
-          <InfoTip>{EVIDENCE_LIMITED_EXPLANATION}</InfoTip>
+          <InfoTip>{copy.evidenceLimited}</InfoTip>
         </span>
         <span className="tnum text-[11px] leading-none text-subtle-foreground">
           {formatNumber(tally.unknown)} unrecorded · {formatNumber(judged)} decided
@@ -266,6 +261,7 @@ export function HitExclusions({
   summary: HitRateSummary;
   className?: string;
 }) {
+  const copy = hitRateCopy(useDatasetFormat());
   const { pending, unknown, unscoreable } = summary.tally;
   if (pending === 0 && unknown === 0 && unscoreable === 0) return null;
 
@@ -279,19 +275,19 @@ export function HitExclusions({
       {pending > 0 ? (
         <span className="tnum inline-flex items-center gap-1">
           {formatNumber(pending)} pending
-          <InfoTip>{HIT_RATE_PENDING_EXPLANATION}</InfoTip>
+          <InfoTip>{copy.pending}</InfoTip>
         </span>
       ) : null}
       {unknown > 0 ? (
         <span className="tnum inline-flex items-center gap-1">
           {formatNumber(unknown)} unrecorded
-          <InfoTip>{HIT_RATE_UNKNOWN_EXPLANATION}</InfoTip>
+          <InfoTip>{copy.unknown}</InfoTip>
         </span>
       ) : null}
       {unscoreable > 0 ? (
         <span className="tnum inline-flex items-center gap-1">
           {formatNumber(unscoreable)} no rule
-          <InfoTip>{HIT_RATE_UNSCOREABLE_EXPLANATION}</InfoTip>
+          <InfoTip>{copy.unscoreable}</InfoTip>
         </span>
       ) : null}
     </span>
@@ -340,6 +336,7 @@ export function HitRateBounds({
   compact?: boolean;
   className?: string;
 }) {
+  const copy = hitRateCopy(useDatasetFormat());
   if (summary.lowerBound === null || summary.upperBound === null) return null;
   if (summary.tally.unknown === 0) return null;
 
@@ -352,7 +349,7 @@ export function HitRateBounds({
         )}
         // The full-precision range leads, so hovering never contradicts the
         // rounded figure the reader is looking at.
-        title={`${formatPercent(summary.lowerBound)}–${formatPercent(summary.upperBound)}. ${HIT_RATE_BOUNDS_EXPLANATION}`}
+        title={`${formatPercent(summary.lowerBound)}–${formatPercent(summary.upperBound)}. ${copy.bounds}`}
       >
         {formatPercent(summary.lowerBound, 0)}–{formatPercent(summary.upperBound, 0)}
       </span>
@@ -367,12 +364,12 @@ export function HitRateBounds({
       )}
     >
       {formatPercent(summary.lowerBound)}–{formatPercent(summary.upperBound)}
-      <InfoTip>{HIT_RATE_BOUNDS_EXPLANATION}</InfoTip>
+      <InfoTip>{copy.bounds}</InfoTip>
     </span>
   );
 }
 
 /** Reusable "what does hit rate mean?" tooltip. */
 export function HitRateInfo({ side }: { side?: "top" | "right" | "bottom" | "left" }) {
-  return <InfoTip side={side}>{HIT_RATE_DEFINITION}</InfoTip>;
+  return <InfoTip side={side}>{hitRateCopy(useDatasetFormat()).definition}</InfoTip>;
 }

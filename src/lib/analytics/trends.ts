@@ -100,6 +100,21 @@ export const TREND_WINDOWED_NOTE =
   "Both periods are measured the same way: each Short is judged over the same fixed window of its own life, and Shorts still inside their window are in neither period. The comparison carries no age bias.";
 
 /**
+ * The same two caveats in the Long Form unit.
+ *
+ * `TrendIndicator` is mounted by the summary cards and the channel KPI cards,
+ * both of which serve either product, so these sentences appeared verbatim
+ * beside Long Form figures and called long-form videos Shorts. Spelled out
+ * rather than derived, for the reason the constants module gives about pinned
+ * copy: one product's words must not be a function of the other's.
+ */
+export const TREND_MATURATION_CAVEAT_LONGFORM =
+  "This comparison uses current view counts. Videos uploaded in the earlier window have had longer to accumulate views, so the previous period is slightly flattered and the current one understated. Age-matched comparison requires view snapshots spanning both windows.";
+
+export const TREND_WINDOWED_NOTE_LONGFORM =
+  "Both periods are measured the same way: each video is judged over the same fixed window of its own life, and videos still inside their window are in neither period. The comparison carries no age bias.";
+
+/**
  * The caveat that belongs beside a trend, or `null` when none does.
  *
  * Keyed on the unit rather than on a per-call-site flag, because the unit is
@@ -108,7 +123,16 @@ export const TREND_WINDOWED_NOTE =
  * one — and rates are windowed now. `relativePercent` means a magnitude, and
  * magnitudes are lifetime totals that the older period has had longer to grow.
  */
-export function trendCaveatFor(unit: TrendUnit): string {
+export function trendCaveatFor(
+  unit: TrendUnit,
+  format: "shorts" | "longform" = "shorts",
+): string {
+  // Defaulted, so every Shorts surface keeps the sentence it already had.
+  if (format === "longform") {
+    return unit === "percentagePoints"
+      ? TREND_WINDOWED_NOTE_LONGFORM
+      : TREND_MATURATION_CAVEAT_LONGFORM;
+  }
   return unit === "percentagePoints" ? TREND_WINDOWED_NOTE : TREND_MATURATION_CAVEAT;
 }
 

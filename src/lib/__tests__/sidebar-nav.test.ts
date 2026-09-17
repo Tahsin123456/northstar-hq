@@ -461,7 +461,6 @@ describe("the Shorts channels page, word for word", () => {
       uploadViewsTip: UPLOAD_VIEWS_TIP,
       removedHistory:
         "Hidden from your dashboard. Their Shorts history is still stored and comes back intact.",
-      hitUnitPlural: "Shorts",
     });
   });
 
@@ -471,44 +470,6 @@ describe("the Shorts channels page, word for word", () => {
       expect(value).not.toContain("Shorts");
     }
     expect(longform.emptyDescription).toContain("long-form videos");
-  });
-
-  /**
-   * THE COUNT WAS RIGHT; THE NOUN WAS NOT. `calculateChannelMetrics` narrows
-   * to one format before it counts anything, so the figure beside a Long Form
-   * hit rate has always been long-form videos — but the sentence around it was
-   * a literal in the shared component. The Long Form overview therefore read
-   * "Not configured · 10 Shorts in period" over ten long-form videos, which
-   * says the Shorts were counted into the Long Form rate.
-   */
-  it("counts videos, and says so, beside a Long Form hit rate", () => {
-    expect(channelsPageCopy("longform").hitUnitPlural).toBe("videos");
-    const overview = readFileSync(join(APP_DIR, "longform", "page.tsx"), "utf8");
-    expect(overview).toContain('hitUnitPlural: "videos"');
-  });
-
-  it("leaves no copy of the word behind in the shared component", () => {
-    // Both sentences that name the unit read the prop. A literal left in
-    // either is a Long Form surface saying "Shorts" that no copy test here
-    // can see, because the words are not in `channelsPageCopy`.
-    const source = readFileSync(
-      join(process.cwd(), "src", "components", "metrics", "hit-rate-value.tsx"),
-      "utf8",
-    );
-    const body = source.slice(source.indexOf("export function HitRateValue"));
-    expect(body).toContain("{formatNumber(totalShorts)} {unitPlural} in period");
-    expect(body).toContain("`No ${unitPlural} in period`");
-  });
-
-  it("hands the roster table's noun down to the row that prints it", () => {
-    // The table takes it as a label and the row renders it; a break anywhere
-    // on that path silently falls back to the component's Shorts default.
-    const table = readFileSync(
-      join(process.cwd(), "src", "components", "dashboard", "channel-table.tsx"),
-      "utf8",
-    );
-    expect(table).toContain("hitUnitPlural={labels.hitUnitPlural}");
-    expect(table).toContain("unitPlural={hitUnitPlural}");
   });
 
   it("links a Shorts row to the Shorts channel page and a Long Form row to the Long Form one", () => {

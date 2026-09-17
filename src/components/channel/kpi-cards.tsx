@@ -23,9 +23,7 @@ import {
 } from "@/components/metrics/hit-rate-value";
 import { HitRuleNotConfigured } from "@/components/metrics/hit-rule-not-configured";
 import {
-  EVIDENCE_LIMITED_EXPLANATION,
-  EVIDENCE_LIMITED_LABEL,
-  NOTHING_DECIDED_EXPLANATION,
+  hitRateCopy,
   NOTHING_DECIDED_SHORT,
   UNCONFIGURED_RULE_EXPLANATION,
   UPLOAD_VIEWS_LABEL_LONG,
@@ -86,6 +84,7 @@ export function KpiCards({
   // The unit noun, once. "Short(s)" for the product that always said so,
   // "video(s)" for Long Form — never "Longform", which is a setting name,
   // not a word the studio owner uses.
+  const copy = hitRateCopy(format);
   const one = format === "shorts" ? "Short" : "video";
   const many = format === "shorts" ? "Shorts" : "videos";
   /*
@@ -149,14 +148,14 @@ export function KpiCards({
                 <div className="flex items-baseline gap-2.5">
                   <span
                     className="tnum text-[40px] font-semibold leading-none tracking-tight text-foreground"
-                    aria-label={EVIDENCE_LIMITED_LABEL}
+                    aria-label={copy.evidenceLimitedLabel}
                   >
                     {formatPercent(hits.lowerBound, 0)}–
                     {formatPercent(hits.upperBound, 0)}
                   </span>
                 </div>
                 <p className="mt-3 text-[12px] leading-relaxed text-muted-foreground">
-                  {EVIDENCE_LIMITED_EXPLANATION}
+                  {copy.evidenceLimited}
                 </p>
                 <HitExclusions summary={hits} className="mt-2" />
               </>
@@ -190,7 +189,7 @@ export function KpiCards({
                       their niche&rsquo;s bar inside its hit window
                     </>
                   ) : nothingDecided ? (
-                    NOTHING_DECIDED_EXPLANATION
+                    copy.nothingDecided
                   ) : (
                     `No ${many} uploaded in this period`
                   )}

@@ -3,15 +3,14 @@
 import * as React from "react";
 import Link from "next/link";
 import {
-  EVIDENCE_LIMITED_EXPLANATION,
-  EVIDENCE_LIMITED_LABEL,
-  HIT_RATE_DEFINITION,
+  hitRateCopy,
   UNCONFIGURED_RULE_EXPLANATION,
   UNCONFIGURED_RULE_SHORT,
   UPLOAD_VIEWS_LABEL_LONG,
   uploadViewsTip,
 } from "@/lib/analytics/constants";
 import { resolveHitDisplayState } from "@/lib/analytics/hit-display";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import type { ViewsDefinitionDTO } from "@/lib/dto";
 import type { PortfolioSummary } from "@/lib/analytics";
 import { calculateTrend } from "@/lib/analytics/trends";
@@ -115,6 +114,11 @@ export function SummaryCards({
   const pooledState = resolveHitDisplayState(pooled, summary.scorecardTotalShorts);
   const nothingScoreable = pooledState === "notConfigured";
   const ruleConfigured = !nothingScoreable;
+
+  // The `labels` object above carries this card's own nouns; the hit-rate
+  // prose it quotes came from module constants that named only Shorts, so the
+  // Long Form strip explained its figure in the other product's words.
+  const copy = hitRateCopy(useDatasetFormat());
   /*
    * AND THE STATE THE HEADLINE ITSELF IS IN.
    *
@@ -238,7 +242,7 @@ export function SummaryCards({
                  same reason the caption's figure is pooled: there is no honest
                  interval around an average of averages, and the mean has no
                  members left to average in this state anyway. */
-              <span aria-label={EVIDENCE_LIMITED_LABEL}>
+              <span aria-label={copy.evidenceLimitedLabel}>
                 {formatPercent(pooled.lowerBound, 0)}–
                 {formatPercent(pooled.upperBound, 0)}
               </span>
@@ -251,12 +255,12 @@ export function SummaryCards({
               {!ruleConfigured ? (
                 UNCONFIGURED_RULE_EXPLANATION
               ) : evidenceLimited ? (
-                EVIDENCE_LIMITED_EXPLANATION
+                copy.evidenceLimited
               ) : (
                 <>
                   The mean of each channel&rsquo;s own hit rate, counting only
                   channels with a MEASURED rate this period.{" "}
-                  {HIT_RATE_DEFINITION}
+                  {copy.definition}
                   {/*
                     The other exclusion, stated for the same reason as the
                     watchlist one below it. A channel whose every Short cleared

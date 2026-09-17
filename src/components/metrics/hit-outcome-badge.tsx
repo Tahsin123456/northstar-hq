@@ -1,11 +1,8 @@
 "use client";
 
 import * as React from "react";
-import {
-  HIT_RATE_PENDING_EXPLANATION,
-  HIT_RATE_UNKNOWN_EXPLANATION,
-  HIT_RATE_UNSCOREABLE_EXPLANATION,
-} from "@/lib/analytics/constants";
+import { hitRateCopy, type HitRateCopy } from "@/lib/analytics/constants";
+import { useDatasetFormat } from "@/hooks/dataset-format-context";
 import {
   ageInHours,
   formatHitWindow,
@@ -54,6 +51,14 @@ export function HitOutcomeBadge({
 }) {
   const contribution = hitContributionOf(verdict);
   const label = OUTCOME_LABEL[contribution];
+  /*
+   * The tooltip's prose named the unit — "the Short has since passed the bar" —
+   * while this badge is mounted on both products' channel pages. On the Long
+   * Form side it therefore sat under a heading reading "Videos in this period"
+   * and called those videos Shorts. The subtree already knows which product it
+   * is; the words now come from the same place the data does.
+   */
+  const copy = hitRateCopy(useDatasetFormat());
 
   return (
     <Tooltip>
@@ -63,7 +68,7 @@ export function HitOutcomeBadge({
         </Badge>
       </TooltipTrigger>
       <TooltipContent className="max-w-[280px]">
-        {explain(contribution, verdict, publishedAt, lifetimeViews)}
+        {explain(contribution, verdict, publishedAt, lifetimeViews, copy)}
       </TooltipContent>
     </Tooltip>
   );
@@ -107,17 +112,16 @@ function explain(
   verdict: StoredHitVerdict | null,
   publishedAt: number,
   lifetimeViews: number,
+  copy: HitRateCopy,
 ): React.ReactNode {
   if (contribution === "unscoreable") {
-    return verdict === null
-      ? "No verdict has been recorded for this Short yet. Evaluation runs with the scheduled sync."
-      : HIT_RATE_UNSCOREABLE_EXPLANATION;
+    return verdict === null ? copy.noVerdictYet : copy.unscoreable;
   }
   // Narrowing for the compiler and for the reader: every branch below has a
   // rule, because `hitContributionOf` sends a verdict without one to
   // "unscoreable" above.
   if (verdict === null || verdict.thresholdApplied === null || verdict.windowHoursApplied === null) {
-    return HIT_RATE_UNSCOREABLE_EXPLANATION;
+    return copy.unscoreable;
   }
 
   const rule = `${formatCompactNumber(verdict.thresholdApplied)} within ${formatHitWindow(verdict.windowHoursApplied)}`;
@@ -129,7 +133,7 @@ function explain(
       <>
         Needs {rule} of publishing. Its window is still open
         {hoursLeft > 0 ? ` for about ${formatHitWindow(hoursLeft)}` : ""}, so it is
-        neither a hit nor a miss. {HIT_RATE_PENDING_EXPLANATION}
+        neither a hit nor a miss. {copy.pending}
       </>
     );
   }
@@ -139,7 +143,7 @@ function explain(
       <>
         Needs {rule} of publishing, and no view count was recorded inside that
         window. It has {formatNumber(lifetimeViews)} views today.{" "}
-        {HIT_RATE_UNKNOWN_EXPLANATION}
+        {copy.unknown}
       </>
     );
   }

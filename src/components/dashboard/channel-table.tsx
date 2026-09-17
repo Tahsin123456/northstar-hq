@@ -58,14 +58,6 @@ export interface ChannelTableLabels {
   readonly bestColumn: string;
   readonly consistencyTip: string;
   readonly tableAriaLabel: string;
-  /**
-   * What this format calls the things counted under the hit rate — "Shorts"
-   * or "videos". The COUNT is already narrowed to the format by
-   * `calculateChannelMetrics`; this is only the noun printed beside it, which
-   * used to say "Shorts" on both sides and made the Long Form overview read
-   * as though Shorts had been counted into its hit rate.
-   */
-  readonly hitUnitPlural: string;
   /** Where a row's channel link leads; the channel id is appended. */
   readonly hrefBase: string;
 }
@@ -77,7 +69,6 @@ export const SHORTS_TABLE_LABELS: ChannelTableLabels = {
   uploadViewsTip: UPLOAD_VIEWS_TIP,
   medianTip: "The typical Short. More resistant to a single viral outlier than the average.",
   bestColumn: "Best Short",
-  hitUnitPlural: "Shorts",
   consistencyTip:
     "0–100. How tightly this channel's Shorts cluster around their median. High means dependable output rather than a few outliers carrying the total.",
   tableAriaLabel: "Tracked channels ranked by Shorts hit rate",
@@ -211,7 +202,6 @@ export function ChannelTable({
                     row={row}
                     rank={index + 1}
                     hrefBase={labels.hrefBase}
-                    hitUnitPlural={labels.hitUnitPlural}
                   />
                 ))}
           </div>
@@ -285,13 +275,10 @@ function ChannelTableRow({
   row,
   rank,
   hrefBase,
-  hitUnitPlural,
 }: {
   row: ChannelRow;
   rank: number;
   hrefBase: string;
-  /** "Shorts" or "videos" — what this format calls what the rate counts. */
-  hitUnitPlural: string;
 }) {
   const { channel, metrics } = row;
 
@@ -352,7 +339,6 @@ function ChannelTableRow({
         <HitRateValue
           summary={metrics.hits}
           totalShorts={metrics.totalShorts}
-          unitPlural={hitUnitPlural}
           size="md"
           // The exclusions are suppressed in the table and shown on the channel
           // page. A row is a scannable comparison and three extra counts under
