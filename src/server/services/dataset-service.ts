@@ -139,11 +139,23 @@ function videoSelect(organizationId: string) {
  * channels filed under at least one niche of that format, plus channels filed
  * under nothing at all.
  *
- * UNFILED CHANNELS APPEAR IN BOTH FORMATS, deliberately. A channel nobody has
- * categorised belongs to no side of the operation yet, and hiding it from one
- * dashboard would make "file this channel" a task only ever visible from the
- * other — the same reasoning that keeps unfiled channels visible to a Head in
- * `niche-scope.ts`.
+ * AN UNFILED CHANNEL BELONGS TO THE SIDE IT WAS ADDED ON, not to both.
+ *
+ * It used to match every format — `{ niches: { none: {} } }` — on the
+ * reasoning that a channel nobody has categorised belongs to no side yet, and
+ * that hiding it from one dashboard would make "file this channel" a task only
+ * ever visible from the other. The intent was right and the implementation
+ * produced a row with nothing behind it. THREE OTHER RULES ALREADY TREAT AN
+ * UNFILED CHANNEL AS SHORTS-ONLY: it gets no longform evaluation pass
+ * (`hit-evaluation-service`'s `hasLongformNiche` guard), no longform snapshot
+ * window (`resolveChannelHitWindows`), and no niche to attribute a long-form
+ * hit to (`payroll-data`). So a channel added under Shorts appeared on the
+ * Long Form roster carrying no verdicts, no rate and no pay — listed, inert,
+ * and reported as a bug the first time somebody noticed it.
+ *
+ * `addedFormat` answers the question the empty set could not. The prompt to
+ * file survives, on the roster of the person who actually added the channel,
+ * which is where it was always useful.
  *
  * Composed with `trackedChannelNicheFilter` under `AND`, never by spreading:
  * both fragments can carry a `niches` key, and a naive `{...a, ...b}` would
@@ -153,7 +165,14 @@ function videoSelect(organizationId: string) {
 function trackedChannelFormatFilter(format: NicheFormat): Prisma.TrackedChannelWhereInput {
   return {
     OR: [
-      { niches: { none: {} } },
+      // Unfiled, and added on this side. The shorts arm is `not: "longform"`
+      // rather than `equals: "shorts"` for the reason `nicheFormatWhere` gives
+      // about its own column: a garbage value must surface somewhere, and the
+      // fail-closed direction is Shorts.
+      {
+        niches: { none: {} },
+        addedFormat: format === "longform" ? "longform" : { not: "longform" },
+      },
       { niches: { some: { niche: nicheFormatWhere(format) } } },
     ],
   };

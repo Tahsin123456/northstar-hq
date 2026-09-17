@@ -113,6 +113,11 @@ export function AddChannelDialog({
         previouslyRemoved: preview.previouslyRemoved,
         ownershipType,
         nicheIds,
+        // This dialog already knows which side it was opened on. It decides
+        // where the channel is listed if the picker is left empty, which is a
+        // permitted outcome — an unfiled channel used to appear on both
+        // rosters, carrying no verdicts on the one nobody added it from.
+        format,
       }),
       {
         onSuccess: (result) => {

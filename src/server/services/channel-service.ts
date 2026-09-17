@@ -18,6 +18,9 @@ import type {
 } from "@/lib/dto";
 import { youtubeChannelUrl } from "@/lib/format";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
+import { requireFormat } from "@/server/auth/format-scope";
+import { requireActor } from "@/server/auth/dal";
+import { DEFAULT_NICHE_FORMAT, type NicheFormat } from "@/lib/niches/niche-format";
 import { addChannelNiches } from "./niche-service";
 import { evaluateHitsQuietly } from "./hit-evaluation-service";
 import {
@@ -130,6 +133,14 @@ export interface AddChannelResult {
 export interface AddChannelOptions {
   readonly ownershipType?: OwnershipType;
   readonly nicheIds?: readonly string[];
+  /**
+   * Which side of the operation the caller is adding from.
+   *
+   * Decides where the channel is listed when it ends up with NO niches, which
+   * is a permitted outcome — the picker says so outright. Absent means Shorts,
+   * so every caller that predates the Long Form product keeps its behaviour.
+   */
+  readonly format?: NicheFormat;
 }
 
 /**
@@ -172,6 +183,30 @@ const TRACKED_WITH_NICHES = {
     },
   },
 } as const;
+
+/**
+ * Which side of the operation an add is being made from, refused if the
+ * caller has no business on it.
+ *
+ * THE SAME GATE FILING MEETS. A shorts-role account holding `channels.manage`
+ * must not be able to post `format: "longform"` and put an unfiled channel on
+ * a roster their own product does not show them — the mirror of the check
+ * `setChannelNiches` runs before it files anything under a niche of the other
+ * format. The route is not the boundary: this service is reachable from any
+ * server caller.
+ *
+ * Absent means Shorts, so every request that predates the Long Form product
+ * resolves exactly as it always did, and an unqualified add by an admin still
+ * lands where it always landed.
+ */
+async function resolveAddedFormat(
+  format: NicheFormat | undefined,
+): Promise<NicheFormat> {
+  if (format === undefined) return DEFAULT_NICHE_FORMAT;
+  const actor = await requireActor();
+  requireFormat(actor.role, format);
+  return format;
+}
 
 /**
  * Add a channel to the tracker and pull its history.
@@ -246,10 +281,22 @@ export async function addChannel(
   const ownershipType =
     options.ownershipType ?? (existingTracking ? existingTracking.ownershipType : "competitor");
 
+  /*
+   * WHICH ROSTER THIS CHANNEL LANDS ON IF IT ENDS UP WITH NO NICHES.
+   *
+   * Written on a restore as well as a create, unlike `ownershipType` above,
+   * and the asymmetry is deliberate: ownership can be DEMOTED by a careless
+   * default, so silence there has to mean "keep what you had". This cannot
+   * demote anything — a channel with niches is listed by its niches whatever
+   * this says — so the honest answer is the side of the person who just
+   * brought it back, which is also the only roster they can see it on.
+   */
+  const addedFormat = await resolveAddedFormat(options.format);
+
   const tracking = restored
     ? await prisma.trackedChannel.update({
         where: { id: existingTracking.id },
-        data: { isActive: true, removedAt: null, ownershipType },
+        data: { isActive: true, removedAt: null, ownershipType, addedFormat },
       })
     : // `createdById` is a byline, not a claim: the row belongs to the
       // organization, and whoever added the channel gets the attribution
@@ -260,6 +307,7 @@ export async function addChannel(
           createdById: userId,
           channelId: channelRow.id,
           ownershipType,
+          addedFormat,
         },
       });
 

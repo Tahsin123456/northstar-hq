@@ -346,6 +346,8 @@ export const api = {
     input: string;
     ownershipType?: OwnershipType;
     nicheIds?: readonly string[];
+    /** Which roster an unfiled channel lands on. Absent means Shorts. */
+    format?: "shorts" | "longform";
   }): Promise<{
     channel: ChannelDTO;
     restored: boolean;

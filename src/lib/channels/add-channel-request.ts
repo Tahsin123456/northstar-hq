@@ -14,6 +14,17 @@ export interface AddChannelRequest {
   readonly input: string;
   readonly ownershipType?: OwnershipType;
   readonly nicheIds: readonly string[];
+  /**
+   * Which side of the operation the channel was added on.
+   *
+   * Travels ONLY when it is Long Form, exactly as `createNicheRequest` sends
+   * its own, so every Shorts request is byte-identical to the one that
+   * always shipped. It decides where a channel with NO niches is listed —
+   * an unfiled channel used to appear on both rosters, which put a row with
+   * no verdicts, no window and no pay on the Long Form side of a channel
+   * somebody added under Shorts.
+   */
+  readonly format?: "longform";
 }
 
 /**
@@ -46,11 +57,22 @@ export function addChannelRequest(args: {
   readonly previouslyRemoved: boolean;
   readonly ownershipType: OwnershipType;
   readonly nicheIds: readonly string[];
+  /** The dialog’s own side. Sent only when Long Form; see `AddChannelRequest`. */
+  readonly format: NicheFormat | undefined;
 }): AddChannelRequest {
   const { youtubeChannelId: input, nicheIds } = args;
+  /*
+   * ON THE ALREADY-TRACKED PATH TOO, and this is the one that is easy to get
+   * wrong: that request FILES a channel the tracker holds, which is how a
+   * Long Form niche reaches a channel the Shorts side added first. If the
+   * caller unfiles it again later, the side it was last placed on is the
+   * honest answer to where it belongs. Unlike `ownershipType`, this cannot
+   * demote anything: a filed channel is listed by its niches regardless.
+   */
+  const side = args.format === "longform" ? { format: "longform" as const } : {};
   return args.alreadyTracked || args.previouslyRemoved
-    ? { input, nicheIds }
-    : { input, ownershipType: args.ownershipType, nicheIds };
+    ? { input, nicheIds, ...side }
+    : { input, ownershipType: args.ownershipType, nicheIds, ...side };
 }
 
 /**

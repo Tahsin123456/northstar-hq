@@ -1,0 +1,12 @@
+-- Which side of the operation an UNFILED channel belongs to.
+--
+-- Additive and defaulted, so it ships in one deploy: the release still serving
+-- traffic while this runs names only the columns in its own schema, and an
+-- insert from it omits this one, which the default fills.
+--
+-- Existing rows become "shorts", which matches their history — the Long Form
+-- product is new and every channel on it was filed under a Long Form niche to
+-- get there. A channel that is filed is unaffected either way: its niches
+-- decide which roster lists it, and this column is only consulted when it has
+-- none.
+ALTER TABLE "tracked_channels" ADD COLUMN "addedFormat" TEXT NOT NULL DEFAULT 'shorts';

@@ -16,6 +16,15 @@ const addChannelSchema = z.object({
   /** Defaults to "competitor" — most channels added to a tracker are research. */
   ownershipType: z.enum(["own", "competitor"]).optional(),
   nicheIds: z.array(z.string().min(1)).max(20).optional(),
+  /**
+   * Which roster an UNFILED channel lands on. Absent means Shorts, so every
+   * request the Shorts side has ever sent keeps its exact meaning.
+   *
+   * Narrow to the two formats rather than a free string: it is written to a
+   * column the dataset query reads, and a third value would put a channel on
+   * neither roster.
+   */
+  format: z.enum(["shorts", "longform"]).optional(),
 });
 
 /** GET /api/channels — the tracked channel list (metadata only, no videos). */
@@ -49,6 +58,7 @@ export function POST(request: Request) {
     return addChannel(parsed.data.input, {
       ownershipType: parsed.data.ownershipType,
       nicheIds: parsed.data.nicheIds,
+      format: parsed.data.format,
     });
   });
 }

@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   syncChannel: vi.fn(),
   addChannelNiches: vi.fn(),
   evaluateHitsQuietly: vi.fn(),
+  role: "admin" as string,
   setChannelNiches: vi.fn(),
   trackedFindUnique: vi.fn(),
   trackedFindUniqueOrThrow: vi.fn(),
@@ -86,6 +87,14 @@ vi.mock("../user-service", () => ({
   getCurrentOrgId: async () => ORG_ID,
   getCurrentOrgSettings: async () => ({}),
 }));
+vi.mock("@/server/auth/dal", () => ({
+  requireActor: async () => ({
+    userId: "user_1",
+    organizationId: ORG_ID,
+    role: mocks.role,
+    permissions: new Set<string>(),
+  }),
+}));
 vi.mock("@/server/auth/niche-scope", () => ({
   getVisibleNicheIds: async () => null,
   trackedChannelNicheFilter: () => ({}),
@@ -123,6 +132,7 @@ beforeEach(() => {
   });
   mocks.addChannelNiches.mockResolvedValue({ filed: 1 });
   mocks.evaluateHitsQuietly.mockResolvedValue(null);
+  mocks.role = "admin";
   mocks.trackedFindUniqueOrThrow.mockResolvedValue({
     id: "tc_1",
     niches: [
@@ -314,5 +324,104 @@ describe("judging a newly added channel", () => {
 
     expect(mocks.syncChannel).not.toHaveBeenCalled();
     expect(mocks.evaluateHitsQuietly).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * =========================================================================
+ * WHICH ROSTER A CHANNEL WITH NO NICHES IS LISTED ON
+ * =========================================================================
+ *
+ * The owner: "when I add a shortform channel, it automatically adds it to
+ * longform as well."
+ *
+ * Leaving the niche picker empty is a permitted outcome — the picker says so
+ * itself — and such a channel used to match EVERY format in the dataset
+ * query. So a channel added under Shorts appeared on the Long Form roster,
+ * where three other rules already refused it everything that would make the
+ * row mean anything: no longform evaluation pass, no longform snapshot
+ * window, and no niche to attribute a long-form hit to. It was a listing with
+ * nothing behind it, and the listing was the outlier.
+ *
+ * `addedFormat` is the answer the empty set could not give. Pinned here at the
+ * only place that writes it.
+ */
+describe("the side a channel is added on", () => {
+  it("stamps a brand-new channel with the caller's side", async () => {
+    mocks.trackedFindUnique.mockResolvedValue(null);
+
+    await addChannel("@dawnstarz", { nicheIds: ["niche_docs"], format: "longform" });
+
+    expect(mocks.trackedCreate.mock.calls[0][0].data).toMatchObject({
+      addedFormat: "longform",
+    });
+  });
+
+  it("defaults to shorts when the caller names no side", async () => {
+    // Every request that predates the Long Form product, unchanged.
+    mocks.trackedFindUnique.mockResolvedValue(null);
+
+    await addChannel("@dawnstarz", {});
+
+    expect(mocks.trackedCreate.mock.calls[0][0].data).toMatchObject({
+      addedFormat: "shorts",
+    });
+  });
+
+  /**
+   * WRITTEN ON A RESTORE TOO, unlike `ownershipType` beside it, and the
+   * asymmetry is the point. Ownership can be DEMOTED by a careless default,
+   * so silence there has to mean "keep what you had". This cannot demote
+   * anything — a channel with niches is listed by its niches whatever this
+   * says — so the honest answer is the side of whoever brought it back, which
+   * is also the only roster they can see it on.
+   */
+  it("re-stamps a restore with the side of whoever brought it back", async () => {
+    mocks.trackedFindUnique.mockResolvedValue({
+      id: "tc_1",
+      isActive: false,
+      label: null,
+      ownershipType: "own",
+    });
+
+    await addChannel("@dawnstarz", { format: "longform" });
+
+    expect(mocks.trackedUpdate.mock.calls[0][0].data).toMatchObject({
+      isActive: true,
+      addedFormat: "longform",
+      // The ownership fix stays exactly as it was: kept, not overwritten.
+      ownershipType: "own",
+    });
+  });
+
+  /**
+   * THE GATE, AND WHY IT IS IN THE SERVICE. A shorts role holding
+   * `channels.manage` posting `format: "longform"` would put an unfiled
+   * channel on a roster their own product never shows them. This is the mirror
+   * of the check filing already meets, and it lives here rather than in the
+   * route for the file's standing reason: a service function is reachable from
+   * any server caller.
+   */
+  it("refuses a shorts role adding on the Long Form side, before any write", async () => {
+    mocks.trackedFindUnique.mockResolvedValue(null);
+    mocks.role = "head_of_shorts";
+
+    await expect(
+      addChannel("@dawnstarz", { nicheIds: [], format: "longform" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(mocks.trackedCreate).not.toHaveBeenCalled();
+    expect(mocks.syncChannel).not.toHaveBeenCalled();
+  });
+
+  it("lets that same role add on its own side", async () => {
+    mocks.trackedFindUnique.mockResolvedValue(null);
+    mocks.role = "head_of_shorts";
+
+    await addChannel("@dawnstarz", { nicheIds: [], format: "shorts" });
+
+    expect(mocks.trackedCreate.mock.calls[0][0].data).toMatchObject({
+      addedFormat: "shorts",
+    });
   });
 });

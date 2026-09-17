@@ -531,6 +531,25 @@ model TrackedChannel {
   /// every channel added to a research tracker is one.
   ownershipType String @default("competitor")
 
+  /// Which side of the operation this channel belongs to when its niches do
+  /// not say — "shorts" or "longform".
+  ///
+  /// THE FALLBACK, NOT THE AUTHORITY. A channel's filings decide which
+  /// product lists it; this column only answers the case where there are no
+  /// filings, which used to be answered "both". That was a listing with
+  /// nothing behind it: three separate rules already treat an unfiled channel
+  /// as Shorts-only — it gets no longform evaluation pass, no longform
+  /// snapshot window, and no niche to attribute a long-form hit to — so a
+  /// channel added under Shorts appeared on the Long Form roster carrying no
+  /// verdicts, no rate and no pay. The read rule was the outlier.
+  ///
+  /// Set from the side the channel was added on, and re-set by a restore,
+  /// because whoever brings a channel back is saying which roster they expect
+  /// to find it in. `String` rather than an enum, for the SQLite/Postgres
+  /// portability contract; unrecognised values read as "shorts" through
+  /// `toNicheFormat`, the fail-closed direction.
+  addedFormat String @default("shorts")
+
   isActive  Boolean   @default(true)
   removedAt DateTime?
 

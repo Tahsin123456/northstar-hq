@@ -11,7 +11,14 @@ import { addChannelRequest, createNicheRequest } from "../add-channel-request";
  * format for Shorts too would change every Shorts surface's request.
  */
 describe("addChannelRequest", () => {
-  const base = { youtubeChannelId: "UC1", ownershipType: "competitor" as const, nicheIds: ["n1"] };
+  const base = {
+    youtubeChannelId: "UC1",
+    ownershipType: "competitor" as const,
+    nicheIds: ["n1"],
+    // Every case below is a Shorts add, and every one of them keeps the exact
+    // body it pinned before the Long Form side existed.
+    format: "shorts" as const,
+  };
 
   it("carries the ownership choice for a channel the tracker has never held", () => {
     expect(
@@ -50,6 +57,84 @@ describe("addChannelRequest", () => {
     });
     expect(body).toEqual({ input: "UC1", nicheIds: ["n1"] });
     expect(Object.keys(body)).toEqual(["input", "nicheIds"]);
+  });
+});
+
+/**
+ * WHICH ROSTER AN UNFILED CHANNEL LANDS ON.
+ *
+ * Leaving the niche picker empty is a permitted outcome — it says so itself —
+ * and such a channel used to appear on BOTH rosters. That put a row on the
+ * Long Form dashboard for a channel somebody added under Shorts, carrying no
+ * verdicts, no window and no pay, because three other rules already treat an
+ * unfiled channel as Shorts-only. The body now says which side it came from.
+ *
+ * The key travels only for Long Form, exactly as `createNicheRequest` does it,
+ * which is what keeps every Shorts request byte-identical above.
+ */
+describe("addChannelRequest, on which side the channel was added", () => {
+  const base = { youtubeChannelId: "UC1", ownershipType: "competitor" as const, nicheIds: [] };
+
+  it("names the Long Form side explicitly", () => {
+    const body = addChannelRequest({
+      ...base,
+      alreadyTracked: false,
+      previouslyRemoved: false,
+      format: "longform",
+    });
+    expect(body).toEqual({
+      input: "UC1",
+      ownershipType: "competitor",
+      nicheIds: [],
+      format: "longform",
+    });
+  });
+
+  it("sends no format key for Shorts, nor when the side is unknown", () => {
+    for (const format of ["shorts", undefined] as const) {
+      const body = addChannelRequest({
+        ...base,
+        alreadyTracked: false,
+        previouslyRemoved: false,
+        format,
+      });
+      expect(Object.keys(body), String(format)).toEqual([
+        "input",
+        "ownershipType",
+        "nicheIds",
+      ]);
+    }
+  });
+
+  /**
+   * FILING A TRACKED CHANNEL CARRIES IT TOO, unlike ownership. That request is
+   * how a Long Form niche reaches a channel the Shorts side added first, so if
+   * the channel is ever unfiled again, the side it was last placed on is the
+   * honest answer. It cannot demote anything the way a stray ownership would:
+   * a channel with niches is listed by its niches whatever this says.
+   */
+  it("carries the side when filing a channel the tracker already holds", () => {
+    const body = addChannelRequest({
+      ...base,
+      nicheIds: ["n_docs"],
+      alreadyTracked: true,
+      previouslyRemoved: false,
+      format: "longform",
+    });
+    expect(body).toEqual({ input: "UC1", nicheIds: ["n_docs"], format: "longform" });
+    // Still no ownership key — that fix is untouched by this one.
+    expect(Object.keys(body)).toEqual(["input", "nicheIds", "format"]);
+  });
+
+  it("carries the side on a restore, which is the roster the restorer sees", () => {
+    const body = addChannelRequest({
+      ...base,
+      alreadyTracked: false,
+      previouslyRemoved: true,
+      format: "longform",
+    });
+    expect(body).toEqual({ input: "UC1", nicheIds: [], format: "longform" });
+    expect(Object.keys(body)).toEqual(["input", "nicheIds", "format"]);
   });
 });
 

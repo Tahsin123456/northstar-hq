@@ -135,7 +135,16 @@ beforeEach(() => {
 });
 
 describe("the tracked-channel narrowing", () => {
-  it("asks for this format's channels PLUS unfiled ones, composed under AND", async () => {
+  /**
+   * AN UNFILED CHANNEL BELONGS TO THE SIDE IT WAS ADDED ON.
+   *
+   * The unfiled arm used to be a bare `{ niches: { none: {} } }`, matching
+   * every format, and that put a channel added under Shorts on the Long Form
+   * roster carrying no verdicts, no window and no pay — three other rules
+   * already treat an unfiled channel as Shorts-only, so the listing was the
+   * outlier. `addedFormat` answers what the empty set could not.
+   */
+  it("asks for this format's channels PLUS the unfiled ones added on this side", async () => {
     await buildDataset({ format: "longform" });
 
     const where = mocks.trackedFindMany.mock.calls[0][0].where;
@@ -146,7 +155,7 @@ describe("the tracked-channel narrowing", () => {
       {}, // trackedChannelNicheFilter(null): no entitlement narrowing
       {
         OR: [
-          { niches: { none: {} } },
+          { niches: { none: {} }, addedFormat: "longform" },
           { niches: { some: { niche: { format: "longform" } } } },
         ],
       },
@@ -166,7 +175,10 @@ describe("the tracked-channel narrowing", () => {
     });
     expect(where.AND[1]).toEqual({
       OR: [
-        { niches: { none: {} } },
+        // The shorts arm reads addedFormat the same fail-closed way it reads a
+        // niche's own format: `not: "longform"`, so a garbage value surfaces
+        // on the Shorts roster rather than on neither.
+        { niches: { none: {} }, addedFormat: { not: "longform" } },
         { niches: { some: { niche: { format: { not: "longform" } } } } },
       ],
     });
@@ -235,7 +247,9 @@ describe("getExcludedVideos' channel reachability", () => {
       { niches: { some: { nicheId: { in: ["niche_a"] } } } },
       {
         OR: [
-          { niches: { none: {} } },
+          // The SAME arm as the list query. A Shorts-added unfiled channel
+          // must be unreachable by id here too, or the narrowing is cosmetic.
+          { niches: { none: {} }, addedFormat: "longform" },
           { niches: { some: { niche: { format: "longform" } } } },
         ],
       },
