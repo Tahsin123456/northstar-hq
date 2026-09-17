@@ -368,6 +368,31 @@ export async function syncChannel(
       // Retry anything we previously failed to resolve — the probe may have
       // been throttled or offline last time.
       if (prior.classification === "uncertain") return true;
+      /*
+       * A GUESS IS NOT AN ANSWER, and it used to be cached as though it were.
+       *
+       * When the probe is throttled or times out it returns no verdict, and
+       * `classifyFromSignals` falls back to duration and aspect ratio. Those
+       * fallbacks carry 0.75/0.8 confidence, which clears the floor below, so
+       * the row was never re-examined and the guess became permanent — and
+       * the moment this happens at scale is precisely the first sync of a new
+       * channel, which fires up to two thousand probes at once.
+       *
+       * The METHOD is the retry key rather than the confidence: it records
+       * whether the probe actually answered. `url_probe`, `duration_gate` and
+       * `live_broadcast` are real verdicts and stay cached forever.
+       *
+       * Only while the probe is switched on. With it off, duration and aspect
+       * ARE the best answer available and re-deciding every sweep would be
+       * work that cannot change its mind.
+       */
+      if (
+        options.probeEnabled &&
+        (prior.classificationMethod === "duration_aspect" ||
+          prior.classificationMethod === "duration_only")
+      ) {
+        return true;
+      }
       return prior.classificationConfidence < MIN_SHORT_CONFIDENCE;
     });
 
@@ -550,7 +575,15 @@ export async function syncChannel(
     // ---- 7. Close out -----------------------------------------------------
     await prisma.channel.update({
       where: { id: channel.id },
-      data: { lastFetchedAt: now, lastFetchStatus: "success", lastFetchError: null },
+      data: {
+        lastFetchedAt: now,
+        // The attempt clock the scheduler orders on. Stamped on BOTH paths —
+        // see the failure branch — so a channel that cannot be read stops
+        // holding the head of the queue.
+        lastAttemptedAt: now,
+        lastFetchStatus: "success",
+        lastFetchError: null,
+      },
     });
 
     /**
@@ -598,7 +631,21 @@ export async function syncChannel(
     await prisma.channel
       .update({
         where: { id: channel.id },
-        data: { lastFetchStatus: "error", lastFetchError: appError.userMessage },
+        data: {
+          lastFetchStatus: "error",
+          lastFetchError: appError.userMessage,
+          /*
+           * THE ATTEMPT IS RECORDED EVEN THOUGH THE FETCH FAILED, and that is
+           * the whole of this fix. `lastFetchedAt` is still left alone — it
+           * means "last read successfully" and the freshness notice reads it,
+           * so advancing it here would claim data nobody could fetch. But the
+           * scheduler ordered on that same column, so a channel that fails
+           * every time stayed null, sorted first as "never fetched", and held
+           * the head of the queue on every hourly run forever; at the per-run
+           * cap that starved every healthy channel behind it.
+           */
+          lastAttemptedAt: new Date(),
+        },
       })
       .catch(() => undefined);
 

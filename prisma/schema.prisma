@@ -459,7 +459,31 @@ model Channel {
 
   channelPublishedAt DateTime?
 
+  /// When this channel was last read SUCCESSFULLY. Drives the freshness
+  /// notice, so a failed run must never advance it — "synced 3 minutes ago"
+  /// over data nobody could fetch is the one thing that notice exists to
+  /// prevent.
   lastFetchedAt   DateTime?
+
+  /// When the sweep last TRIED, successfully or not.
+  ///
+  /// WHY BOTH. The scheduler used `lastFetchedAt` to decide who was due, and
+  /// the failure path deliberately does not advance it — so a channel that
+  /// could not be read stayed null, and null sorts first as "never fetched,
+  /// the most urgent thing in the list". A channel that fails every time
+  /// therefore held the head of the queue on every hourly run, forever. With
+  /// the per-run cap at 25, twenty-five such channels meant no other channel
+  /// was ever synced again and the whole dashboard silently froze — reachable
+  /// today, because a connection stuck needing re-authorisation makes every
+  /// own channel behind it fail exactly this way.
+  ///
+  /// Separating the two keeps both answers honest: this one orders the queue
+  /// and decides who is due, that one says how fresh the data actually is.
+  /// Null means never attempted, which is still the most urgent state and
+  /// still sorts first — the difference is that it stops being true the
+  /// moment the sweep tries.
+  lastAttemptedAt DateTime?
+
   lastFetchStatus String    @default("never")
   lastFetchError  String?
 

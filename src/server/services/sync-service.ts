@@ -24,6 +24,7 @@ import {
   type RevenueSyncSummary,
 } from "./youtube-revenue-service";
 import { SWEEP_TIME_BUDGET_MS, shouldDeferForTime } from "@/lib/sync/sweep-budget";
+import { compareByUrgency, isChannelDue } from "@/lib/sync/due-channels";
 import { resolveHitRule, HOUR_MS, type HitRule } from "@/lib/analytics/hit-rate";
 import { toNicheFormat, type NicheFormat } from "@/lib/niches/niche-format";
 import { isInsideWindow } from "@/lib/sync/snapshot-cadence";
@@ -71,8 +72,6 @@ import { isInsideWindow } from "@/lib/sync/snapshot-cadence";
  * fine in every test that happened to run signed in.
  */
 
-const MS_PER_MINUTE = 60_000;
-
 /**
  * How often a channel with a Short still inside its hit window is refreshed.
  *
@@ -89,8 +88,10 @@ const MS_PER_MINUTE = 60_000;
  * it only applies to channels with an open window, which is the whole point.
  * Everything else keeps the organization's own interval and gets cheaper,
  * because the cadence stops sampling the back catalogue four times a day.
+ *
+ * The value itself now lives beside the rule that applies it, in
+ * `@/lib/sync/due-channels`, so the two cannot drift apart.
  */
-const OPEN_WINDOW_REFRESH_MINUTES = 60;
 
 /** How the run was initiated. Recorded so the audit log can tell them apart. */
 export type ScheduledSyncTrigger = "cron" | "manual";
@@ -442,7 +443,13 @@ interface DueChannel {
   /** Carried so the credential can be resolved without a second lookup. */
   readonly youtubeChannelId: string;
   readonly label: string;
+  /** Last SUCCESSFUL read. Reported; never used to order the queue. */
   readonly lastFetchedAt: Date | null;
+  /**
+   * Last attempt, successful or not — what due-ness and ordering are measured
+   * from. See the filter below for why the two cannot be the same column.
+   */
+  readonly lastAttemptedAt: Date | null;
   /** The window judging this channel's Shorts, passed straight to the sync. */
   readonly hitWindowHours: number | null;
   /** The window judging its long-form videos, or null — see `ChannelHitWindows`. */
@@ -533,7 +540,14 @@ async function findDueChannels(
     select: {
       channelId: true,
       label: true,
-      channel: { select: { title: true, lastFetchedAt: true, youtubeChannelId: true } },
+      channel: {
+        select: {
+          title: true,
+          lastFetchedAt: true,
+          lastAttemptedAt: true,
+          youtubeChannelId: true,
+        },
+      },
     },
   });
 
@@ -550,39 +564,16 @@ async function findDueChannels(
       youtubeChannelId: row.channel.youtubeChannelId,
       label: row.label ?? row.channel.title,
       lastFetchedAt: row.channel.lastFetchedAt,
+      lastAttemptedAt: row.channel.lastAttemptedAt,
       hitWindowHours: windowByChannelId.get(row.channelId)?.shortsWindowHours ?? null,
       longformWindowHours: windowByChannelId.get(row.channelId)?.longformWindowHours ?? null,
       hasOpenWindow: openWindowChannelIds.has(row.channelId),
     }))
-    .filter((channel) => {
-      // A zero interval means "always due", which is what the Settings minimum
-      // of 0 promises. Computing the cutoff from it gives that for free.
-      //
-      // A channel with a Short still inside its window is held to a tighter
-      // interval, because those are the only hours in which a reading can prove
-      // anything. `min` rather than a flat 60, so a team that has chosen to
-      // refresh every 15 minutes is not slowed down by this.
-      const intervalMinutes = channel.hasOpenWindow
-        ? Math.min(refreshIntervalMinutes, OPEN_WINDOW_REFRESH_MINUTES)
-        : refreshIntervalMinutes;
-      const staleBefore = nowMs - intervalMinutes * MS_PER_MINUTE;
-      const lastFetchedAt = channel.lastFetchedAt;
-      return lastFetchedAt === null || lastFetchedAt.getTime() < staleBefore;
-    })
-    .sort((a, b) => {
-      // Never fetched outranks everything: it is the only state where the
-      // dashboard shows a channel with no numbers at all.
-      if (a.lastFetchedAt === null) return b.lastFetchedAt === null ? 0 : -1;
-      if (b.lastFetchedAt === null) return 1;
-      // Then an open window, because that evidence expires. A stale channel
-      // whose Shorts have all been judged loses nothing by waiting for the next
-      // run; a channel three hours into a 48-hour window loses a reading that
-      // can never be taken again. This is the only ordering rule in this file
-      // that is about information rather than about fairness, and the per-run
-      // cap is what makes it matter.
-      if (a.hasOpenWindow !== b.hasOpenWindow) return a.hasOpenWindow ? -1 : 1;
-      return a.lastFetchedAt.getTime() - b.lastFetchedAt.getTime();
-    });
+    // Both rules are pure and live in `@/lib/sync/due-channels`, beside the
+    // sweep's time budget: the per-run cap makes this an allocation, and who
+    // gets starved by it is worth pinning without a database or a clock.
+    .filter((channel) => isChannelDue(channel, refreshIntervalMinutes, nowMs))
+    .sort(compareByUrgency);
 }
 
 /**
