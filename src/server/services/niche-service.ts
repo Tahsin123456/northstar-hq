@@ -678,10 +678,14 @@ export async function setChannelNiches(
 
   const tracking = await prisma.trackedChannel.findFirst({
     where: { organizationId, channelId },
-    // The existing filings are read so the re-judge below can cover the niches
-    // this channel is LEAVING as well as the ones it joins: a video unfiled
-    // from the niche that judged it is now governed by a different rule, or by
-    // none, and its stored verdict answers a question nobody is asking.
+    // The existing filings are read so the re-judge below NAMES the niches
+    // this channel is leaving as well as the ones it joins. That list is what
+    // decides which format passes run, so a channel that drops its only
+    // longform niche while keeping a shorts one still has its long-form
+    // verdicts re-decided; under the joined list alone only the shorts pass
+    // would run and the stale ones would stand. A channel unfiled from
+    // everything matches none of the named niches and is left to the next
+    // sweep, which re-decides the whole organization anyway.
     select: { id: true, niches: { select: { nicheId: true } } },
   });
   if (!tracking) throw errors.notFound("channel");
