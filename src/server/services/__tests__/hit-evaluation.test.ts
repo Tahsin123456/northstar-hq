@@ -85,6 +85,14 @@ interface EvaluationFindManyArgs {
   where: { organizationId: string; videoId: { in: string[] } };
 }
 
+/** Both optional: a full sweep passes neither, a narrowed run passes one. */
+interface TrackedFindManyArgs {
+  where?: {
+    channelId?: { in: string[] };
+    niches?: { some: { nicheId: { in: string[] } } };
+  };
+}
+
 interface UpsertArgs {
   where: { organizationId_videoId: { organizationId: string; videoId: string } };
   create: EvaluationRow;
@@ -120,11 +128,23 @@ vi.mock("@/server/db", () => ({
       findMany: async () => mocks.store.niches,
     },
     trackedChannel: {
-      findMany: async () =>
-        mocks.store.tracked.map((row) => ({
-          channelId: row.channelId,
-          niches: row.nicheIds.map((nicheId) => ({ nicheId })),
-        })),
+      /*
+       * The narrowings are honoured because they are load-bearing. A run
+       * scoped to one channel must look at ONE channel: the add-a-channel path
+       * asks for exactly that after a sync, and a stub that quietly widened it
+       * to the whole organization would pass a test the production query fails.
+       */
+      findMany: async (args: TrackedFindManyArgs) => {
+        const channelIds = args?.where?.channelId?.in;
+        const nicheIds = args?.where?.niches?.some?.nicheId?.in;
+        return mocks.store.tracked
+          .filter((row) => !channelIds || channelIds.includes(row.channelId))
+          .filter((row) => !nicheIds || row.nicheIds.some((id) => nicheIds.includes(id)))
+          .map((row) => ({
+            channelId: row.channelId,
+            niches: row.nicheIds.map((nicheId) => ({ nicheId })),
+          }));
+      },
     },
     video: {
       findMany: async (args: VideoFindManyArgs) => {
@@ -169,7 +189,12 @@ vi.mock("@/server/db", () => ({
   },
 }));
 
-const { evaluateHitsForOrganization, decideWrite, resolveChannelRule } = await import(
+const {
+  evaluateHitsForOrganization,
+  evaluateHitsQuietly,
+  decideWrite,
+  resolveChannelRule,
+} = await import(
   "../hit-evaluation-service"
 );
 
@@ -669,5 +694,117 @@ describe("decideWrite", () => {
   it("updates whenever the rule moved, settled or not", () => {
     expect(decideWrite(settled, { ...settled, thresholdApplied: 500_000 })).toBe("update");
     expect(decideWrite(settled, { ...settled, windowHoursApplied: 48 })).toBe("update");
+  });
+});
+
+/**
+ * =========================================================================
+ * NARROWING A RUN TO ONE CHANNEL, AND RUNNING IT WHERE A FAILURE MUST NOT BITE
+ * =========================================================================
+ *
+ * Both exist for the same caller. Adding a channel files it, syncs it, and then
+ * has to judge what the sync brought back — because nothing else on that
+ * request will, and until a verdict row exists every hit-rate surface renders
+ * the silence as "Not configured" over a rule the owner has just set.
+ *
+ * The narrowing is by CHANNEL rather than by niche because the niche list also
+ * decides which format passes run: a channel filed into a shorts niche would
+ * have its long-form videos left unjudged, which is precisely the bug this
+ * pair was written for.
+ */
+describe("a run narrowed to one channel", () => {
+  beforeEach(() => {
+    mocks.store.tracked = [
+      { channelId: "chan_1", nicheIds: [GTA.id] },
+      { channelId: "chan_2", nicheIds: [GTA.id] },
+    ];
+    mocks.store.videos = [
+      video({ id: "vid_one", channelId: "chan_1", viewCount: BigInt(40_000) }),
+      video({ id: "vid_two", channelId: "chan_2", viewCount: BigInt(40_000) }),
+    ];
+  });
+
+  it("judges that channel and leaves its neighbours alone", async () => {
+    const summary = await evaluateHitsForOrganization(ORG_ID, {
+      channelIds: ["chan_1"],
+      nowMs: LONG_AFTER,
+    });
+
+    expect(summary.shortsConsidered).toBe(1);
+    expect(stored("vid_one")?.outcome).toBe("miss");
+    // chan_2 shares the niche. A niche-shaped narrowing would have swept it in.
+    expect(stored("vid_two")).toBeUndefined();
+  });
+
+  it("runs BOTH format passes, which a niche list would not guarantee", async () => {
+    mocks.store.niches = [GTA, LONGFORM_GTA];
+    mocks.store.tracked = [
+      { channelId: "chan_1", nicheIds: [GTA.id, LONGFORM_GTA.id] },
+    ];
+    mocks.store.videos = [
+      video({ id: "vid_short", channelId: "chan_1", viewCount: BigInt(40_000) }),
+      video({
+        id: "vid_long",
+        channelId: "chan_1",
+        viewCount: BigInt(40_000),
+        isShort: false,
+        classification: "not_short",
+      }),
+    ];
+
+    const summary = await evaluateHitsForOrganization(ORG_ID, {
+      channelIds: ["chan_1"],
+      nowMs: LONG_AFTER,
+    });
+
+    expect(summary.shortsConsidered).toBe(1);
+    expect(summary.longformConsidered).toBe(1);
+    expect(stored("vid_short")?.nicheId).toBe(GTA.id);
+    expect(stored("vid_long")?.nicheId).toBe(LONGFORM_GTA.id);
+  });
+
+  it("judges nothing for a channel in another organization's tracker", async () => {
+    const summary = await evaluateHitsForOrganization(ORG_ID, {
+      channelIds: ["chan_elsewhere"],
+      nowMs: LONG_AFTER,
+    });
+
+    expect(summary.shortsConsidered).toBe(0);
+    expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe("evaluateHitsQuietly", () => {
+  beforeEach(() => {
+    mocks.store.videos = [video({ id: "vid_one", viewCount: BigInt(40_000) })];
+  });
+
+  it("returns the summary when the run succeeds", async () => {
+    const summary = await evaluateHitsQuietly(ORG_ID, { nowMs: LONG_AFTER }, "test");
+
+    expect(summary?.shortsConsidered).toBe(1);
+    expect(stored("vid_one")?.outcome).toBe("miss");
+  });
+
+  /**
+   * THE CONTRACT EVERY CALLER DEPENDS ON. Filing, adding and refreshing a
+   * channel all call this AFTER their own write has committed, so a throw here
+   * would report work that happened as work that failed. Null means "did not
+   * run" — never "ran and found nothing" — and the hourly sweep re-decides
+   * whatever this missed, because the evaluation is idempotent.
+   */
+  it("swallows a failure, names the caller in the log, and returns null", async () => {
+    mocks.upsert.mockRejectedValueOnce(new Error("deadlock on video_hit_evaluations"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(
+      evaluateHitsQuietly(ORG_ID, { nowMs: LONG_AFTER }, "channel added"),
+    ).resolves.toBeNull();
+
+    expect(logged).toHaveBeenCalledTimes(1);
+    // The caller's name is in the line, so "why is that channel unjudged?" has
+    // an answer in the platform logs rather than a bare stack trace.
+    expect(String(logged.mock.calls[0][0])).toContain("channel added");
+    logged.mockRestore();
   });
 });

@@ -43,7 +43,7 @@
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
-import { errors, toAppError } from "@/server/errors";
+import { errors } from "@/server/errors";
 import { actorCan, requireActor } from "@/server/auth/dal";
 import { requireFormat, resolveAllowedFormats } from "@/server/auth/format-scope";
 import {
@@ -64,7 +64,7 @@ import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
 import {
-  evaluateHitsForOrganization,
+  evaluateHitsQuietly,
   reevaluateHitsForNiche,
 } from "./hit-evaluation-service";
 
@@ -678,19 +678,10 @@ export async function setChannelNiches(
 
   const tracking = await prisma.trackedChannel.findFirst({
     where: { organizationId, channelId },
-    // The existing filings are read so the re-judge below NAMES the niches
-    // this channel is leaving as well as the ones it joins. That list is what
-    // decides which format passes run, so a channel that drops its only
-    // longform niche while keeping a shorts one still has its long-form
-    // verdicts re-decided; under the joined list alone only the shorts pass
-    // would run and the stale ones would stand. A channel unfiled from
-    // everything matches none of the named niches and is left to the next
-    // sweep, which re-decides the whole organization anyway.
-    select: { id: true, niches: { select: { nicheId: true } } },
+    select: { id: true },
   });
   if (!tracking) throw errors.notFound("channel");
 
-  const before = tracking.niches.map((row) => row.nicheId);
   const unique = [...new Set(nicheIds)];
 
   if (unique.length > 0) {
@@ -750,7 +741,7 @@ export async function setChannelNiches(
       : []),
   ]);
 
-  await rejudgeAfterFiling(organizationId, [...before, ...unique]);
+  await rejudgeChannelFilings(organizationId, channelId);
 }
 
 /**
@@ -769,28 +760,25 @@ export async function setChannelNiches(
  * rule and filed a channel under it was told, on the overview, that the rule
  * they had just set did not exist, and stayed told for up to an hour.
  *
- * CONTAINED, NEVER FATAL, for the reason the sweep's own step gives: the
- * filing is the thing the caller asked for and it has already happened. A
- * lock on `video_hit_evaluations` must not turn a successful filing into an
- * error the user sees, and the next sweep re-decides everything this missed —
- * that is what idempotence buys. The cost of failure here is the delay that
- * used to be the normal case.
+ * SCOPED TO THE CHANNEL, NOT TO THE NICHES. The first cut of this narrowed the
+ * run to the niches being joined, which quietly decided WHICH FORMAT PASSES
+ * ran: a shorts-only niche list left the channel's long-form verdicts alone.
+ * The channel is the thing whose filings moved, so the channel is the
+ * narrowing, and both passes run over it.
+ *
+ * WHAT IT STILL CANNOT REACH: a channel unfiled from its LAST longform niche.
+ * The longform pass is gated on current membership (`hasLongformNiche`), so
+ * its old long-form verdicts are not re-decided here or anywhere. That is
+ * pre-existing and separate from the gap this closes.
+ *
+ * Contained by `evaluateHitsQuietly`: the filing is the thing the caller asked
+ * for and it has already committed.
  */
-async function rejudgeAfterFiling(
+export async function rejudgeChannelFilings(
   organizationId: string,
-  nicheIds: readonly string[],
+  channelId: string,
 ): Promise<void> {
-  const unique = [...new Set(nicheIds)];
-  if (unique.length === 0) return;
-  try {
-    await evaluateHitsForOrganization(organizationId, { nicheIds: unique });
-  } catch (caught) {
-    const appError = toAppError(caught);
-    console.error(
-      `[niches] re-judge after filing failed for organization ${organizationId}: ` +
-        `${appError.code} — ${appError.message}`,
-    );
-  }
+  await evaluateHitsQuietly(organizationId, { channelIds: [channelId] }, "filing");
 }
 
 /**
@@ -845,17 +833,29 @@ export async function addChannelNiches(
 
   const already = new Set(tracking.niches.map((row) => row.nicheId));
   const missing = unique.filter((id) => !already.has(id));
-  if (missing.length === 0) return { filed: 0 };
 
-  await prisma.trackedChannelNiche.createMany({
-    data: missing.map((nicheId) => ({ trackedChannelId: tracking.id, nicheId })),
-  });
+  if (missing.length > 0) {
+    await prisma.trackedChannelNiche.createMany({
+      data: missing.map((nicheId) => ({ trackedChannelId: tracking.id, nicheId })),
+    });
+  }
 
-  // The videos this channel already has are now governed by these niches'
-  // rules, and nothing has judged them against those rules yet — see
-  // `rejudgeAfterFiling` for why the screen reads that absence as "the rule is
-  // not configured" rather than "not judged yet".
-  await rejudgeAfterFiling(organizationId, missing);
+  /*
+   * JUDGED EVEN WHEN NOTHING WAS FILED, and that is not belt-and-braces.
+   *
+   * "Already filed there" does NOT imply "already judged there". `addChannel`
+   * files a brand-new channel before pulling its history, so the filing's own
+   * re-judge sees an empty library and writes nothing; the videos arrive a
+   * moment later with no verdicts against them. The owner's natural repair —
+   * run Add Channel again on the same channel under the same niche — used to
+   * return here, judge nothing, and toast success over a screen still reading
+   * "Not configured".
+   *
+   * The evaluation is idempotent at the database level (the upsert is keyed on
+   * organization and video), so the redundant case costs one channel's videos
+   * and can only ADD the rows an earlier pass could not see.
+   */
+  await rejudgeChannelFilings(organizationId, channelId);
 
   return { filed: missing.length };
 }

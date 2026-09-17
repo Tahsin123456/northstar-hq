@@ -19,6 +19,7 @@ import type {
 import { youtubeChannelUrl } from "@/lib/format";
 import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { addChannelNiches } from "./niche-service";
+import { evaluateHitsQuietly } from "./hit-evaluation-service";
 import {
   syncChannel,
   upsertChannel,
@@ -286,6 +287,31 @@ export async function addChannel(
     await syncOptionsForCurrentOrg(channelRow.id, "initial"),
   );
 
+  /*
+   * JUDGE NOW THE VIDEOS EXIST — the other half of the filing above.
+   *
+   * The filing deliberately precedes the sync so the user's organisational
+   * intent survives an unreachable YouTube, and its own re-judge therefore
+   * runs over a channel with NO videos: the evaluator finds nothing to look
+   * at and writes nothing. The sync then imports the whole history against a
+   * niche rule that nothing has applied to it, and no other path on this
+   * request looks again — only the hourly sweep does.
+   *
+   * The screen that produced was the one this pair of calls exists to
+   * prevent: ten long-form videos in the period, no verdict rows, and
+   * `resolveHitDisplayState` reading that silence as "Not configured" over a
+   * niche the owner had just configured.
+   *
+   * Cheap and safe to run twice: the narrowing is this one channel and the
+   * upsert is keyed on (organization, video), so the second pass can only add
+   * the rows the first could not see.
+   */
+  await evaluateHitsQuietly(
+    organizationId,
+    { channelIds: [channelRow.id] },
+    "channel added",
+  );
+
   const refreshed = await prisma.channel.findUniqueOrThrow({
     where: { id: channelRow.id },
   });
@@ -509,6 +535,13 @@ export async function refreshChannel(channelId: string): Promise<RefreshResultDT
     channelId,
     await syncOptionsForCurrentOrg(channelId, "manual"),
   );
+
+  // A manual refresh is somebody asking "is it right yet?", so it settles the
+  // verdicts over the readings it has just taken rather than leaving them an
+  // hour behind the numbers beside them. Same containment as everywhere else:
+  // the refresh succeeded and must be reported as such.
+  await evaluateHitsQuietly(organizationId, { channelIds: [channelId] }, "manual refresh");
+
   return toRefreshResultDTO(result);
 }
 

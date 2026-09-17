@@ -17,8 +17,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  *     (`requireFormat`, the same gate a set meets);
  *   • a niche from another organization reads as "no longer exists";
  *   • a niche the channel already carries is a no-op, not an error;
- *   • filing asks for the newly filed niches to be judged — and a failure
- *     there is logged, never raised, because the filing already happened.
+ *   • filing asks for THE CHANNEL to be judged, even when every niche was
+ *     already carried, because "already filed" is not "already judged".
  */
 
 process.env.SESSION_SECRET = Buffer.alloc(32, 9).toString("base64");
@@ -69,7 +69,7 @@ vi.mock("../user-service", () => ({
  * happened.
  */
 vi.mock("../hit-evaluation-service", () => ({
-  evaluateHitsForOrganization: mocks.evaluateHits,
+  evaluateHitsQuietly: mocks.evaluateHits,
   reevaluateHitsForNiche: vi.fn(),
 }));
 
@@ -158,8 +158,12 @@ describe("addChannelNiches", () => {
    * "nothing judged, nothing pending" as "this niche has no rule". An admin
    * who set a complete rule and filed a channel under it was therefore told
    * the rule was not configured until the hourly sweep came round.
+   *
+   * THE WHOLE CHANNEL, NOT THE NICHES IT JOINED. The niche list would decide
+   * which FORMAT passes run, so filing into one shorts niche would leave this
+   * channel's long-form videos unjudged. The channel is what moved.
    */
-  it("asks for the newly filed niches to be judged, and only those", async () => {
+  it("asks for the whole channel to be judged", async () => {
     mocks.nicheFindMany.mockResolvedValue([
       { id: "niche_gta", format: "shorts" },
       { id: "niche_docs", format: "longform" },
@@ -168,38 +172,55 @@ describe("addChannelNiches", () => {
     await addChannelNiches("ch_1", ["niche_gta", "niche_docs"]);
 
     expect(mocks.evaluateHits).toHaveBeenCalledTimes(1);
-    // GTA is absent: the channel was already filed there, so its videos have
-    // already been judged under that rule. Re-judging it would be work with
-    // no possible change in it.
-    expect(mocks.evaluateHits).toHaveBeenCalledWith(ORG_ID, {
-      nicheIds: ["niche_docs"],
-    });
+    expect(mocks.evaluateHits.mock.calls[0][0]).toBe(ORG_ID);
+    expect(mocks.evaluateHits.mock.calls[0][1]).toEqual({ channelIds: ["ch_1"] });
   });
 
-  it("does not ask when nothing was filed", async () => {
+  /**
+   * "ALREADY FILED THERE" DOES NOT MEAN "ALREADY JUDGED THERE", which is the
+   * assumption the first cut of this made and the owner's bug report broke.
+   *
+   * `addChannel` files a brand-new channel BEFORE pulling its history, so the
+   * filing's own re-judge looks at an empty library and writes nothing; the
+   * videos land a moment later with no verdict against them. Running Add
+   * Channel again on the same channel under the same niche is the obvious
+   * repair, and it used to return early, judge nothing, and report success
+   * over a screen still reading "Not configured".
+   */
+  it("asks even when every niche was already carried", async () => {
     mocks.nicheFindMany.mockResolvedValue([{ id: "niche_gta", format: "shorts" }]);
 
-    await addChannelNiches("ch_1", ["niche_gta"]);
+    const result = await addChannelNiches("ch_1", ["niche_gta"]);
 
+    expect(result).toEqual({ filed: 0 });
+    // Nothing was written — the filing really is a no-op...
+    expect(mocks.joinCreateMany).not.toHaveBeenCalled();
+    // ...but the verdicts are asked for anyway.
+    expect(mocks.evaluateHits).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks for nothing when the caller named no niches at all", async () => {
+    // The early return above this one: an empty request has no channel to
+    // judge against anything, and the lookup never even runs.
+    const result = await addChannelNiches("ch_1", []);
+
+    expect(result).toEqual({ filed: 0 });
     expect(mocks.evaluateHits).not.toHaveBeenCalled();
   });
 
   /**
    * The filing is the thing the caller asked for and it is already committed
-   * when the judging starts. Failing the request here would report a write
-   * that happened as one that did not — and the sweep re-decides everything
-   * this missed, because the evaluation is idempotent.
+   * when the judging starts, so the judging cannot fail it. That containment
+   * now lives in `evaluateHitsQuietly`, which reports a failure by RETURNING
+   * NULL rather than throwing — pinned in `hit-evaluation.test.ts`. What this
+   * pins is the half that belongs here: the filing does not read the result.
    */
-  it("still reports the filing when the judging fails", async () => {
+  it("reports the filing without consulting the verdict run", async () => {
     mocks.nicheFindMany.mockResolvedValue([{ id: "niche_docs", format: "longform" }]);
-    mocks.evaluateHits.mockRejectedValue(new Error("evaluator unavailable"));
-    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.evaluateHits.mockResolvedValue(null);
 
     await expect(addChannelNiches("ch_1", ["niche_docs"])).resolves.toEqual({
       filed: 1,
     });
-
-    expect(logged).toHaveBeenCalledTimes(1);
-    logged.mockRestore();
   });
 });

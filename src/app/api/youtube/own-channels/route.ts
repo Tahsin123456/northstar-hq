@@ -7,6 +7,7 @@ import { listOwnChannels, trackOwnChannel } from "@/server/services/youtube-oaut
 import { toRefreshResultDTO } from "@/server/services/channel-service";
 import { syncChannel } from "@/server/services/channel-sync";
 import { buildChannelSyncOptions } from "@/server/services/sync-service";
+import { evaluateHitsQuietly } from "@/server/services/hit-evaluation-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -99,6 +100,16 @@ export function POST(request: Request) {
     const sync = await syncChannel(
       tracked.channelId,
       await buildChannelSyncOptions(actor.organizationId, tracked.channelId, "initial"),
+    );
+
+    // And judge what that first read brought back, for the reason `addChannel`
+    // gives at its own post-sync call: nothing else on this request looks at
+    // the new videos, so without this the channel carries no verdicts — which
+    // every hit-rate surface renders as "Not configured" — until the sweep.
+    await evaluateHitsQuietly(
+      actor.organizationId,
+      { channelIds: [tracked.channelId] },
+      "own channel connected",
     );
 
     await recordAudit(

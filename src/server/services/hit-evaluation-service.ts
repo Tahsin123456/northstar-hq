@@ -1,6 +1,7 @@
 import "server-only";
 
 import { prisma } from "@/server/db";
+import { toAppError } from "@/server/errors";
 import {
   evaluateHit,
   isFinalOutcome,
@@ -114,6 +115,19 @@ export interface HitEvaluationSummary {
 export interface EvaluateHitsOptions {
   /** Limit to channels filed under these niches. Used after a rule changes. */
   readonly nicheIds?: readonly string[];
+  /**
+   * Limit to these tracked channels, whatever they are filed under.
+   *
+   * THE NARROWING FOR "THIS CHANNEL'S LIBRARY JUST CHANGED" — a filing moved,
+   * or a sync has just imported its videos. Channel-shaped rather than
+   * niche-shaped on purpose: it reaches every niche the channel sits in and
+   * therefore BOTH format passes, where a niche list reaches only the formats
+   * of the niches named in it. A caller that has just changed one channel
+   * should not have to reason about which product the consequences land in.
+   *
+   * Composes with `nicheIds` as an AND; callers pass one or the other.
+   */
+  readonly channelIds?: readonly string[];
   /** Limit to specific videos. Used when a handful were just synced. */
   readonly videoIds?: readonly string[];
   /** Injectable clock. The scheduler passes nothing; tests move time. */
@@ -343,6 +357,12 @@ export async function evaluateHitsForOrganization(
         ...(options.nicheIds && options.nicheIds.length > 0
           ? { niches: { some: { nicheId: { in: [...options.nicheIds] } } } }
           : {}),
+        // Narrowed to one channel when that channel's own library or filing
+        // just moved. Same tenancy argument: a channel id from another
+        // organization matches nothing here rather than reaching across.
+        ...(options.channelIds && options.channelIds.length > 0
+          ? { channelId: { in: [...options.channelIds] } }
+          : {}),
       },
       select: { channelId: true, niches: { select: { nicheId: true } } },
     }),
@@ -430,6 +450,40 @@ export async function evaluateHitsForOrganization(
     byOutcome,
     durationMs: Date.now() - startedAt,
   };
+}
+
+/**
+ * Run the evaluator for a caller whose own job has already succeeded.
+ *
+ * ONE CONTAINMENT, BECAUSE EVERY CALLER NEEDS THE SAME ONE AND FOR THE SAME
+ * REASON. Filing a channel, adding a channel, refreshing a channel: in each
+ * the user's request has already committed by the time the verdicts are
+ * recomputed, so raising here would report a write that happened as one that
+ * did not. The verdicts are a cache of the rule and the snapshots — both still
+ * on disk — and the hourly sweep rebuilds everything this misses, which is
+ * what idempotence buys. The cost of a failure is an hour of staleness.
+ *
+ * `context` names the caller in the log, so "why is that channel unjudged?"
+ * has an answer in the platform logs rather than a bare stack trace.
+ *
+ * Returns null when it could not run, never when it ran and found nothing —
+ * the same distinction `runHitEvaluationStep` draws in the sweep.
+ */
+export async function evaluateHitsQuietly(
+  organizationId: string,
+  options: EvaluateHitsOptions,
+  context: string,
+): Promise<HitEvaluationSummary | null> {
+  try {
+    return await evaluateHitsForOrganization(organizationId, options);
+  } catch (caught) {
+    const appError = toAppError(caught);
+    console.error(
+      `[hits] ${context} evaluation failed for organization ${organizationId}: ` +
+        `${appError.code} — ${appError.message}`,
+    );
+    return null;
+  }
 }
 
 interface ChannelEvaluationResult {

@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => ({
   upsertChannel: vi.fn(),
   syncChannel: vi.fn(),
   addChannelNiches: vi.fn(),
+  evaluateHitsQuietly: vi.fn(),
   setChannelNiches: vi.fn(),
   trackedFindUnique: vi.fn(),
   trackedFindUniqueOrThrow: vi.fn(),
@@ -68,6 +69,9 @@ vi.mock("../channel-sync", () => ({
 vi.mock("../sync-service", () => ({
   buildChannelSyncOptions: vi.fn(async () => ({})),
   buildSyncOptions: vi.fn(async () => ({})),
+}));
+vi.mock("../hit-evaluation-service", () => ({
+  evaluateHitsQuietly: mocks.evaluateHitsQuietly,
 }));
 vi.mock("../niche-service", () => ({
   addChannelNiches: mocks.addChannelNiches,
@@ -118,6 +122,7 @@ beforeEach(() => {
     ownershipType: "own",
   });
   mocks.addChannelNiches.mockResolvedValue({ filed: 1 });
+  mocks.evaluateHitsQuietly.mockResolvedValue(null);
   mocks.trackedFindUniqueOrThrow.mockResolvedValue({
     id: "tc_1",
     niches: [
@@ -129,6 +134,7 @@ beforeEach(() => {
   mocks.channelDataSources.mockResolvedValue(new Map([["UC1", "connection"]]));
   mocks.channelFindUniqueOrThrow.mockResolvedValue(CHANNEL_ROW);
   mocks.trackedUpdate.mockResolvedValue({ id: "tc_1" });
+  mocks.trackedCreate.mockResolvedValue({ id: "tc_1" });
   mocks.syncChannel.mockResolvedValue({
     dataSource: "public",
     status: "success",
@@ -225,5 +231,88 @@ describe("adding a channel that is already tracked", () => {
     expect(mocks.addChannelNiches).not.toHaveBeenCalled();
     expect(mocks.trackedUpdate).not.toHaveBeenCalled();
     expect(mocks.syncChannel).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * =========================================================================
+ * THE VERDICTS ARE ASKED FOR AFTER THE HISTORY ARRIVES, NOT BEFORE
+ * =========================================================================
+ *
+ * The owner filed a channel under a Long Form niche carrying a complete rule
+ * and the overview answered "Not configured" over ten long-form videos.
+ *
+ * The filing deliberately precedes the sync, so that organising a channel
+ * survives an unreachable YouTube. Filing also triggers a re-judge. On a
+ * channel new to the database those two facts collide: the re-judge runs over
+ * a library with no videos in it, writes nothing, and the sync then imports
+ * the whole history with no verdict against any of it. Nothing else on the
+ * request looks again, and every hit-rate surface renders that silence as
+ * "Not configured" until the hourly sweep.
+ *
+ * ORDER IS THE WHOLE ASSERTION, which is why these record a sequence rather
+ * than counting calls. A second judge call placed above the sync would satisfy
+ * "it judges" and fix nothing.
+ */
+describe("judging a newly added channel", () => {
+  /** Every mocked step appends its name here, in the order it actually ran. */
+  function recordOrder(): string[] {
+    const order: string[] = [];
+    mocks.addChannelNiches.mockImplementation(async () => {
+      order.push("file");
+      return { filed: 1 };
+    });
+    mocks.syncChannel.mockImplementation(async () => {
+      order.push("sync");
+      return { dataSource: "public", status: "success", videosUpdated: 10, quotaUnitsUsed: 5 };
+    });
+    mocks.evaluateHitsQuietly.mockImplementation(async () => {
+      order.push("judge");
+      return null;
+    });
+    return order;
+  }
+
+  it("judges after the sync, not before it", async () => {
+    mocks.trackedFindUnique.mockResolvedValue(null); // brand new channel
+    const order = recordOrder();
+
+    await addChannel("@dawnstarz", { nicheIds: ["niche_docs"] });
+
+    expect(order).toEqual(["file", "sync", "judge"]);
+  });
+
+  it("asks for this channel, so both formats' passes run over it", async () => {
+    mocks.trackedFindUnique.mockResolvedValue(null);
+
+    await addChannel("@dawnstarz", { nicheIds: ["niche_docs"] });
+
+    // Channel-scoped, never niche-scoped: a niche list decides which FORMAT
+    // passes run, so filing into one shorts niche would leave this channel's
+    // long-form videos unjudged — the owner's exact complaint.
+    expect(mocks.evaluateHitsQuietly).toHaveBeenCalledTimes(1);
+    expect(mocks.evaluateHitsQuietly.mock.calls[0][0]).toBe(ORG_ID);
+    expect(mocks.evaluateHitsQuietly.mock.calls[0][1]).toEqual({ channelIds: ["ch_1"] });
+  });
+
+  it("judges a channel added under no niches at all", async () => {
+    // Its Shorts still need verdicts — the shorts pass has no membership gate,
+    // and an unfiled channel's rows are what make "no rule yet" honest rather
+    // than indistinguishable from "not judged yet".
+    mocks.trackedFindUnique.mockResolvedValue(null);
+
+    await addChannel("@dawnstarz", {});
+
+    expect(mocks.addChannelNiches).not.toHaveBeenCalled();
+    expect(mocks.evaluateHitsQuietly).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the judging to the filing on a channel that is already tracked", async () => {
+    // That branch never syncs — the history is already there — so the filing's
+    // own re-judge is the right and only one.
+    await addChannel("@dawnstarz", { nicheIds: ["niche_docs"] });
+
+    expect(mocks.syncChannel).not.toHaveBeenCalled();
+    expect(mocks.evaluateHitsQuietly).not.toHaveBeenCalled();
   });
 });

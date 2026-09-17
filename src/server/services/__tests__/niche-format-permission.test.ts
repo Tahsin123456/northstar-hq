@@ -111,7 +111,7 @@ vi.mock("../user-service", () => ({
  * have — so it is stubbed here and pinned in the hit-evaluation tests.
  */
 vi.mock("../hit-evaluation-service", () => ({
-  evaluateHitsForOrganization: mocks.evaluateHits,
+  evaluateHitsQuietly: mocks.evaluateHits,
   reevaluateHitsForNiche: mocks.reevaluateNiche,
 }));
 
