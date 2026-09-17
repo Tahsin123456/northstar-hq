@@ -588,7 +588,9 @@ async function rejudgeAfterRuleChange(
  * unassigned. No channel, video or snapshot is affected — deleting a label
  * must never destroy data the label was attached to.
  */
-export async function deleteNiche(nicheId: string): Promise<{ unassignedChannels: number }> {
+export async function deleteNiche(
+  nicheId: string,
+): Promise<{ unassignedChannels: number; keptNotes: number }> {
   const organizationId = await getCurrentOrgId();
 
   const niche = await prisma.niche.findFirst({
@@ -625,9 +627,36 @@ export async function deleteNiche(nicheId: string): Promise<{ unassignedChannels
    * unassigned, and no channel, video or snapshot is touched.
    */
 
-  await prisma.niche.delete({ where: { id: niche.id } });
+  /*
+   * THE NOTES SURVIVE THE LABEL, and they did not used to.
+   *
+   * `Note.niche` cascaded, so this delete took every note filed on the niche
+   * with it — the whole team's, not just the deleter's — while the dialog
+   * promised "This removes the label, nothing else" and the toast afterwards
+   * counted unfiled channels and never mentioned them. A note is somebody's
+   * research, recorded nowhere else, and there is no undo.
+   *
+   * Re-filed as "general" rather than deleted: the kind already exists for a
+   * note attached to nothing, `listAllNotes` already branches on the recorded
+   * kind, and a shared general note stays visible to the team exactly as it
+   * was. The note keeps its body, author and date and loses only the label it
+   * pointed at — which is the thing that was actually deleted.
+   *
+   * IN ONE TRANSACTION WITH THE DELETE, and in this order, so the two columns
+   * can never disagree: a row claiming `targetType: "niche"` with a null
+   * `nicheId` would render with no target and satisfy no filter. The schema's
+   * SET NULL is the backstop for any other path; this is the one that keeps
+   * `targetType` honest.
+   */
+  const [refiled] = await prisma.$transaction([
+    prisma.note.updateMany({
+      where: { organizationId, nicheId: niche.id },
+      data: { targetType: "general", nicheId: null },
+    }),
+    prisma.niche.delete({ where: { id: niche.id } }),
+  ]);
 
-  return { unassignedChannels: niche._count.channels };
+  return { unassignedChannels: niche._count.channels, keptNotes: refiled.count };
 }
 
 /**

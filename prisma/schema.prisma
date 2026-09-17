@@ -689,8 +689,22 @@ model Note {
   channelId String?
   channel   Channel? @relation(fields: [channelId], references: [id], onDelete: Cascade)
 
+  /// SET NULL, not Cascade, and the difference is somebody's research.
+  ///
+  /// A niche is a LABEL — the delete dialog says so in those words, and
+  /// promises that nothing but the label goes. Under Cascade that promise was
+  /// false: Postgres deleted every note filed on the niche, the whole team's
+  /// included, written by people who never saw the dialog. Notes are recorded
+  /// nowhere else and there is no undo.
+  ///
+  /// So the note outlives the label. `deleteNiche` re-files its notes as
+  /// "general" — a kind that already exists for a note attached to nothing —
+  /// inside the same transaction as the delete, so `targetType` and `nicheId`
+  /// can never disagree. This SET NULL is the backstop for any other path that
+  /// ever deletes a niche row: the note survives, pointing at nothing, rather
+  /// than being destroyed.
   nicheId String?
-  niche   Niche?  @relation(fields: [nicheId], references: [id], onDelete: Cascade)
+  niche   Niche?  @relation(fields: [nicheId], references: [id], onDelete: SetNull)
 
   videoId String?
   video   Video?  @relation(fields: [videoId], references: [id], onDelete: Cascade)

@@ -13,8 +13,10 @@ import { addChannelRequest, createNicheRequest } from "../add-channel-request";
 describe("addChannelRequest", () => {
   const base = { youtubeChannelId: "UC1", ownershipType: "competitor" as const, nicheIds: ["n1"] };
 
-  it("carries the ownership choice for a channel that is not tracked", () => {
-    expect(addChannelRequest({ ...base, alreadyTracked: false })).toEqual({
+  it("carries the ownership choice for a channel the tracker has never held", () => {
+    expect(
+      addChannelRequest({ ...base, alreadyTracked: false, previouslyRemoved: false }),
+    ).toEqual({
       input: "UC1",
       ownershipType: "competitor",
       nicheIds: ["n1"],
@@ -22,11 +24,31 @@ describe("addChannelRequest", () => {
   });
 
   it("sends NO ownership key at all for a channel that is already tracked", () => {
-    const body = addChannelRequest({ ...base, alreadyTracked: true });
+    const body = addChannelRequest({ ...base, alreadyTracked: true, previouslyRemoved: false });
     expect(body).toEqual({ input: "UC1", nicheIds: ["n1"] });
     // Absent, not undefined-valued: JSON.stringify drops undefined, but the
     // pin is on the object so a stray `ownershipType: undefined` cannot creep
     // in and later be "fixed" into a value.
+    expect(Object.keys(body)).toEqual(["input", "nicheIds"]);
+  });
+
+  /**
+   * THE RESTORE, which is the case that shipped wrong. The selector cannot
+   * show a stored "own" — the preview carries no ownership — so it renders
+   * its "competitor" default, and sending that wrote "competitor" over "own"
+   * on every restore, taking the channel out of every own-channel figure and
+   * stopping its hits paying a bonus. The key has to be absent for the
+   * service's "a restored row keeps what it had" branch to be reachable.
+   */
+  it("sends NO ownership key for a restore, even though the selector holds a value", () => {
+    const body = addChannelRequest({
+      ...base,
+      alreadyTracked: false,
+      previouslyRemoved: true,
+      // Exactly what the dialog's default would have sent over a stored "own".
+      ownershipType: "competitor",
+    });
+    expect(body).toEqual({ input: "UC1", nicheIds: ["n1"] });
     expect(Object.keys(body)).toEqual(["input", "nicheIds"]);
   });
 });

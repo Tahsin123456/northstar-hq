@@ -42,6 +42,14 @@ const mocks = vi.hoisted(() => ({
   trackedFindFirst: vi.fn(),
   joinDeleteMany: vi.fn(),
   joinCreateMany: vi.fn(),
+  /*
+   * Deleting a niche re-files its notes as general in the same transaction,
+   * rather than letting them be cascaded away with the label. This file is
+   * about WHO may delete, not about the notes — it is stubbed so the format
+   * checks stay the subject. The re-filing itself is pinned next door, in
+   * `niche-delete-keeps-notes.test.ts`.
+   */
+  noteUpdateMany: vi.fn(),
   permissions: new Set<string>(),
   role: "admin" as string,
 }));
@@ -65,6 +73,7 @@ vi.mock("@/server/db", () => ({
       deleteMany: mocks.joinDeleteMany,
       createMany: mocks.joinCreateMany,
     },
+    note: { updateMany: mocks.noteUpdateMany },
     // The service builds the operations and hands them over as an array; what
     // the tests pin is which operations were built, so awaiting them is enough.
     $transaction: async (operations: readonly Promise<unknown>[]) =>
@@ -141,6 +150,7 @@ beforeEach(() => {
   mocks.trackedFindFirst.mockResolvedValue({ id: "tracked_1" });
   mocks.joinDeleteMany.mockResolvedValue({ count: 0 });
   mocks.joinCreateMany.mockResolvedValue({ count: 0 });
+  mocks.noteUpdateMany.mockResolvedValue({ count: 0 });
 });
 
 describe("creating a niche with an explicit format", () => {

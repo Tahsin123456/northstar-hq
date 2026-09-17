@@ -1014,7 +1014,8 @@ function DeleteNicheDialog({
               ? "No channels are filed under this niche."
               : `${channelCount} ${channelCount === 1 ? "channel" : "channels"} will become uncategorised.`}{" "}
             No channel is removed from your tracker and no Shorts, view counts or history
-            are affected — a niche is only a label.
+            are affected — a niche is only a label. Notes filed on it are kept and become
+            general notes.
           </p>
         </DialogBody>
 
@@ -1027,12 +1028,24 @@ function DeleteNicheDialog({
             loading={remove.isPending}
             onClick={() =>
               remove.mutate(niche.id, {
-                onSuccess: ({ unassignedChannels }) => {
+                onSuccess: ({ unassignedChannels, keptNotes }) => {
+                  // Both facts, or neither. The notes line exists because this
+                  // delete used to destroy them silently; saying nothing now
+                  // would leave the reader unable to tell which release they
+                  // are on.
+                  const parts: string[] = [];
+                  if (unassignedChannels > 0) {
+                    parts.push(
+                      `${unassignedChannels} ${unassignedChannels === 1 ? "channel is" : "channels are"} now uncategorised.`,
+                    );
+                  }
+                  if (keptNotes > 0) {
+                    parts.push(
+                      `${keptNotes} ${keptNotes === 1 ? "note was" : "notes were"} kept as general notes.`,
+                    );
+                  }
                   toast.success(`Niche “${niche.name}” deleted`, {
-                    description:
-                      unassignedChannels > 0
-                        ? `${unassignedChannels} ${unassignedChannels === 1 ? "channel is" : "channels are"} now uncategorised.`
-                        : undefined,
+                    description: parts.length > 0 ? parts.join(" ") : undefined,
                   });
                   onOpenChange(false);
                 },

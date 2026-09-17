@@ -13,6 +13,7 @@ import {
   Flame,
   Layers,
   LayoutDashboard,
+  LogOut,
   Moon,
   Plus,
   Settings,
@@ -25,8 +26,10 @@ import {
   Tv2,
   Wallet,
 } from "lucide-react";
+import { toast } from "sonner";
 import { BRAND } from "@/lib/brand";
 import { cn } from "@/lib/utils";
+import { useLogout } from "@/hooks/use-auth";
 import { useTheme } from "@/components/providers/theme-provider";
 import { useOptionalSession } from "@/components/providers/session-provider";
 import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
@@ -475,10 +478,46 @@ const SETTINGS_ITEM: NavItem & { href: string } = {
 
 export function SidebarFooterNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
+  const logout = useLogout();
 
   return (
     <nav aria-label="Account" className="flex flex-col gap-0.5">
       <NavLink item={SETTINGS_ITEM} pathname={pathname} onNavigate={onNavigate} />
+      {/*
+        THE WAY OUT, which the product did not have. `useLogout` was written in
+        full and called by nothing, so there was no control anywhere in the app
+        that ended a session — on a shared edit-bay machine the next person to
+        open the browser was signed in as whoever used it last, earnings and
+        payroll included.
+
+        Here rather than on Settings because it belongs beside the account, is
+        reachable from every screen, and this one component is what both the
+        desktop column and the mobile drawer render.
+
+        NEVER "ACTIVE": signing out is an act, not a place. On failure the hook
+        deliberately does not navigate — the cookie is still valid and bouncing
+        to /login would claim something that did not happen — so the error is
+        said here instead.
+      */}
+      <button
+        type="button"
+        className={rowClassName(false)}
+        disabled={logout.isPending}
+        onClick={() =>
+          logout.mutate(undefined, {
+            onError: (error: unknown) =>
+              toast.error("Could not sign out", {
+                description:
+                  error instanceof Error
+                    ? error.message
+                    : "You are still signed in. Check your connection and try again.",
+              }),
+          })
+        }
+      >
+        <LogOut className={rowIconClassName(false)} />
+        {logout.isPending ? "Signing out…" : "Sign out"}
+      </button>
     </nav>
   );
 }

@@ -417,7 +417,13 @@ export const api = {
       body: JSON.stringify(rule),
     }),
 
-  deleteNiche: (id: string): Promise<{ unassignedChannels: number }> =>
+  /**
+   * `keptNotes` is how many notes were filed on the niche and have been
+   * re-filed as general rather than deleted with it. Reported so the dialog
+   * can say what happened to them: the previous behaviour destroyed them and
+   * told nobody.
+   */
+  deleteNiche: (id: string): Promise<{ unassignedChannels: number; keptNotes: number }> =>
     request(`/api/niches/${id}`, { method: "DELETE" }),
 
   setChannelNiches: (

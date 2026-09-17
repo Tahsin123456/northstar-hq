@@ -110,6 +110,7 @@ export function AddChannelDialog({
       addChannelRequest({
         youtubeChannelId: preview.youtubeChannelId,
         alreadyTracked: preview.alreadyTracked,
+        previouslyRemoved: preview.previouslyRemoved,
         ownershipType,
         nicheIds,
       }),
@@ -243,6 +244,15 @@ export function AddChannelDialog({
               */}
               {!preview.alreadyTracked ? (
                 <div className="flex flex-col gap-4 animate-in-rise">
+                  {/*
+                    NOT OFFERED ON A RESTORE. The row already records whether
+                    this channel is one of yours, and this control cannot show
+                    it — the preview carries no ownership — so it would render
+                    its "competitor" default over a stored "own" and quietly
+                    take the channel out of every own-channel figure. A restore
+                    keeps what it had; the row menu changes it afterwards.
+                  */}
+                  {preview.previouslyRemoved ? null : (
                   <div className="flex flex-col gap-2">
                     <Label>Channel type</Label>
                     <div className="grid grid-cols-2 gap-2">
@@ -260,6 +270,7 @@ export function AddChannelDialog({
                       />
                     </div>
                   </div>
+                  )}
 
                   <NichePicker
                     niches={niches}
