@@ -164,6 +164,26 @@ export interface PayrollMessageInput {
   readonly employees: readonly PayrollMessageEmployee[];
   readonly totalMinor: number;
   readonly currency: string;
+  /**
+   * One entry per currency on the run, when it uses more than one.
+   *
+   * THE MESSAGE USED TO ADD THEM UP. `totalMinor` is a sum of minor units
+   * across every record and `currency` is whichever record came first, so a
+   * run paying one person in dollars and another in lira posted kuruş added
+   * to cents under a single symbol — to the whole team chat, as the one
+   * payroll figure that leaves the building, while every screen in the app
+   * showed the split correctly.
+   *
+   * Empty on a single-currency run, which is every run until somebody is paid
+   * in a second one; the footer then prints the plain total exactly as before.
+   */
+  readonly currencySubtotals: readonly PayrollMessageSubtotal[];
+}
+
+/** One currency's share of a mixed run. */
+export interface PayrollMessageSubtotal {
+  readonly currency: string;
+  readonly totalMinor: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +357,20 @@ function hasGaps(input: PayrollMessageInput): boolean {
 
 function footer(input: PayrollMessageInput): string {
   const company = clip(input.companyName, MAX_COMPANY_CHARS);
+  /*
+   * A MIXED RUN HAS NO TOTAL, so it does not get one — the same answer the
+   * payroll screen gives, where the total column shows the per-currency split
+   * and the salary and bonus columns fall back to an em dash. Cents added to
+   * kuruş is not an amount of money and payroll has no rate table to convert
+   * with, so printing a sum under one symbol was not a rounding problem, it
+   * was a number nobody is owed.
+   */
+  if (input.currencySubtotals.length > 1) {
+    const parts = input.currencySubtotals
+      .map((part) => formatPayAmount(part.totalMinor, part.currency))
+      .join(" · ");
+    return `Total ${company} Payroll: ${parts}`;
+  }
   return `Total ${company} Payroll: ${formatPayAmount(input.totalMinor, input.currency)}`;
 }
 

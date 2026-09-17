@@ -697,8 +697,29 @@ export async function acceptInvitation(
       throw errors.invalidInput("This invitation link is no longer valid.");
     }
 
-    const existing = await tx.appUser.findUnique({
-      where: { email: invitation.email },
+    /*
+     * SCOPED TO THE INVITATION'S OWN WORKSPACE.
+     *
+     * This looked the address up across the whole table, so an invitation
+     * issued anywhere matched an account belonging to anyone. A second
+     * workspace's admin could invite the address of somebody this one had
+     * deactivated — the guard on `createInvitation` only refuses accounts
+     * that are currently active — accept their own link with a password of
+     * their choosing, and the `existing` branch below would overwrite that
+     * person's password hash and clear their deactivation on the ORIGINAL
+     * row. One tenant reaching another tenant's account is the thing the
+     * organization scope exists to make impossible.
+     *
+     * A matching address with no membership here is therefore NOT `existing`:
+     * it falls to the create branch and gets its own row in this workspace,
+     * which is what a genuinely new colleague who happens to use the same
+     * address elsewhere should get.
+     */
+    const existing = await tx.appUser.findFirst({
+      where: {
+        email: invitation.email,
+        memberships: { some: { organizationId: invitation.organizationId } },
+      },
       select: { id: true },
     });
 

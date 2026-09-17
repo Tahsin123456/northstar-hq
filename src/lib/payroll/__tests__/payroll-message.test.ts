@@ -55,6 +55,9 @@ const run = (overrides: Partial<PayrollMessageInput> = {}): PayrollMessageInput 
   employees: [john, mia],
   totalMinor: 870_000, // $8,700.00
   currency: "USD",
+  // Empty is the single-currency run — every run until somebody is paid in a
+  // second currency — and the footer's plain total is unchanged by this field.
+  currencySubtotals: [],
   ...overrides,
 });
 
@@ -115,6 +118,51 @@ describe("formatPayrollMessage", () => {
     const message = formatPayrollMessage(run({ employees: [], totalMinor: 0 }));
     expect(message).toContain("Nobody was on payroll for this period.");
     expect(message).toContain("Total Northstar Studios Payroll: $0");
+  });
+
+  /**
+   * =========================================================================
+   * A MIXED RUN HAS NO TOTAL, AND THE MESSAGE USED TO INVENT ONE
+   * =========================================================================
+   * `totalMinor` is a sum of minor units across every record and `currency`
+   * is whichever record came first, so a run paying one person in dollars and
+   * another in lira posted kuruş added to cents under a single symbol — to
+   * the whole team chat, as the one payroll figure that leaves the building,
+   * while the payroll screen beside it showed the split correctly and put an
+   * em dash where a cross-currency sum would have gone.
+   *
+   * The split is pinned by value, because the failure mode is a number that
+   * looks perfectly ordinary: $4,000 + TRY 45,000 summed as 4,900,000 minor
+   * units and printed as "TRY 49,000" is a plausible-looking figure nobody is
+   * owed.
+   */
+  it("prints the per-currency split rather than one symbol on a cross-currency sum", () => {
+    const message = formatPayrollMessage(
+      run({
+        totalMinor: 4_900_000,
+        currency: "TRY",
+        currencySubtotals: [
+          { currency: "TRY", totalMinor: 4_500_000 },
+          { currency: "USD", totalMinor: 400_000 },
+        ],
+      }),
+    );
+
+    // Built through the formatter rather than typed out: `Intl` puts a
+    // NON-BREAKING space between a currency code and its digits, so a
+    // hand-written "TRY 45,000" is a different string from the one the
+    // message actually carries and would fail for the wrong reason.
+    const lira = formatPayAmount(4_500_000, "TRY");
+    const dollars = formatPayAmount(400_000, "USD");
+    expect(message).toContain(`Total Northstar Studios Payroll: ${lira} · ${dollars}`);
+    // The sum that was never an amount of money must not appear at all.
+    expect(message).not.toContain(formatPayAmount(4_900_000, "TRY"));
+  });
+
+  it("keeps the plain total for a single-currency run", () => {
+    // Every run until somebody is paid in a second currency. Byte-for-byte
+    // what it always said, which is what makes the branch above safe to add.
+    expect(formatPayrollMessage(run())).toContain("Total Northstar Studios Payroll: $8,700");
   });
 });
 

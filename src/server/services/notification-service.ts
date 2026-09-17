@@ -13,6 +13,7 @@ import {
   buildPayrollMessage,
   type PayrollMessageGap,
   type PayrollMessageInput,
+  type PayrollMessageSubtotal,
 } from "@/lib/payroll/payroll-message";
 import type {
   NotificationAttemptDTO,
@@ -591,7 +592,39 @@ function toMessageInput(
     })),
     totalMinor: dto.totals.totalMinor,
     currency: dto.totals.currency,
+    /*
+     * The split the footer needs, computed here because this is where the
+     * records are. `dto.totals.currencyMixed` is the same flag the payroll
+     * table reads before it refuses to print one symbol on a cross-currency
+     * sum; it was being dropped on the way into the message, which is how the
+     * team chat ended up with a total no screen would show.
+     *
+     * Empty on a single-currency run, so the footer's ordinary path is
+     * byte-for-byte what it always was.
+     */
+    currencySubtotals: dto.totals.currencyMixed ? subtotalsByCurrency(dto.records) : [],
   };
+}
+
+/**
+ * Per-currency totals for a mixed run, ordered largest first so the chat reads
+ * the way the screen does.
+ *
+ * A local sum rather than an import from the payroll table's formatter: this
+ * is server code building a server-rendered string, and reaching into a client
+ * component's helpers for it would tie the message to a screen it must be able
+ * to outlive.
+ */
+function subtotalsByCurrency(
+  records: readonly { currency: string; totalMinor: number }[],
+): PayrollMessageSubtotal[] {
+  const byCurrency = new Map<string, number>();
+  for (const record of records) {
+    byCurrency.set(record.currency, (byCurrency.get(record.currency) ?? 0) + record.totalMinor);
+  }
+  return [...byCurrency.entries()]
+    .map(([currency, totalMinor]) => ({ currency, totalMinor }))
+    .sort((a, b) => b.totalMinor - a.totalMinor || a.currency.localeCompare(b.currency));
 }
 
 export interface SendPayrollNotificationOptions {

@@ -18,7 +18,9 @@
  * and shows nothing.
  */
 
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
+import { getVisibleNicheIds, trackedChannelNicheFilter } from "@/server/auth/niche-scope";
 import { getCurrentOrgId } from "./user-service";
 
 /** Below this share of covered videos, the reconstruction is not trustworthy. */
@@ -60,9 +62,29 @@ export async function getHistoricalViews(options: {
   asOfMs: number;
   windowDays: number;
 }): Promise<HistoricalViewsResult> {
-  // Reconstruction covers what the team tracks. Scoping this to the individual
-  // would give two colleagues different history for the same channel.
-  const organizationId = await getCurrentOrgId();
+  /*
+   * Reconstruction covers what the team tracks. Scoping this to the individual
+   * would give two colleagues different history for the same channel.
+   *
+   * IT IS STILL NARROWED TO THE NICHES THE READER MAY SEE, which it was not.
+   * A niche-scoped editor asking for the distribution "30 days ago" was sent
+   * one point per Short for EVERY channel the studio tracks, including the
+   * niches they are excluded from, and the browser then drew only their own.
+   * The data was on their machine either way, which is the definition this
+   * boundary exists to refuse: the API is the boundary, not the chart.
+   */
+  const [organizationId, visibleNiches] = await Promise.all([
+    getCurrentOrgId(),
+    getVisibleNicheIds(),
+  ]);
+  // Composed under AND rather than spread: both fragments can carry a
+  // `niches` key, and `{...a, ...b}` would silently drop the narrowing —
+  // which here is the whole point of the clause.
+  const trackedByReader: Prisma.TrackedChannelListRelationFilter = {
+    some: {
+      AND: [{ organizationId, isActive: true }, trackedChannelNicheFilter(visibleNiches)],
+    },
+  };
   const { asOfMs, windowDays } = options;
 
   const asOf = new Date(asOfMs);
@@ -73,7 +95,7 @@ export async function getHistoricalViews(options: {
       where: {
         isShort: true,
         publishedAt: { gte: windowStart, lt: asOf },
-        channel: { trackedBy: { some: { organizationId, isActive: true } } },
+        channel: { trackedBy: trackedByReader },
       },
       select: {
         id: true,
@@ -97,7 +119,7 @@ export async function getHistoricalViews(options: {
     // team's channels can actually support — and disclose that date to them.
     prisma.videoSnapshot.findFirst({
       where: {
-        video: { channel: { trackedBy: { some: { organizationId, isActive: true } } } },
+        video: { channel: { trackedBy: trackedByReader } },
       },
       orderBy: { capturedAt: "asc" },
       select: { capturedAt: true },

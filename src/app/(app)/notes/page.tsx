@@ -56,6 +56,7 @@ import { notePosterFor } from "@/lib/notes/note-poster";
 import { useSession } from "@/components/providers/session-provider";
 import { useDeleteNote, useUpdateNote } from "@/hooks/use-research";
 import { useDataset } from "@/hooks/use-dataset";
+import { useResearchFormat } from "@/hooks/use-research-format";
 import { useEmployees } from "@/hooks/use-employees";
 import { api } from "@/lib/api-client";
 import { AUTHOR_ME, UNKNOWN_AUTHOR_LABEL, GENERAL_NOTE_LABEL, NOTE_KINDS } from "@/lib/dto";
@@ -127,7 +128,10 @@ const SORT_QUERY: Record<SortChoice, Pick<NoteLogQuery, "sort" | "direction">> =
 const CARD_GRID = SHORTS_CARD_GRID;
 
 export default function NotesPage() {
-  const { data: dataset } = useDataset();
+  // The reader's own side of the operation — see `useResearchFormat`. A bare
+  // call asks for Shorts, which a Long Form role is refused, and this page
+  // swallows the error and loses its channel and niche filters instead.
+  const { data: dataset } = useDataset(useResearchFormat());
   const session = useSession();
   const isAdmin = session.can("users.manage");
 

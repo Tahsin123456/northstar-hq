@@ -70,6 +70,7 @@ import {
 import { SHORTS_CARD_GRID, SHORTS_POSTER_FRAME } from "@/lib/shorts/feed-layout";
 import { useSession } from "@/components/providers/session-provider";
 import { useDataset } from "@/hooks/use-dataset";
+import { useResearchFormat } from "@/hooks/use-research-format";
 import { useEmployees } from "@/hooks/use-employees";
 import { useVideoContentTypeResolutions } from "@/hooks/use-content-types";
 import { EMPTY_RESOLUTION, type ContentTypeResolution } from "@/lib/content-types/resolve";
@@ -142,7 +143,11 @@ export default function SavedPage() {
     data,
     error: datasetError,
     refetch: refetchDataset,
-  } = useDataset();
+    // The reader's OWN side of the operation, not the subtree's. This page is
+    // format-neutral and sits outside both format layouts, so the context
+    // answers "shorts" for everyone — and for a Long Form role the server
+    // refuses that, which turned the whole board into an error page.
+  } = useDataset(useResearchFormat());
   // The board is this person's shortlist. An admin's payload also carries the
   // team's, each row already labelled with its owner by the server — so the
   // only thing left to decide here is which rows this person may act on.
