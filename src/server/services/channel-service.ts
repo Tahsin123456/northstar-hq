@@ -607,5 +607,20 @@ export async function refreshStaleChannels(
     });
     results.push(toRefreshResultDTO(result));
   }
+
+  /*
+   * Then settle the verdicts over everything this sweep just read — once for
+   * the organization rather than once per channel, and after the loop rather
+   * than inside it, for the reason the scheduled sweep gives at its own call:
+   * a Short that was pending at the top of the run may have had its window
+   * shut and its deciding reading taken in the same pass.
+   *
+   * Skipped entirely when nothing was refreshed. There are no new readings to
+   * judge, and the hourly sweep is already re-deciding the library anyway.
+   */
+  if (results.length > 0) {
+    await evaluateHitsQuietly(organizationId, {}, "refresh all");
+  }
+
   return results;
 }
