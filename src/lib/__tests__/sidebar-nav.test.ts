@@ -123,30 +123,42 @@ describe("what each role sees", () => {
   });
 
   /**
-   * ONE ADD CHANNEL PER FORMAT SECTION, at its foot, for the roles that may
-   * add one. It used to be a Shorts-only row, which left a Head of Longs —
-   * who holds `channels.manage` — with no door at all, and an admin who had
-   * just created a Long Form niche with nothing to press. The Long Form row
-   * carries `format: "longform"` so the dialog offers that side's niches
-   * from a sidebar that renders outside the /longform layout.
+   * THE SIDEBAR HAS NO ADD CHANNEL ROW, ON EITHER SIDE.
+   *
+   * Both sections used to end with one: a row that opened the dialog in place
+   * rather than navigating, and the only row in the whole sidebar that was not
+   * a link. The owner had them removed as buggy. A deletion has no code to
+   * test, so what is pinned is the shape that must not come back — the action
+   * variant is gone from the spec too, so a row like it cannot be added back
+   * by accident while tidying a list.
+   *
+   * Add Channel itself is NOT gone. It is on the Overview header and empty
+   * state, and on the roster, for both formats — pinned below.
    */
-  it("puts Add Channel at the foot of each format section, for the roles that may add one", () => {
-    expect(rowLabels(viewerFor("admin"), "Shorts").at(-1)).toBe("Add Channel");
-    expect(rowLabels(viewerFor("admin"), "Long Form").at(-1)).toBe("Add Channel");
-    expect(rowLabels(viewerFor("head_of_shorts"), "Shorts").at(-1)).toBe("Add Channel");
-    expect(rowLabels(viewerFor("head_of_longs"), "Long Form").at(-1)).toBe("Add Channel");
-    for (const role of ["short_form_editor", "short_form_clip_producer"] as const) {
-      expect(rowLabels(viewerFor(role), "Shorts"), role).not.toContain("Add Channel");
+  it("has no Add Channel row in either format section", () => {
+    for (const role of ROLES) {
+      for (const section of ["Shorts", "Long Form"] as const) {
+        expect(rowLabels(viewerFor(role), section), `${role} / ${section}`).not.toContain(
+          "Add Channel",
+        );
+      }
     }
-    expect(rowLabels(viewerFor("long_form_editor"), "Long Form")).not.toContain("Add Channel");
-    // Each side's row files under its own niches, and neither leaks across:
-    // a Head of Shorts sees no Long Form section, so no Long Form row.
-    const longRow = section("longform").items.find((i) => i.action === "add-channel");
-    expect(longRow?.format).toBe("longform");
-    const shortsRow = section("shorts").items.find((i) => i.action === "add-channel");
-    expect(shortsRow?.format).toBeUndefined();
-    expect(sectionLabelsFor(viewerFor("head_of_shorts"))).not.toContain("Long Form");
-    expect(sectionLabelsFor(viewerFor("head_of_longs"))).not.toContain("Shorts");
+  });
+
+  it("has no row that is anything but a link", () => {
+    // Every row navigates. The removed variant had no href and was never
+    // "active"; every helper in sidebar-nav.ts assumed one or the other.
+    for (const section of NAV_SECTIONS) {
+      for (const item of section.items) {
+        expect(typeof item.href, `${section.label} / ${item.label}`).toBe("string");
+      }
+    }
+  });
+
+  it("keeps Add Channel on the Shorts overview, header and empty state alike", () => {
+    // The door the sidebar rows are no longer a second copy of.
+    const source = readFileSync(join(APP_DIR, "page.tsx"), "utf8");
+    expect(source.split("<AddChannelDialog").length - 1).toBe(2);
   });
 
   it("mounts Add Channel on the Long Form overview, header and empty state alike", () => {

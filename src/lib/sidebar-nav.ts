@@ -1,5 +1,4 @@
 import type { Permission } from "@/lib/auth/permissions";
-import type { NicheFormat } from "@/lib/niches/niche-format";
 
 /**
  * =========================================================================
@@ -63,34 +62,24 @@ interface SidebarItemBase {
   readonly longsOnly?: boolean;
 }
 
-/** A row that navigates. */
+/**
+ * A row of the sidebar. EVERY ROW NAVIGATES.
+ *
+ * There used to be a second kind — an action row that opened the Add Channel
+ * dialog in place, one at the foot of each format section. The owner had them
+ * removed as buggy, and the variant went with them rather than being left
+ * behind with no row using it: a dialog wired to a type nobody constructs is
+ * the kind of thing that gets switched back on by accident. Add Channel is
+ * still on the Overview and the roster of both formats, which is where the
+ * task belongs.
+ */
 export interface SidebarLinkSpec extends SidebarItemBase {
   readonly href: string;
   /** Matches nested routes, e.g. /channels/abc under /channels. */
   readonly matchPrefix?: boolean;
-  readonly action?: undefined;
 }
 
-/**
- * A row that opens something in place rather than navigating.
- *
- * Add Channel is the one of these, and it appears ONCE PER FORMAT SECTION:
- * row-shaped, at the foot of the section whose Channels row it feeds, with no
- * URL and never "active". It is gated on `channels.manage` rather than on the
- * section being visible — an editor sees the tracker and still cannot add to
- * it. `format` says which side's niches the dialog offers; the Long Form row
- * has to say so explicitly, because the sidebar renders outside the /longform
- * layout and the dialog would otherwise read the Shorts dataset.
- */
-export interface SidebarActionSpec extends SidebarItemBase {
-  readonly action: "add-channel";
-  /** Which format's niches the dialog files under. Absent means shorts. */
-  readonly format?: NicheFormat;
-  readonly href?: undefined;
-  readonly matchPrefix?: undefined;
-}
-
-export type SidebarItemSpec = SidebarLinkSpec | SidebarActionSpec;
+export type SidebarItemSpec = SidebarLinkSpec;
 
 export interface SidebarSectionSpec<Item extends SidebarItemSpec = SidebarItemSpec> {
   /** Stable id — what the collapsed-state store remembers. Never shown. */
@@ -106,14 +95,9 @@ export interface SidebarViewer {
   readonly canAny: (permissions: readonly Permission[]) => boolean;
 }
 
-/**
- * A stable key for a row — links by URL, actions by name AND format, since
- * the same action sits in both format sections.
- */
+/** A stable key for a row. Its URL, which no two rows share. */
 export function sidebarItemKey(item: SidebarItemSpec): string {
-  return item.action !== undefined
-    ? `action:${item.action}:${item.format ?? "shorts"}`
-    : item.href;
+  return item.href;
 }
 
 export function isItemVisible(item: SidebarItemSpec, viewer: SidebarViewer): boolean {
@@ -149,11 +133,9 @@ export function visibleSections<Item extends SidebarItemSpec>(
  *
  * Exact by default. `matchPrefix` rows also own their subtree — Channels is
  * lit on /channels/abc, Finance on /finance/payroll — because leaving the row
- * dark there reads as having navigated out of the section. An action row has
- * no page and is never active.
+ * dark there reads as having navigated out of the section.
  */
 export function isItemActive(item: SidebarItemSpec, pathname: string): boolean {
-  if (item.href === undefined) return false;
   return item.matchPrefix
     ? pathname === item.href || pathname.startsWith(`${item.href}/`)
     : pathname === item.href;

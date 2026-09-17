@@ -15,7 +15,6 @@ import {
   LayoutDashboard,
   LogOut,
   Moon,
-  Plus,
   Settings,
   Shapes,
   ShieldCheck,
@@ -32,7 +31,6 @@ import { cn } from "@/lib/utils";
 import { useLogout } from "@/hooks/use-auth";
 import { useTheme } from "@/components/providers/theme-provider";
 import { useOptionalSession } from "@/components/providers/session-provider";
-import { AddChannelDialog } from "@/components/channels/add-channel-dialog";
 import {
   activeSectionId,
   isItemActive,
@@ -118,19 +116,6 @@ export const NAV_SECTIONS: readonly NavSection[] = [
       // PAGE is built over the Shorts dataset, and a longs-role user reaching
       // it would meet the 403 with nothing they could do there.
       { href: "/content-types", label: "Content Types", icon: Shapes, shortsOnly: true },
-      // Add Channel is a row here rather than a button under the whole nav,
-      // where it was shown to Long Form roles whose channel list is not even
-      // in their sidebar. It sits at the foot of the section whose Channels
-      // row it feeds, and it is gated on the permission the API checks —
-      // an editor who cannot add a channel is not shown the button that
-      // would tell them so.
-      {
-        action: "add-channel",
-        label: "Add Channel",
-        icon: Plus,
-        shortsOnly: true,
-        requires: ["channels.manage"],
-      },
     ],
   },
   {
@@ -152,21 +137,6 @@ export const NAV_SECTIONS: readonly NavSection[] = [
         requires: ["longs.view"],
       },
       { href: "/longform/niches", label: "Niches", icon: Layers, requires: ["longs.view"] },
-      // The Long Form side's own Add Channel, for the same reason the Shorts
-      // one is a row at the foot of its section. It was missing: the only
-      // Add Channel was `shortsOnly`, so a Head of Longs — who holds
-      // `channels.manage` — had no door at all, and an admin filing a channel
-      // under a brand-new Long Form niche found nothing to press. `format`
-      // is explicit because the sidebar renders outside the /longform layout
-      // and the dialog would otherwise offer the Shorts niches.
-      {
-        action: "add-channel",
-        format: "longform",
-        label: "Add Channel",
-        icon: Plus,
-        longsOnly: true,
-        requires: ["channels.manage"],
-      },
     ],
   },
   {
@@ -295,7 +265,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
             )}
             <div id={listId} className="flex flex-col gap-0.5" hidden={collapsed}>
               {section.items.map((item) => (
-                <NavRow
+                <NavLink
                   key={sidebarItemKey(item)}
                   item={item}
                   pathname={pathname}
@@ -379,37 +349,6 @@ function rowIconClassName(isActive: boolean): string {
     "size-4 shrink-0 transition-colors",
     isActive ? "text-accent" : "text-subtle-foreground group-hover:text-muted-foreground",
   );
-}
-
-/** One row of a section: a link, or the one action that lives among them. */
-function NavRow({
-  item,
-  pathname,
-  onNavigate,
-}: {
-  item: NavItem;
-  pathname: string;
-  onNavigate?: () => void;
-}) {
-  if (item.action === "add-channel") {
-    return (
-      <AddChannelDialog
-        // Which side's niches the picker offers. The sidebar sits outside
-        // the /longform layout, so the Long Form row cannot rely on context.
-        format={item.format}
-        // In the mobile drawer, opening the dialog closes the drawer behind
-        // it — the same courtesy a link gives by navigating away.
-        onOpenChange={(open) => open && onNavigate?.()}
-        trigger={
-          <button type="button" className={rowClassName(false)}>
-            <item.icon className={rowIconClassName(false)} />
-            {item.label}
-          </button>
-        }
-      />
-    );
-  }
-  return <NavLink item={item} pathname={pathname} onNavigate={onNavigate} />;
 }
 
 /**
