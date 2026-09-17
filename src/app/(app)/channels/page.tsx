@@ -274,6 +274,7 @@ function ChannelCard({ row }: { row: ReturnType<typeof useChannelRows>[number] }
           <HitRateValue
             summary={metrics.hits}
             totalShorts={metrics.totalShorts}
+            unitPlural={copy.hitUnitPlural}
             size="sm"
             showBar
             // A card in a grid. The exclusions are the channel page's job;

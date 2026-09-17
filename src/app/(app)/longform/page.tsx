@@ -80,6 +80,10 @@ const LONGFORM_TABLE_LABELS: ChannelTableLabels = {
   consistencyTip:
     "0–100. How tightly this channel's long-form videos cluster around their median. High means dependable output rather than a few outliers carrying the total.",
   tableAriaLabel: "Tracked channels ranked by long-form hit rate",
+  // The count beside the rate is already long-form only; this is the noun,
+  // which said "Shorts" here and made the figure read as if Shorts had been
+  // counted into the Long Form hit rate.
+  hitUnitPlural: "videos",
   hrefBase: "/longform/channels",
 };
 

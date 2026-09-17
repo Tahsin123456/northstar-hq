@@ -50,6 +50,8 @@ const mocks = vi.hoisted(() => ({
    * `niche-delete-keeps-notes.test.ts`.
    */
   noteUpdateMany: vi.fn(),
+  evaluateHits: vi.fn(),
+  reevaluateNiche: vi.fn(),
   permissions: new Set<string>(),
   role: "admin" as string,
 }));
@@ -101,6 +103,18 @@ vi.mock("../user-service", () => ({
   getCurrentOrgSettings: async () => ({ baseCurrency: "USD", defaultPeriodDays: 30 }),
 }));
 
+/*
+ * FILING NOW RE-JUDGES the niches a channel joins and leaves, so a freshly
+ * filed channel is not reported as "rule not configured" until the next
+ * sweep. That is a different subject from WHO may file, and the real
+ * evaluator would go looking for videos this stubbed database does not
+ * have — so it is stubbed here and pinned in the hit-evaluation tests.
+ */
+vi.mock("../hit-evaluation-service", () => ({
+  evaluateHitsForOrganization: mocks.evaluateHits,
+  reevaluateHitsForNiche: mocks.reevaluateNiche,
+}));
+
 const { createNiche, updateNiche, deleteNiche, setChannelNiches } = await import(
   "../niche-service"
 );
@@ -147,10 +161,12 @@ beforeEach(() => {
     nicheRow(data),
   );
   mocks.delete.mockResolvedValue(nicheRow());
-  mocks.trackedFindFirst.mockResolvedValue({ id: "tracked_1" });
+  mocks.trackedFindFirst.mockResolvedValue({ id: "tracked_1", niches: [] });
   mocks.joinDeleteMany.mockResolvedValue({ count: 0 });
   mocks.joinCreateMany.mockResolvedValue({ count: 0 });
   mocks.noteUpdateMany.mockResolvedValue({ count: 0 });
+  mocks.evaluateHits.mockResolvedValue(undefined);
+  mocks.reevaluateNiche.mockResolvedValue(undefined);
 });
 
 describe("creating a niche with an explicit format", () => {

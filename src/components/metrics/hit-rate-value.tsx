@@ -76,6 +76,7 @@ import { cn } from "@/lib/utils";
 export function HitRateValue({
   summary,
   totalShorts,
+  unitPlural = "Shorts",
   size = "md",
   showBar = true,
   showFraction = true,
@@ -85,8 +86,20 @@ export function HitRateValue({
 }: {
   /** The rate and everything it excluded. From `metrics.hits`. */
   summary: HitRateSummary;
-  /** Shorts uploaded in the period, decided or not. The context for the rate. */
+  /** Videos of this format uploaded in the period, decided or not. */
   totalShorts: number;
+  /**
+   * What this format calls the thing being counted.
+   *
+   * THE COUNT WAS ALWAYS RIGHT AND THE NOUN WAS NOT. `calculateChannelMetrics`
+   * narrows to one format before it counts anything, so on a Long Form surface
+   * this number is long-form videos — but the two sentences below said
+   * "Shorts" regardless, so the Long Form overview reported "10 Shorts in
+   * period" over ten long-form videos and read as if the Shorts had been
+   * counted into it. Defaulted, so every Shorts surface says exactly what it
+   * always said.
+   */
+  unitPlural?: string;
   size?: "sm" | "md" | "lg" | "xl";
   showBar?: boolean;
   showFraction?: boolean;
@@ -136,7 +149,7 @@ export function HitRateValue({
         <HitRuleNotConfigured size={size} />
         {showFraction ? (
           <span className="text-[11px] leading-none text-subtle-foreground">
-            {formatNumber(totalShorts)} Shorts in period
+            {formatNumber(totalShorts)} {unitPlural} in period
           </span>
         ) : null}
       </div>
@@ -223,7 +236,7 @@ export function HitRateValue({
           ) : nothingDecided ? (
             NOTHING_DECIDED_SHORT
           ) : (
-            "No Shorts in period"
+            `No ${unitPlural} in period`
           )}
         </span>
       ) : null}

@@ -84,3 +84,54 @@ describe("the '…' menu on a niche card", () => {
     expect(nichesPage).not.toContain("DollarSign");
   });
 });
+
+/**
+ * =========================================================================
+ * THE CREATE-NICHE FORM COLLECTS A WHOLE RULE, OR NONE OF ONE
+ * =========================================================================
+ *
+ * A hit is a view count reached WITHIN A WINDOW. The form offered only the
+ * count, so the one priced niche it could produce was a niche that scores
+ * nothing: the overview then read "Not configured" over it, correctly and
+ * bafflingly, moments after somebody configured it. The success toast made it
+ * worse by announcing "A hit in GTA is 100,000 views" — a claim with no clock
+ * in it.
+ *
+ * Source-read for the same reason as the menu above: there is no DOM in this
+ * runner, and every one of these is a line somebody could drop while tidying
+ * the form without the diff looking like a behaviour change.
+ */
+describe("creating a niche with a hit rule", () => {
+  it("collects the window, not just the view count", () => {
+    expect(nichesPage).toContain("windowInput");
+    expect(nichesPage).toContain("hitWindowHours");
+  });
+
+  /**
+   * The presets are format-aware — a Long Form window is measured in different
+   * units of patience from a Shorts one — and the page already knows which
+   * side it is mounted on.
+   */
+  it("offers the format's own window presets", () => {
+    expect(nichesPage).toContain("hitWindowPresetsFor(format)");
+  });
+
+  /**
+   * BOTH HALVES OR NEITHER. Half a rule is not a partially configured niche,
+   * it is a niche that silently reports no hit rate — so the form refuses it
+   * rather than saving it. Leaving both empty stays allowed: an admin who does
+   * not know the numbers yet still gets their niche.
+   */
+  it("refuses half a rule before it sends anything", () => {
+    expect(nichesPage).toContain(
+      "(hitThreshold === undefined) !== (hitWindowHours === undefined)",
+    );
+  });
+
+  /** The toast reads the saved row's BOTH halves before it claims a rule. */
+  it("only announces a rule the niche actually has", () => {
+    expect(nichesPage).toContain(
+      "niche.hitThreshold === null || niche.hitWindowHours === null",
+    );
+  });
+});

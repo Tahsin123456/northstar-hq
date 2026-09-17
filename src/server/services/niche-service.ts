@@ -43,7 +43,7 @@
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db";
-import { errors } from "@/server/errors";
+import { errors, toAppError } from "@/server/errors";
 import { actorCan, requireActor } from "@/server/auth/dal";
 import { requireFormat, resolveAllowedFormats } from "@/server/auth/format-scope";
 import {
@@ -63,7 +63,10 @@ import {
 import { toNicheDTO } from "@/server/mappers";
 import type { NicheDTO } from "@/lib/dto";
 import { getCurrentOrgId, getScope } from "./user-service";
-import { reevaluateHitsForNiche } from "./hit-evaluation-service";
+import {
+  evaluateHitsForOrganization,
+  reevaluateHitsForNiche,
+} from "./hit-evaluation-service";
 
 /**
  * The columns needed to name a niche's author.
@@ -675,10 +678,15 @@ export async function setChannelNiches(
 
   const tracking = await prisma.trackedChannel.findFirst({
     where: { organizationId, channelId },
-    select: { id: true },
+    // The existing filings are read so the re-judge below can cover the niches
+    // this channel is LEAVING as well as the ones it joins: a video unfiled
+    // from the niche that judged it is now governed by a different rule, or by
+    // none, and its stored verdict answers a question nobody is asking.
+    select: { id: true, niches: { select: { nicheId: true } } },
   });
   if (!tracking) throw errors.notFound("channel");
 
+  const before = tracking.niches.map((row) => row.nicheId);
   const unique = [...new Set(nicheIds)];
 
   if (unique.length > 0) {
@@ -737,6 +745,48 @@ export async function setChannelNiches(
         ]
       : []),
   ]);
+
+  await rejudgeAfterFiling(organizationId, [...before, ...unique]);
+}
+
+/**
+ * Judge this channel's videos against the rule that now governs them.
+ *
+ * WHY FILING HAS TO TRIGGER THIS. A verdict is stored per video, decided under
+ * the rule of the niche the channel is filed in — so until a channel is filed,
+ * no rule reaches its videos and no verdict row exists. Nothing used to run
+ * here: only a rule EDIT re-judged anything, and the hourly sweep picked the
+ * rest up whenever it next came round.
+ *
+ * The consequence was a screen that contradicted itself. `resolveHitDisplayState`
+ * reads "no verdicts, nothing pending" as "notConfigured" — the niche is
+ * missing a threshold or a window — because from the stored data that is
+ * exactly what it looks like. So an admin who created a niche with a complete
+ * rule and filed a channel under it was told, on the overview, that the rule
+ * they had just set did not exist, and stayed told for up to an hour.
+ *
+ * CONTAINED, NEVER FATAL, for the reason the sweep's own step gives: the
+ * filing is the thing the caller asked for and it has already happened. A
+ * lock on `video_hit_evaluations` must not turn a successful filing into an
+ * error the user sees, and the next sweep re-decides everything this missed —
+ * that is what idempotence buys. The cost of failure here is the delay that
+ * used to be the normal case.
+ */
+async function rejudgeAfterFiling(
+  organizationId: string,
+  nicheIds: readonly string[],
+): Promise<void> {
+  const unique = [...new Set(nicheIds)];
+  if (unique.length === 0) return;
+  try {
+    await evaluateHitsForOrganization(organizationId, { nicheIds: unique });
+  } catch (caught) {
+    const appError = toAppError(caught);
+    console.error(
+      `[niches] re-judge after filing failed for organization ${organizationId}: ` +
+        `${appError.code} — ${appError.message}`,
+    );
+  }
 }
 
 /**
@@ -796,6 +846,13 @@ export async function addChannelNiches(
   await prisma.trackedChannelNiche.createMany({
     data: missing.map((nicheId) => ({ trackedChannelId: tracking.id, nicheId })),
   });
+
+  // The videos this channel already has are now governed by these niches'
+  // rules, and nothing has judged them against those rules yet — see
+  // `rejudgeAfterFiling` for why the screen reads that absence as "the rule is
+  // not configured" rather than "not judged yet".
+  await rejudgeAfterFiling(organizationId, missing);
+
   return { filed: missing.length };
 }
 

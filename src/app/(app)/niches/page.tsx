@@ -70,11 +70,15 @@ import { EM_DASH, formatCompactNumber, formatNumber, formatPercent } from "@/lib
 import { channelHref } from "@/lib/channel-href";
 import {
   EMPLOYEE_HIT_RULE_NOTICE,
+  MAX_HIT_WINDOW_HOURS,
   MAX_THRESHOLD,
+  MIN_HIT_WINDOW_HOURS,
   MIN_THRESHOLD,
   THRESHOLD_PRESETS,
   UNCONFIGURED_RULE_SHORT,
+  hitWindowPresetsFor,
 } from "@/lib/analytics/constants";
+import { formatHitWindow } from "@/lib/analytics/hit-rate";
 import { cn } from "@/lib/utils";
 
 /**
@@ -706,6 +710,19 @@ function CreateNicheDialog({
 function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
   const [name, setName] = React.useState("");
   const [thresholdInput, setThresholdInput] = React.useState("");
+  /*
+   * THE OTHER HALF OF THE RULE, which this form did not collect.
+   *
+   * A hit is a bar reached WITHIN A WINDOW and a niche needs both halves
+   * before it can score anything. This form offered only the view count, so
+   * the single thing it could produce for a priced niche was a niche that
+   * scores nothing — and then said "A hit in GTA is 100,000 views", which is
+   * not true without a clock. On the overview that niche reads "Not
+   * configured", correctly but bafflingly, right after somebody configured it.
+   *
+   * The server has accepted `hitWindowHours` on create all along.
+   */
+  const [windowInput, setWindowInput] = React.useState("");
   // Production by default, deliberately: it is the inclusive answer, and a
   // niche that defaulted to watchlist would drop its channels out of the
   // portfolio hit rate the moment somebody created one.
@@ -747,6 +764,35 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
       }
     }
 
+    let hitWindowHours: number | undefined;
+    if (canConfigure) {
+      const cleaned = windowInput.replace(/[,\s_]/g, "");
+      if (cleaned) {
+        const parsed = Number(cleaned);
+        if (
+          !Number.isFinite(parsed) ||
+          parsed < MIN_HIT_WINDOW_HOURS ||
+          parsed > MAX_HIT_WINDOW_HOURS
+        ) {
+          setError(
+            `Enter a window between ${MIN_HIT_WINDOW_HOURS} and ${MAX_HIT_WINDOW_HOURS} hours, or leave it empty.`,
+          );
+          return;
+        }
+        hitWindowHours = Math.trunc(parsed);
+      }
+      // Half a rule scores nothing, so it is refused here rather than saved as
+      // a niche that silently reports no hit rate. Neither half is required —
+      // an admin who does not know the numbers yet creates the niche with
+      // both empty — but one without the other is a rule that cannot work.
+      if ((hitThreshold === undefined) !== (hitWindowHours === undefined)) {
+        setError(
+          "A hit needs both a view count and a window. Fill in both, or leave both empty and set them later.",
+        );
+        return;
+      }
+    }
+
     // The key is absent, not null, when there is no threshold to send. The
     // server treats a present `hitThreshold` — null included — as a threshold
     // write and refuses it without `settings.manage`. `kind` rides on
@@ -756,15 +802,20 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
         name: trimmed,
         kind,
         ...(hitThreshold === undefined ? {} : { hitThreshold }),
+        ...(hitWindowHours === undefined ? {} : { hitWindowHours }),
         ...(format === "longform" ? { format } : {}),
       },
       {
         onSuccess: ({ niche }) => {
           toast.success(`Niche “${niche.name}” created`, {
+            // BOTH HALVES DECIDE THE SENTENCE. It used to check the threshold
+            // alone, so a niche with a bar and no clock — the only priced
+            // niche this form could make — was announced as "A hit is 100,000
+            // views" and then reported no hit rate at all.
             description:
-              niche.hitThreshold === null
-                ? "No complete hit rule yet — a hit needs both a view threshold and a window — so no hit rate is reported for it."
-                : `A hit in ${niche.name} is ${formatCompactNumber(niche.hitThreshold)} views.`,
+              niche.hitThreshold === null || niche.hitWindowHours === null
+                ? "No complete hit rule yet — a hit needs both a view count and a window — so no hit rate is reported for it."
+                : `A hit in ${niche.name} is ${formatCompactNumber(niche.hitThreshold)} views within ${formatHitWindow(niche.hitWindowHours)}.`,
           });
           onOpenChange(false);
         },
@@ -872,6 +923,46 @@ function CreateNicheForm({ onOpenChange }: { onOpenChange: (open: boolean) => vo
                   )}
                 >
                   ≥ {formatCompactNumber(preset)}
+                </button>
+              ))}
+            </div>
+
+            <Label htmlFor="niche-hit-window" className="mt-2">
+              Within
+            </Label>
+            <Input
+              id="niche-hit-window"
+              inputMode="numeric"
+              placeholder="e.g. 168"
+              value={windowInput}
+              invalid={Boolean(error)}
+              onChange={(event) => {
+                setWindowInput(event.target.value);
+                setError(null);
+              }}
+            />
+            <FieldHint>
+              How long a {format === "shorts" ? "Short" : "video"} has to reach
+              that number, in hours. Both halves or neither — a bar with no clock
+              scores nothing.
+            </FieldHint>
+            <div className="flex flex-wrap gap-1.5">
+              {hitWindowPresetsFor(format).map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => {
+                    setWindowInput(String(preset));
+                    setError(null);
+                  }}
+                  className={cn(
+                    "tnum rounded-md border px-2 py-1 text-[12px] font-medium transition-colors",
+                    Number(windowInput) === preset
+                      ? "border-accent bg-accent-subtle text-foreground"
+                      : "border-border text-muted-foreground hover:border-border-strong hover:text-foreground",
+                  )}
+                >
+                  {formatHitWindow(preset)}
                 </button>
               ))}
             </div>
