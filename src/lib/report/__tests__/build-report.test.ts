@@ -137,7 +137,6 @@ function dataset(channels: DatasetDTO["channels"]): DatasetDTO {
     viewsDefinition: {
       canComputeViewsInPeriod: false,
       snapshotSpanHours: 0,
-      snapshotCount: 0,
       snapshotDays: 0,
     },
     lookbackDays: 400,

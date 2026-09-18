@@ -620,7 +620,6 @@ model Video {
 
   @@index([channelId, publishedAt])
   @@index([channelId, isShort, publishedAt])
-  @@index([channelId, isShort, viewCount])
   /// The long-form read path. Long Form selects on `classification` alone —
   /// `"not_short"`, never `NOT isShort`, because `isShort: false` also covers
   /// videos the classifier could not resolve — so it needs the classification
@@ -667,6 +666,20 @@ model VideoSnapshot {
   /// plain [videoId, capturedAt] index, which this serves identically.
   @@unique([videoId, capturedAt])
   @@index([capturedAt])
+  /// THE HIT EVALUATOR'S READ, which had no index on the column it filters.
+  ///
+  /// It asks for "every reading of these videos taken no later than hour N of
+  /// the video's life" — `videoId IN (…) AND videoAgeHours <= N`. The unique
+  /// above seeks on `videoId` and then hands back every reading that video has
+  /// ever had, for the window filter to throw most of them away in memory. On
+  /// the largest table in the schema, on the query that runs for every video of
+  /// every channel on every sweep, that is the difference between reading the
+  /// rows that can decide something and reading all of them.
+  ///
+  /// `viewCount` rides along as the third column so the index COVERS the read:
+  /// the two filtered columns plus the only value selected, so Postgres can
+  /// answer from the index alone and never touch the heap.
+  @@index([videoId, videoAgeHours, viewCount])
   @@map("video_snapshots")
 }
 
@@ -1955,8 +1968,12 @@ model VideoHitEvaluation {
   windowClosesAt DateTime?
   evaluatedAt    DateTime  @default(now())
 
+  /// The only shape anything reads: organization plus video. Every call site
+  /// — the dataset join, the evaluator's existing-row lookup, and both payroll
+  /// reads — filters on exactly this pair, which is why the two indexes that
+  /// used to sit here (on `outcome` and on `windowClosesAt`) were dropped:
+  /// no query filtered on either column, and both were being maintained on
+  /// every verdict write of every sweep.
   @@unique([organizationId, videoId])
-  @@index([organizationId, outcome])
-  @@index([organizationId, windowClosesAt])
   @@map("video_hit_evaluations")
 }

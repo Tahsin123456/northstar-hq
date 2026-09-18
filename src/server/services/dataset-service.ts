@@ -523,8 +523,20 @@ export async function getViewsDefinition() {
   const organizationId = await getCurrentOrgId();
   const where = snapshotsVisibleTo(organizationId);
 
-  const [count, first, last] = await Promise.all([
-    prisma.videoSnapshot.count({ where }),
+  /*
+   * TWO LOOKUPS, NOT THREE. There used to be a `count()` here as well, and it
+   * was an unbounded COUNT(*) over the largest table in the schema — one row
+   * per video per sync, growing forever — running on EVERY dataset load, which
+   * is to say after every mutation, to feed one hover tooltip.
+   *
+   * Nothing needed the number. It was read exactly once, three lines below, to
+   * ask whether it was zero — and `first` already answers that: no earliest
+   * snapshot means no snapshots. The count left the payload with it rather
+   * than being replaced by an estimate, because a fabricated figure on a
+   * screen about how much history exists would be the one lie this endpoint
+   * is written to avoid telling.
+   */
+  const [first, last] = await Promise.all([
     prisma.videoSnapshot.findFirst({
       where,
       orderBy: { capturedAt: "asc" },
@@ -547,7 +559,6 @@ export async function getViewsDefinition() {
   return {
     canComputeViewsInPeriod: spanHours >= 24 * 7,
     snapshotSpanHours: spanHours,
-    snapshotCount: count,
-    snapshotDays: count === 0 ? 0 : snapshotDays,
+    snapshotDays: first === null ? 0 : snapshotDays,
   };
 }

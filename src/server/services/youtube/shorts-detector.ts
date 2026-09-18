@@ -351,6 +351,23 @@ export interface DetectionOptions {
   readonly probeEnabled?: boolean;
   readonly concurrency?: number;
   readonly timeoutMs?: number;
+  /**
+   * Epoch ms after which no further probe may START.
+   *
+   * THE ONLY AGGREGATE BOUND ON THIS FUNCTION. `timeoutMs` caps a single
+   * probe; nothing capped the batch, and on a channel's FIRST sync the batch
+   * is every video it has — up to 2,000 — at six at a time. A request that
+   * awaited this could therefore run for the better part of an hour, and the
+   * one a person is actually staring at (adding a channel) was killed by the
+   * platform at 300 seconds.
+   *
+   * PAST THE DEADLINE IS NOT AN ERROR. The remaining videos are classified
+   * from duration and aspect ratio alone — the identical path a disabled or
+   * timed-out probe already takes — so they land as `uncertain` rather than
+   * wrong, and `syncChannel` re-probes exactly those on the next pass. The
+   * cost of running out of time is a slower answer, never a false one.
+   */
+  readonly deadlineMs?: number;
 }
 
 export interface VideoClassification extends ClassificationResult {
@@ -417,8 +434,18 @@ export async function classifyVideos(
   }
 
   if (needsProbe.length > 0) {
+    /*
+     * Checked per video rather than once up front, because the deadline is
+     * about elapsed time and the queue drains while it elapses: the first
+     * hundred probes may all fit and the rest not. A video skipped here gets
+     * `probe: null` below, which is the same input `classifyFromSignals`
+     * receives when a probe times out.
+     */
+    const outOfTime = () =>
+      options.deadlineMs !== undefined && Date.now() >= options.deadlineMs;
+
     const outcomes = await mapWithConcurrency(needsProbe, concurrency, (video) =>
-      probeShortsUrl(video.videoId, options.timeoutMs),
+      outOfTime() ? Promise.resolve(null) : probeShortsUrl(video.videoId, options.timeoutMs),
     );
 
     needsProbe.forEach((video, index) => {

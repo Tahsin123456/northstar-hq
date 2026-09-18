@@ -6,6 +6,16 @@ import { addChannel, listTrackedChannels } from "@/server/services/channel-servi
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+/**
+ * A ceiling of its own, rather than the platform's 300-second default.
+ *
+ * This route ran for the full 300 and was killed, on the one request a person
+ * waits in front of. The work inside it is now bounded — see `addChannel`'s
+ * classification budget — and this is the backstop: matching the manual
+ * refresh route, which caps the same `syncChannel` work at 120 seconds and
+ * always did.
+ */
+export const maxDuration = 120;
 
 const addChannelSchema = z.object({
   input: z

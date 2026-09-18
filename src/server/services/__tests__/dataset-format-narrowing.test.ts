@@ -37,7 +37,6 @@ const mocks = vi.hoisted(() => ({
   trackedFindMany: vi.fn(),
   trackedFindFirst: vi.fn(),
   videoFindMany: vi.fn(),
-  snapshotCount: vi.fn(),
   snapshotFindFirst: vi.fn(),
   visibleNiches: null as unknown,
   listNiches: vi.fn(),
@@ -51,7 +50,6 @@ vi.mock("@/server/db", () => ({
     },
     video: { findMany: mocks.videoFindMany },
     videoSnapshot: {
-      count: mocks.snapshotCount,
       findFirst: mocks.snapshotFindFirst,
     },
   },
@@ -128,7 +126,6 @@ beforeEach(() => {
   mocks.visibleNiches = null;
   mocks.trackedFindMany.mockResolvedValue([]);
   mocks.listNiches.mockResolvedValue([]);
-  mocks.snapshotCount.mockResolvedValue(0);
   mocks.snapshotFindFirst.mockResolvedValue(null);
   mocks.videoFindMany.mockResolvedValue([]);
   mocks.trackedFindFirst.mockResolvedValue({ id: "row_1" });

@@ -884,7 +884,6 @@ export interface ViewsDefinitionDTO {
   readonly canComputeViewsInPeriod: boolean;
   /** Hours of snapshot history collected so far. */
   readonly snapshotSpanHours: number;
-  readonly snapshotCount: number;
   /** Distinct days on which snapshots were captured. */
   readonly snapshotDays: number;
 }

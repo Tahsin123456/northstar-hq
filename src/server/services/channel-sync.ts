@@ -115,6 +115,20 @@ export interface SyncOptions {
    */
   readonly longformWindowHours?: number | null;
   readonly trigger?: "manual" | "auto" | "initial";
+  /**
+   * Epoch ms after which the run stops spending time on Shorts classification.
+   *
+   * WHY ONLY CLASSIFICATION. The playlist walk is already bounded by
+   * `maxPages` and the statistics calls by the page count it produces; the
+   * probe was the only step whose cost scaled with the channel's whole library
+   * and had no aggregate ceiling. An interactive caller sets this so the
+   * request cannot outlive the platform's own limit — see `addChannel`, whose
+   * POST was being killed at 300 seconds.
+   *
+   * Absent means no deadline, which is what the hourly sweep wants: it is
+   * bounded between channels by its own budget and nobody is waiting on it.
+   */
+  readonly deadlineMs?: number;
   /** Re-run classification even for already-confident videos. */
   readonly forceReclassify?: boolean;
   /**
@@ -398,6 +412,7 @@ export async function syncChannel(
 
     const classifications = await classifyVideos(needsClassification, {
       probeEnabled: options.probeEnabled,
+      deadlineMs: options.deadlineMs,
     });
     counters.shortsClassified = classifications.size;
 

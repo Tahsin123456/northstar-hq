@@ -185,6 +185,17 @@ const TRACKED_WITH_NICHES = {
 } as const;
 
 /**
+ * How long a first sync may spend classifying before it settles for what
+ * duration and aspect ratio can tell it.
+ *
+ * Sized against the route's own `maxDuration` of 120 seconds, not the
+ * platform default: the walk, the statistics calls, the writes and the hit
+ * evaluation all have to fit in what is left, and a request that returns
+ * slightly under-classified beats one the platform kills outright.
+ */
+const INITIAL_SYNC_CLASSIFY_BUDGET_MS = 45_000;
+
+/**
  * Which side of the operation an add is being made from, refused if the
  * caller has no business on it.
  *
@@ -328,12 +339,25 @@ export async function addChannel(
     await addChannelNiches(channelRow.id, options.nicheIds);
   }
 
-  // Pull history immediately: a channel that appears in the tracker with no
-  // numbers reads as broken, even though it is only unsynced.
-  const sync = await syncChannel(
-    channelRow.id,
-    await syncOptionsForCurrentOrg(channelRow.id, "initial"),
-  );
+  /*
+   * Pull history immediately: a channel that appears in the tracker with no
+   * numbers reads as broken, even though it is only unsynced.
+   *
+   * ON A DEADLINE, because this is the one sync a person waits on. A first
+   * sync classifies EVERY video the channel has, and Shorts classification
+   * probes each one over the network; with no aggregate bound that ran past
+   * the platform's 300-second ceiling and the POST died with a 504 — the
+   * channel added, the roster not updated, and nothing to show for the wait.
+   *
+   * Videos the deadline cuts off are classified from duration and aspect ratio
+   * instead of the probe, which lands them as "uncertain" — and `syncChannel`
+   * re-probes exactly the uncertain ones next time, so the hourly sweep
+   * finishes the job. A slower answer, never a wrong one.
+   */
+  const sync = await syncChannel(channelRow.id, {
+    ...(await syncOptionsForCurrentOrg(channelRow.id, "initial")),
+    deadlineMs: Date.now() + INITIAL_SYNC_CLASSIFY_BUDGET_MS,
+  });
 
   /*
    * JUDGE NOW THE VIDEOS EXIST — the other half of the filing above.
